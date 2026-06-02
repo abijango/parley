@@ -176,7 +176,6 @@ final class FluidAudioEngine: TranscriptionEngine {
     func start(micRing: AudioRingBuffer, systemRing: AudioRingBuffer, startElapsed: TimeInterval) {
         let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
         let clusterThreshold = Float(settings.diarizationThreshold)
-        let sens = settings.turnSensitivity
         loadTask = Task { [weak self] in
             do {
                 let models = try await AsrModels.downloadAndLoad(version: version)
@@ -184,8 +183,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                 try await self?.asr.startStreaming()
                 AppLog.log("FluidAudio engine ready — Parakeet \(version) sliding-window streaming", category: "record")
                 self?.beginConsumingAndMixing(micRing: micRing, systemRing: systemRing,
-                                              startElapsed: startElapsed, clusterThreshold: clusterThreshold,
-                                              minSpeechDuration: sens.minSpeechDuration, minSilenceGap: sens.minSilenceGap)
+                                              startElapsed: startElapsed, clusterThreshold: clusterThreshold)
             } catch {
                 AppLog.log("FluidAudio engine failed to start: \(error.localizedDescription); capturing audio only (archive preserved)", category: "record")
             }
@@ -205,8 +203,7 @@ final class FluidAudioEngine: TranscriptionEngine {
     // MARK: - Consume updates + feed mixed audio
 
     private func beginConsumingAndMixing(micRing: AudioRingBuffer, systemRing: AudioRingBuffer,
-                                         startElapsed: TimeInterval, clusterThreshold: Float,
-                                         minSpeechDuration: Float, minSilenceGap: Float) {
+                                         startElapsed: TimeInterval, clusterThreshold: Float) {
         streamStart = Date()
 
         updatesTask = Task { [weak self] in
@@ -244,9 +241,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         // Diarize in ~10s chunks on a long-lived DiarizerManager so in-session
         // speaker ids stay consistent; rebase each chunk's times by its start offset.
         diarTask = Task.detached { [weak self] in
-            guard let diar = try? await Self.makeDiarizer(clusterThreshold: clusterThreshold,
-                                                          minSpeechDuration: minSpeechDuration,
-                                                          minSilenceGap: minSilenceGap) else {
+            guard let diar = try? await Self.makeDiarizer(clusterThreshold: clusterThreshold) else {
                 AppLog.log("FluidAudio diarizer failed to initialize — transcript will have no speaker labels", category: "record")
                 return
             }
@@ -278,81 +273,18 @@ final class FluidAudioEngine: TranscriptionEngine {
     }
 
     /// Load diarization models and build a session-long manager (owned by the diarTask).
-    nonisolated private static func makeDiarizer(
-        clusterThreshold: Float, minSpeechDuration: Float = 0.5, minSilenceGap: Float = 0.25
-    ) async throws -> DiarizerManager {
+    nonisolated private static func makeDiarizer(clusterThreshold: Float) async throws -> DiarizerManager {
         let models = try await DiarizerModels.downloadIfNeeded()
         var config = DiarizerConfig()
         config.clusteringThreshold = clusterThreshold
-        // Turn segmentation (user-tunable via "Turn sensitivity"). Finer values split
-        // rapid back-and-forth into separate turns; the library defaults (1.0 / 0.5)
-        // merge fast dialogue into one segment that then maps to a single speaker.
-        config.minSpeechDuration = minSpeechDuration
-        config.minSilenceGap = minSilenceGap
+        // NOTE: leave the segmentation params (minSpeechDuration / minSilenceGap) at
+        // their library defaults. Lowering minSpeechDuration produced segments too
+        // short for reliable speaker embeddings, which degraded clustering (the
+        // dominant voice split in two while the quieter speaker was absorbed). This is
+        // the diarization behavior that separated speakers correctly.
         let diar = DiarizerManager(config: config)
         diar.initialize(models: models)
         return diar
-    }
-
-    /// Re-cluster ALL segment embeddings into EXACTLY `target` speakers with k-means
-    /// (cosine). Unlike merging the diarizer's clusters, this re-partitions from
-    /// scratch, so a quiet speaker's segments can be pulled out of the dominant
-    /// speaker's cluster. Deterministic farthest-point seeding. Segments without an
-    /// embedding inherit the temporally-nearest labelled segment's cluster.
-    nonisolated private static func clusterToTargetSpeakers(_ segs: [Seg], target: Int) -> [Seg] {
-        guard target >= 1 else { return segs }
-        let labelledIdx = segs.indices.filter { !segs[$0].emb.isEmpty }
-        guard labelledIdx.count > target else { return segs }
-        let embs = labelledIdx.map { normalize(segs[$0].emb) }
-
-        // Farthest-point init: longest segment first, then the point least similar to
-        // any chosen seed — spreads seeds across distinct voices.
-        var seeds: [Int] = []
-        if let firstLocal = labelledIdx.indices.max(by: {
-            (segs[labelledIdx[$0]].end - segs[labelledIdx[$0]].start)
-                < (segs[labelledIdx[$1]].end - segs[labelledIdx[$1]].start)
-        }) { seeds.append(firstLocal) }
-        while seeds.count < target {
-            var pick = 0, pickSim = Float.greatestFiniteMagnitude
-            for i in embs.indices where !seeds.contains(i) {
-                let maxSim = seeds.map { dotProduct(embs[$0], embs[i]) }.max() ?? -1
-                if maxSim < pickSim { pickSim = maxSim; pick = i }
-            }
-            seeds.append(pick)
-        }
-        var centroids = seeds.map { embs[$0] }
-        var assign = [Int](repeating: 0, count: embs.count)
-        for _ in 0..<15 {
-            var changed = false
-            for i in embs.indices {
-                var best = 0, bestSim = -Float.greatestFiniteMagnitude
-                for c in 0..<target {
-                    let s = dotProduct(centroids[c], embs[i])
-                    if s > bestSim { bestSim = s; best = c }
-                }
-                if assign[i] != best { assign[i] = best; changed = true }
-            }
-            for c in 0..<target {
-                let members = embs.indices.filter { assign[$0] == c }.map { embs[$0] }
-                if !members.isEmpty { centroids[c] = normalize(meanVector(members)) }
-            }
-            if !changed { break }
-        }
-        var clusterFor: [Int: Int] = [:]
-        for (j, origIdx) in labelledIdx.enumerated() { clusterFor[origIdx] = assign[j] }
-        func nearestCluster(_ idx: Int) -> Int {
-            let t = (segs[idx].start + segs[idx].end) / 2
-            var best = 0, bestDt = Double.greatestFiniteMagnitude
-            for li in labelledIdx {
-                let dt = abs((segs[li].start + segs[li].end) / 2 - t)
-                if dt < bestDt { bestDt = dt; best = clusterFor[li] ?? 0 }
-            }
-            return best
-        }
-        return segs.indices.map { idx in
-            let c = clusterFor[idx] ?? nearestCluster(idx)
-            return Seg(id: "\(c + 1)", start: segs[idx].start, end: segs[idx].end, emb: segs[idx].emb, q: segs[idx].q)
-        }
     }
 
     /// Pairwise cosine similarity of each speaker's mean embedding, e.g. "1~2=0.88".
@@ -475,8 +407,6 @@ final class FluidAudioEngine: TranscriptionEngine {
         let threshold = Float(settings.diarizationThreshold)
         let doAsr = settings.offlineAsrRepass || forceOfflineAsr
         let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
-        let sens = settings.turnSensitivity
-        let targetSpeakers = settings.expectedSpeakerCount
         // One detached pass: build the clean mix, resample once, then run the
         // diarizer AND (optionally) the batch ASR over the same samples.
         let pass: OfflinePassResult = await Task.detached {
@@ -488,24 +418,16 @@ final class FluidAudioEngine: TranscriptionEngine {
                 return OfflinePassResult(segs: nil, tokens: nil)
             }
             // Diarization (independent of ASR — one failing doesn't block the other).
+            // Plain whole-file diarization with library-default segmentation — the
+            // behavior that separated speakers reliably. No forced re-clustering.
             var segs: [Seg]?
-            if let diar = try? await Self.makeDiarizer(clusterThreshold: threshold,
-                                                       minSpeechDuration: sens.minSpeechDuration,
-                                                       minSilenceGap: sens.minSilenceGap),
+            if let diar = try? await Self.makeDiarizer(clusterThreshold: threshold),
                let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000) {
-                var mapped = result.segments.map {
+                let mapped = result.segments.map {
                     Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
                         end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
                 }
-                AppLog.log("finalize: raw diar \(Self.speakerBreakdown(mapped)) | sims \(Self.clusterSimilarityLog(mapped))", category: "record")
-                // "Expected speakers": re-cluster ALL segment embeddings into exactly N
-                // groups with k-means — re-partitions from scratch so a quiet speaker
-                // isn't stuck inside the dominant speaker's cluster (merging can't fix
-                // that). The similarity log tells us if the voices are even separable.
-                if targetSpeakers > 0 {
-                    mapped = Self.clusterToTargetSpeakers(mapped, target: targetSpeakers)
-                    AppLog.log("finalize: after k-means→\(targetSpeakers): \(Self.speakerBreakdown(mapped)) | sims \(Self.clusterSimilarityLog(mapped))", category: "record")
-                }
+                AppLog.log("finalize: diar \(Self.speakerBreakdown(mapped)) | sims \(Self.clusterSimilarityLog(mapped))", category: "record")
                 segs = mapped
             } else {
                 AppLog.log("finalizeDiarization: diarization unavailable (init or run failed)", category: "record")

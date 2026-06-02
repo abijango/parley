@@ -398,24 +398,6 @@ struct SettingsView: View {
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Picker("Expected speakers", selection: $settings.expectedSpeakerCount) {
-                    Text("Auto").tag(0)
-                    ForEach(2...8, id: \.self) { Text("\($0)").tag($0) }
-                }
-                .pickerStyle(.menu).frame(maxWidth: 220).disabled(recording.isRecording)
-                Text("If you know the headcount, set it — the offline pass merges any over-split voices down to exactly this many speakers. Leave on Auto when unsure.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Picker("Turn sensitivity", selection: Binding(
-                    get: { settings.turnSensitivity }, set: { settings.turnSensitivity = $0 })) {
-                    ForEach(TurnSensitivity.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented).frame(maxWidth: 320).disabled(recording.isRecording)
-                Text(settings.turnSensitivity.blurb)
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
                 Divider()
                 Text("Speaker recognition").font(.headline)
                 HStack(spacing: 10) {
