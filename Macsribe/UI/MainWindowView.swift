@@ -63,6 +63,8 @@ struct RecordDetailView: View {
     @State private var mode: WindowMode = .live
     @State private var pendingPerson: PendingPerson?
     @State private var showSpeakerReview = false
+    /// Collapsed by default — the capture picker + level meters are tucked away.
+    @AppStorage("macsribe.audioControlsExpanded") private var audioExpanded = false
 
     enum WindowMode: String, CaseIterable, Identifiable {
         case live = "Live", preview = "Preview"
@@ -169,23 +171,10 @@ struct RecordDetailView: View {
                 statusBadge
             }
 
-            HStack(spacing: 12) {
-                capturePicker
-                if settings.captureMode == .perApp { appPicker }
-                Spacer()
-                Text(settings.transcriptionEngine == .fluidAudio
-                     ? "FluidAudio · Parakeet v3"
-                     : settings.model.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            audioSection
 
             if let load = modelLoadingInfo {
                 modelLoadingBar(stage: load.stage, fraction: load.fraction)
-            }
-
-            if recording.isRecording {
-                levelMeters   // confirm both tracks are actually capturing
             }
 
             metadataFields   // editable during recording too (e.g. a mid-call joiner)
@@ -233,6 +222,44 @@ struct RecordDetailView: View {
         }
         .padding(8)
         .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Collapsible audio controls: a disclosure header (with the always-visible
+    /// engine/model label) that expands to the capture-mode picker and the live
+    /// Me/Remote level meters. Collapsed by default so the meters aren't always on screen.
+    private var audioSection: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { audioExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .rotationEffect(.degrees(audioExpanded ? 90 : 0))
+                        Text("Audio").font(.subheadline.weight(.medium))
+                    }
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text(settings.transcriptionEngine == .fluidAudio
+                     ? "FluidAudio · Parakeet v3"
+                     : settings.model.label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if audioExpanded {
+                HStack(spacing: 12) {
+                    capturePicker
+                    if settings.captureMode == .perApp { appPicker }
+                    Spacer()
+                }
+                if recording.isRecording {
+                    levelMeters   // confirm both tracks are actually capturing
+                }
+            }
+        }
     }
 
     private var levelMeters: some View {
