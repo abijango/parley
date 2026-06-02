@@ -582,6 +582,54 @@ final class RecordingController: ObservableObject {
         let mixedCaf: URL?
     }
 
+    /// On-demand speaker detection for an already-recorded call (from History).
+    /// Re-runs the offline diarization + batch-ASR pass on the session's saved audio,
+    /// rewrites the transcript with attributed text, and opens the assign-speakers
+    /// review. Reuses the live review machinery by pointing `engine`/`lastTranscriptURL`
+    /// at this item (safe — we're idle, not recording).
+    func reprocessSpeakers(forAudioPath audioPath: String?, transcript: URL,
+                           attendees: String, title: String, filing: String) {
+        guard !isRecording else { return }
+        guard let audioPath, !audioPath.isEmpty else {
+            lastResult = "No saved audio for this recording — can't detect speakers."; return
+        }
+        let micURL = URL(fileURLWithPath: audioPath)
+        let dir = micURL.deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: micURL.path) else {
+            lastResult = "The audio for this recording was deleted — can't detect speakers."; return
+        }
+
+        let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
+                                     identificationThreshold: settings.identificationThreshold)
+        fluid.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
+        fluid.mixedAudioURL = dir.appendingPathComponent("mixed.caf")
+        fluid.micArchiveURL = micURL
+        fluid.systemArchiveURL = dir.appendingPathComponent("system.caf")
+        fluid.forceOfflineAsr = true   // no streaming units exist for a saved call
+
+        // Point the review/rewrite machinery at this item.
+        engine = fluid
+        lastTranscriptURL = transcript
+        self.attendees = attendees
+        meetingTitle = title
+        destinationPath = filing
+        offlinePass = .running
+
+        Task { [weak self] in
+            guard let self else { return }
+            let summary = await fluid.finalizeDiarization()
+            self.offlinePass = .done(summary.note)
+            self.rewriteLastTranscript(reason: "history speaker detection")
+            self.store.refresh()
+            let speakers = fluid.speakerSummaries()
+            if speakers.isEmpty {
+                self.lastResult = "No speakers detected in this recording."
+            } else {
+                self.pendingSpeakerReview = SpeakerReview(speakers: speakers, mixedCaf: fluid.mixedAudioURL)
+            }
+        }
+    }
+
     /// Finish the review: clear the sheet and rewrite the just-written transcript
     /// with the (possibly newly-named) speakers + updated attendees.
     func finishSpeakerReview() {

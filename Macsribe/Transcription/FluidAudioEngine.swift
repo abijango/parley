@@ -36,6 +36,10 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Archived per-track captures (continuous, glitch-free) summed into the clean mix.
     var micArchiveURL: URL?
     var systemArchiveURL: URL?
+    /// Force the offline batch-ASR re-pass regardless of the user setting — used when
+    /// re-processing an already-recorded call from History (there are no streaming
+    /// units, so the batch pass is the only source of transcript text + timings).
+    var forceOfflineAsr = false
     // `.streaming` (11s chunks, low latency) — `.default` uses 15s chunks and
     // won't emit anything until ~15s of audio, which reads as "no transcript".
     private let asr = SlidingWindowAsrManager(config: .streaming)
@@ -430,7 +434,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         }
         let mic = micArchiveURL, sys = systemArchiveURL
         let threshold = Float(settings.diarizationThreshold)
-        let doAsr = settings.offlineAsrRepass
+        let doAsr = settings.offlineAsrRepass || forceOfflineAsr
         let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
         let sens = settings.turnSensitivity
         let targetSpeakers = settings.expectedSpeakerCount
