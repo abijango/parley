@@ -25,12 +25,13 @@ struct TokenField: NSViewRepresentable {
     func updateNSView(_ field: NSTokenField, context: Context) {
         context.coordinator.parent = self
         field.placeholderString = placeholder
-        // Never reassign objectValue while the user is actively editing: doing so
-        // ends the field editor and commits the currently-highlighted completion as
-        // a token. During a live recording, segment updates re-render this view
-        // constantly, so without this guard each re-render hijacks the in-progress
-        // keystroke (the reported "random attendee got added" bug).
-        if field.currentEditor() != nil { return }
+        // Don't reassign objectValue while there's UNCOMMITTED text in the field
+        // editor: doing so ends editing and commits the highlighted completion as a
+        // token (the "random attendee got added" bug during live re-renders). But a
+        // merely-focused, idle field (empty editor) must still accept programmatic
+        // updates — e.g. auto-identified speakers being added to attendees — so guard
+        // on in-progress text, not on focus alone.
+        if let editor = field.currentEditor(), !editor.string.isEmpty { return }
         let current = (field.objectValue as? [String]) ?? []
         if current != tokens { field.objectValue = tokens }
     }
