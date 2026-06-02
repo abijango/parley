@@ -304,6 +304,16 @@ final class FluidAudioEngine: TranscriptionEngine {
                 resolvedNames[id] = m.voiceprint.name
                 AppLog.log("FluidAudio auto-identified a speaker as \(m.voiceprint.name) (score \(String(format: "%.2f", m.score)))", category: "record")
                 onSpeakerIdentified?(m.voiceprint.name)
+                // Backfill a retained clip for a known voice that has none yet
+                // (works at the end-of-call pass, when mixed.caf is readable).
+                if m.voiceprint.audioSample == nil {
+                    let vpId = m.voiceprint.id
+                    let sid = id
+                    Task { [weak self] in
+                        guard let self, let clip = await self.repAudioSample(for: sid) else { return }
+                        self.voiceprints?.attachAudioSample(to: vpId, samples: clip)
+                    }
+                }
             }
         }
     }
@@ -430,17 +440,23 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Extract a short (<=4s) audio clip of a speaker's longest segment from the
     /// archived mixed recording — retained with the voiceprint for re-enrollment.
     func repAudioSample(for speakerId: String) async -> [Float]? {
-        guard let url = mixedAudioURL else { return nil }
+        guard let url = mixedAudioURL, FileManager.default.fileExists(atPath: url.path) else {
+            AppLog.log("repAudioSample: no mixed.caf at \(mixedAudioURL?.path ?? "nil")", category: "record"); return nil
+        }
         let segs = finalTimeline().filter { $0.speakerId == speakerId }
-        guard let rep = segs.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else { return nil }
+        guard let rep = segs.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else {
+            AppLog.log("repAudioSample: no segments for speaker \(speakerId)", category: "record"); return nil
+        }
         let start = max(0, rep.start)
         let end = min(rep.end, start + 4)
-        return await Task.detached {
+        let clip = await Task.detached { () -> [Float]? in
             guard let all = try? AudioConverter().resampleAudioFile(url) else { return nil }
             let s = Int(start * 16_000), e = min(all.count, Int(end * 16_000))
             guard s >= 0, s < e else { return nil }
             return Array(all[s..<e])
         }.value
+        AppLog.log("repAudioSample: speaker \(speakerId) → \(clip?.count ?? 0) samples [\(String(format: "%.1f–%.1fs", start, end))]", category: "record")
+        return clip
     }
 
     /// Per-speaker summaries for the review panel. The snippet text AND the

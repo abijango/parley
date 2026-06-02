@@ -100,8 +100,11 @@ struct SpeakersSettingsView: View {
     }
 
     private func playClip(_ vp: Voiceprint) {
-        guard let data = vp.audioSample else { return }
+        guard let data = vp.audioSample else {
+            AppLog.log("Speakers: \(vp.name) has no saved clip to play", category: "record"); return
+        }
         let samples = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        AppLog.log("Speakers: playing \(vp.name) clip — \(samples.count) samples (\(String(format: "%.1fs", Double(samples.count)/16000)))", category: "record")
         player.play(samples: samples)
     }
 

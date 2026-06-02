@@ -142,6 +142,8 @@ final class VoiceprintStore: ObservableObject {
         } else {
             voiceprints = []
         }
+        let withClips = voiceprints.filter { $0.audioSample != nil }.count
+        AppLog.log("Loaded \(voiceprints.count) voiceprint(s), \(withClips) with audio clip(s)", category: "model")
     }
 
     private func save() {
