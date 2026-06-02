@@ -362,8 +362,13 @@ final class RecordingController: ObservableObject {
         // Hand the capture rings to the active engine, anchored to the shared
         // timeline (0 for a fresh start, or the prior duration when resuming). The
         // engine loads its model in the background and holds audio until ready.
-        // FluidAudio archives its mixed mono stream for the final diarization + play-sample.
-        (engine as? FluidAudioEngine)?.mixedAudioURL = sessionDir.appendingPathComponent("mixed.caf")
+        // FluidAudio builds a clean mixed file from the archived tracks at stop (for
+        // the final diarization + play-sample + retained clips).
+        if let fluid = engine as? FluidAudioEngine {
+            fluid.mixedAudioURL = sessionDir.appendingPathComponent("mixed.caf")
+            fluid.micArchiveURL = micArchive
+            fluid.systemArchiveURL = systemArchive
+        }
         engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
 
         startMeterTimer()

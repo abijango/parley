@@ -30,9 +30,12 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Saved voiceprints for cross-session auto-identification (nil = no matching).
     private let voiceprints: VoiceprintStore?
     private let identificationThreshold: Double
-    /// Where to archive the mixed mono stream (for the final whole-buffer diarization
-    /// and play-sample). Set before `start()`.
+    /// Clean mixed file built at stop from the archived tracks (used for the final
+    /// diarization + play-sample + retained clips). Set before `start()`.
     var mixedAudioURL: URL?
+    /// Archived per-track captures (continuous, glitch-free) summed into the clean mix.
+    var micArchiveURL: URL?
+    var systemArchiveURL: URL?
     // `.streaming` (11s chunks, low latency) — `.default` uses 15s chunks and
     // won't emit anything until ~15s of audio, which reads as "no transcript".
     private let asr = SlidingWindowAsrManager(config: .streaming)
@@ -213,9 +216,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         // buffer the same samples for the diarizer.
         let asr = self.asr
         let diarRing = self.diarRing
-        let mixedURL = self.mixedAudioURL
         mixerTask = Task.detached {
-            var mixedFile: AVAudioFile? = mixedURL.flatMap { try? AVAudioFile(forWriting: $0, settings: Self.format.settings) }
             var fedSamples = 0
             var lastLogged = 0
             while !Task.isCancelled {
@@ -223,7 +224,6 @@ final class FluidAudioEngine: TranscriptionEngine {
                    let buffer = Self.makeBuffer(mixed) {
                     await asr.streamAudio(buffer)
                     mixed.withUnsafeBufferPointer { diarRing.write($0) }
-                    try? mixedFile?.write(from: buffer)   // archive the mixed stream
                     fedSamples += mixed.count
                     if fedSamples - lastLogged >= 16_000 * 5 {
                         lastLogged = fedSamples
@@ -232,7 +232,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
-            mixedFile = nil   // flush + close the archive
+            // The clean mixed.caf is built from the archived tracks at stop, not here.
         }
 
         // Diarize in ~10s chunks on a long-lived DiarizerManager so in-session
@@ -323,10 +323,14 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// on hard audio) — and replace the live labels. This is the authoritative
     /// labeling used for the final transcript and the review panel.
     func finalizeDiarization() async {
-        guard let url = mixedAudioURL, FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let url = mixedAudioURL else { return }
+        let mic = micArchiveURL, sys = systemArchiveURL
         let threshold = Float(settings.diarizationThreshold)
         struct Seg: Sendable { let id: String; let start: TimeInterval; let end: TimeInterval; let emb: [Float]; let q: Float }
         let segs: [Seg]? = await Task.detached {
+            // Build a CLEAN mixed file from the archived tracks (the live per-tick
+            // mixer is glitchy — fine for streaming ASR, bad for diarization + playback).
+            _ = Self.buildCleanMix(mic: mic, system: sys, output: url)
             guard let samples = try? AudioConverter().resampleAudioFile(url), !samples.isEmpty,
                   let diar = try? await Self.makeDiarizer(clusterThreshold: threshold),
                   let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000)
@@ -373,6 +377,27 @@ final class FluidAudioEngine: TranscriptionEngine {
         for i in 0..<rs { out[i] += sysBuf[i] }
         for i in 0..<n { out[i] = max(-1, min(1, out[i])) }   // soft clip the summed signal
         return out
+    }
+
+    /// Sum the archived mic + system tracks (both continuous from capture start) into
+    /// one clean 16 kHz mono file — no per-tick discontinuities, unlike the live mixer.
+    nonisolated private static func buildCleanMix(mic: URL?, system: URL?, output: URL) -> Bool {
+        let converter = AudioConverter()
+        func decode(_ url: URL?) -> [Float] {
+            guard let url, FileManager.default.fileExists(atPath: url.path),
+                  let samples = try? converter.resampleAudioFile(url) else { return [] }
+            return samples
+        }
+        let m = decode(mic), s = decode(system)
+        let n = max(m.count, s.count)
+        guard n > 0 else { return false }
+        var out = [Float](repeating: 0, count: n)
+        for i in 0..<m.count { out[i] += m[i] }
+        for i in 0..<s.count { out[i] += s[i] }
+        for i in 0..<n { out[i] = max(-1, min(1, out[i])) }
+        guard let buffer = makeBuffer(out),
+              let file = try? AVAudioFile(forWriting: output, settings: format.settings) else { return false }
+        do { try file.write(from: buffer); return true } catch { return false }
     }
 
     nonisolated private static func makeBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
