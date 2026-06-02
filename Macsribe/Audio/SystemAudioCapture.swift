@@ -323,6 +323,9 @@ final class SystemAudioCapture {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
+        if let archiver {
+            AppLog.log("System archive: \(archiver.framesWritten) frames written", category: "audio")
+        }
         archiver = nil
         resampler = nil
         tapFormat = nil
