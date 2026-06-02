@@ -96,8 +96,20 @@ final class FluidAudioEngine: TranscriptionEngine {
     }
 
     private func segments(for unit: ASRUnit) -> [Segment] {
-        guard !unit.tokens.isEmpty else { return [] }
-        // Group consecutive tokens by their overlapping diarized speaker.
+        guard let firstTok = unit.tokens.first, let lastTok = unit.tokens.last else { return [] }
+
+        // The volatile (in-progress) tail changes on every update, so keep it as a
+        // SINGLE row with a STABLE id — sub-splitting it would churn SwiftUI
+        // identities each update (the reported flicker). It gets properly split once
+        // it's confirmed.
+        if !unit.confirmed {
+            let spk = bestSpeaker(start: firstTok.start, end: lastTok.end)
+            return [Segment(id: unit.id, track: .remote, start: firstTok.start, end: lastTok.end,
+                            text: unit.text, confirmed: false,
+                            speakerId: spk, speakerName: spk.flatMap { resolvedNames[$0] })]
+        }
+
+        // Confirmed: split into runs of consecutive same-speaker tokens.
         var runs: [(speaker: String?, toks: [Tok])] = []
         for t in unit.tokens {
             let spk = bestSpeaker(start: t.start, end: t.end)
@@ -110,11 +122,11 @@ final class FluidAudioEngine: TranscriptionEngine {
         let singleRun = runs.count == 1
         return runs.compactMap { run -> Segment? in
             guard let first = run.toks.first, let last = run.toks.last else { return nil }
-            // Keep the exact ASR text when the whole unit is one speaker; otherwise
-            // reconstruct this run from its tokens.
             let text = singleRun ? unit.text : Self.reconstruct(run.toks.map(\.text))
             guard !text.isEmpty else { return nil }
-            let key = "\(unit.id.uuidString)#\(run.speaker ?? "_")@\(Int(first.start * 100))"
+            // Key by unit + run start only (NOT speaker): resolving a run's speaker
+            // later must not change the row identity, or it re-renders/flickers.
+            let key = "\(unit.id.uuidString)@\(Int(first.start * 100))"
             let id = runIds[key] ?? {
                 let u = UUID(); runIds[key] = u; return u
             }()
@@ -350,7 +362,10 @@ final class FluidAudioEngine: TranscriptionEngine {
             let t = elapsedNow(startElapsed)
             tokens = [Tok(text: text, start: t, end: t)]
         }
-        let unit = ASRUnit(id: UUID(), tokens: tokens, text: text, confirmed: update.isConfirmed)
+        // Reuse the volatile unit's id across updates so the in-progress row keeps a
+        // stable identity (content updates in place instead of re-creating the row).
+        let id = update.isConfirmed ? UUID() : (volatileUnit?.id ?? UUID())
+        let unit = ASRUnit(id: id, tokens: tokens, text: text, confirmed: update.isConfirmed)
         AppLog.log("FluidAudio update (\(update.isConfirmed ? "confirmed" : "volatile")): \(text.count) chars", category: "record")
         if update.isConfirmed {
             confirmedUnits.append(unit); volatileUnit = nil
