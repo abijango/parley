@@ -157,7 +157,12 @@ final class VaultDirectory: ObservableObject {
         return String(string[r])
     }
 
-    /// Appends not-yet-known people to the contacts file under a managed section.
+    /// Section for contacts with no company (matches the manual "Castlelake"-style
+    /// grouping: a plain header line followed by column-0 bullets).
+    private static let otherSection = "Other"
+
+    /// Appends not-yet-known people (bare names from the attendee list — no company
+    /// or title) under the "Other" section, as `- **Name**` at column 0.
     func addPeople(_ rawNames: [String]) {
         let known = Set(people.map { $0.lowercased() })
         let fresh = rawNames
@@ -166,20 +171,17 @@ final class VaultDirectory: ObservableObject {
         guard !fresh.isEmpty else { return }
 
         let url = settings.contactsURL
-        var contents = (try? String(contentsOf: url, encoding: .utf8)) ?? "Contacts\n"
-        let marker = "## Added by \(AppInfo.name)"   // TODO(app-name)
-        if !contents.contains(marker) { contents += "\n\n\(marker)\n" }
-        for name in fresh { contents += "    - **\(name)**\n" }
-
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? contents.write(to: url, atomically: true, encoding: .utf8)
-        AppLog.log("Added \(fresh.count) contacts to \(url.lastPathComponent)", category: "vault")
+        var lines = ((try? String(contentsOf: url, encoding: .utf8)) ?? "Contacts").components(separatedBy: "\n")
+        for name in fresh { insertContact("- **\(name)**", under: Self.otherSection, in: &lines) }
+        writeContacts(lines, to: url)
+        AppLog.log("Added \(fresh.count) contacts under \(Self.otherSection) in \(url.lastPathComponent)", category: "vault")
         refresh()
     }
 
-    /// Adds a single rich contact to the contacts file, matching the existing
-    /// format. Files it under a section header equal to `company` if one exists,
-    /// otherwise under a managed section. Then refreshes.
+    /// Adds a single rich contact, matching the manual format: a `- Name - role`
+    /// bullet at column 0 (so Markdown renders a list, not a code block). Files it
+    /// under the company's section (created if absent), or under "Other" when there's
+    /// no company. Then refreshes.
     func addPerson(name rawName: String, title rawTitle: String, company rawCompany: String, linkedin rawLink: String) {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
@@ -189,26 +191,35 @@ final class VaultDirectory: ObservableObject {
 
         let nameMD = link.isEmpty ? "**\(name)**" : "[\(name)](\(link))"
         let role = [title, company].filter { !$0.isEmpty }.joined(separator: ", ")
-        let entry = "    - \(nameMD)\(role.isEmpty ? "" : " - \(role)")"
+        let entry = "- \(nameMD)\(role.isEmpty ? "" : " - \(role)")"   // column 0 — no leading indent
+        let section = company.isEmpty ? Self.otherSection : company
 
         let url = settings.contactsURL
         var lines = ((try? String(contentsOf: url, encoding: .utf8)) ?? "Contacts").components(separatedBy: "\n")
+        insertContact(entry, under: section, in: &lines)
+        writeContacts(lines, to: url)
+        AppLog.log("Added contact \(name) under \(section) in \(url.lastPathComponent)", category: "vault")
+        refresh()
+    }
 
-        if !company.isEmpty,
-           let idx = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(company) == .orderedSame }) {
-            lines.insert(entry, at: idx + 1)           // under the company's section
+    /// Insert a contact bullet directly under a plain-text section header, creating
+    /// the section at the end of the file if it's missing. Bullets are written at
+    /// column 0 (no leading whitespace) so Markdown renders a list, not a code block.
+    private func insertContact(_ entry: String, under section: String, in lines: inout [String]) {
+        if let idx = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(section) == .orderedSame
+        }) {
+            lines.insert(entry, at: idx + 1)
         } else {
-            let marker = "## Added by \(AppInfo.name)"   // TODO(app-name)
-            if !lines.contains(where: { $0.trimmingCharacters(in: .whitespaces) == marker }) {
-                lines.append(""); lines.append(marker)
-            }
+            if let last = lines.last, !last.trimmingCharacters(in: .whitespaces).isEmpty { lines.append("") }
+            lines.append(section)
             lines.append(entry)
         }
+    }
 
+    private func writeContacts(_ lines: [String], to url: URL) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
-        AppLog.log("Added contact \(name)\(company.isEmpty ? "" : " under \(company)") to \(url.lastPathComponent)", category: "vault")
-        refresh()
     }
 
     private func loadFileCustomers() -> [String] {
