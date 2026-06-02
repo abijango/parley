@@ -14,6 +14,9 @@ import FluidAudio
 @MainActor
 final class FluidAudioEngine: TranscriptionEngine {
     private let settings: AppSettings
+    /// Saved voiceprints for cross-session auto-identification (nil = no matching).
+    private let voiceprints: VoiceprintStore?
+    private let identificationThreshold: Double
     // `.streaming` (11s chunks, low latency) — `.default` uses 15s chunks and
     // won't emit anything until ~15s of audio, which reads as "no transcript".
     private let asr = SlidingWindowAsrManager(config: .streaming)
@@ -28,6 +31,13 @@ final class FluidAudioEngine: TranscriptionEngine {
     private var streamStart: Date?
     /// Diarized speaker turns on the session timeline (speakerId + start/end seconds).
     private var diarSegments: [(speakerId: String, start: TimeInterval, end: TimeInterval)] = []
+    /// Quality-gated per-speaker embeddings + speech duration, for identification + enrollment.
+    private var speakerEmbeddings: [String: [[Float]]] = [:]
+    private var speakerGatedSeconds: [String: TimeInterval] = [:]
+    /// speakerId → resolved person name (auto-identified or manually assigned).
+    private var resolvedNames: [String: String] = [:]
+    private let minSegmentQuality: Float = 0.4
+    private let minSecondsToAutoIdentify: TimeInterval = 8
 
     // Background work.
     private var loadTask: Task<Void, Never>?
@@ -40,9 +50,13 @@ final class FluidAudioEngine: TranscriptionEngine {
         commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
 
     var onSegmentsChanged: (([Segment]) -> Void)?
+    /// Fired when a speaker is auto-identified to a saved voiceprint (the person's name).
+    var onSpeakerIdentified: ((String) -> Void)?
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, voiceprints: VoiceprintStore? = nil, identificationThreshold: Double = 0.6) {
         self.settings = settings
+        self.voiceprints = voiceprints
+        self.identificationThreshold = identificationThreshold
     }
 
     func confirmedTimeline() -> [Segment] { (seeded + confirmed).sorted { $0.start < $1.start } }
@@ -141,7 +155,9 @@ final class FluidAudioEngine: TranscriptionEngine {
                 let segs = result.segments.map {
                     (speakerId: $0.speakerId,
                      start: offset + TimeInterval($0.startTimeSeconds),
-                     end: offset + TimeInterval($0.endTimeSeconds))
+                     end: offset + TimeInterval($0.endTimeSeconds),
+                     embedding: $0.embedding,
+                     quality: $0.qualityScore)
                 }
                 guard !segs.isEmpty else { continue }
                 await self?.ingestDiarization(segs)
@@ -159,19 +175,42 @@ final class FluidAudioEngine: TranscriptionEngine {
         return diar
     }
 
-    /// Merge newly-diarized turns and re-attribute known transcript segments.
-    private func ingestDiarization(_ segs: [(speakerId: String, start: TimeInterval, end: TimeInterval)]) {
-        diarSegments.append(contentsOf: segs)
+    /// Merge newly-diarized turns, accumulate quality-gated per-speaker embeddings,
+    /// auto-identify against saved voiceprints, and re-attribute known segments.
+    private func ingestDiarization(_ segs: [(speakerId: String, start: TimeInterval, end: TimeInterval, embedding: [Float], quality: Float)]) {
+        for s in segs {
+            diarSegments.append((s.speakerId, s.start, s.end))
+            if s.quality >= minSegmentQuality, !s.embedding.isEmpty {
+                speakerEmbeddings[s.speakerId, default: []].append(s.embedding)
+                speakerGatedSeconds[s.speakerId, default: 0] += max(0, s.end - s.start)
+            }
+        }
+        autoIdentify()
         confirmed = confirmed.map(assigningSpeaker)
         if let v = volatileTail { volatileTail = assigningSpeaker(v) }
         publish()
     }
 
-    /// Return a copy of `seg` with its `speakerId` set to the diarized speaker whose
-    /// turn overlaps it most (unchanged if no diarized turn overlaps yet).
+    /// Match each not-yet-named speaker (with enough clean speech) against saved
+    /// voiceprints; on a confident match, set the name and notify (for auto-add).
+    private func autoIdentify() {
+        guard let store = voiceprints else { return }
+        for (id, embs) in speakerEmbeddings where resolvedNames[id] == nil {
+            guard (speakerGatedSeconds[id] ?? 0) >= minSecondsToAutoIdentify, embs.count >= 2 else { continue }
+            let centroid = VoiceprintStore.normalized(VoiceprintStore.mean(embs))
+            if let m = store.match(centroid, threshold: identificationThreshold) {
+                resolvedNames[id] = m.voiceprint.name
+                AppLog.log("FluidAudio auto-identified a speaker as \(m.voiceprint.name) (score \(String(format: "%.2f", m.score)))", category: "record")
+                onSpeakerIdentified?(m.voiceprint.name)
+            }
+        }
+    }
+
+    /// Return a copy of `seg` with its diarized `speakerId` (max-overlap turn) and the
+    /// resolved `speakerName` if that speaker has been identified/named.
     private func assigningSpeaker(_ seg: Segment) -> Segment {
         guard let id = bestSpeaker(start: seg.start, end: seg.end) else { return seg }
-        var s = seg; s.speakerId = id; return s
+        var s = seg; s.speakerId = id; s.speakerName = resolvedNames[id]; return s
     }
 
     private func bestSpeaker(start: TimeInterval, end: TimeInterval) -> String? {
@@ -181,6 +220,32 @@ final class FluidAudioEngine: TranscriptionEngine {
             if overlap > 0, overlap > (best?.overlap ?? 0) { best = (d.speakerId, overlap) }
         }
         return best?.id
+    }
+
+    // MARK: - Speaker naming (Phase 5)
+
+    /// Distinct diarized speaker ids seen so far (stable, sorted) — for the review panel.
+    func callSpeakerIds() -> [String] {
+        var seen = Set<String>()
+        for d in diarSegments { seen.insert(d.speakerId) }
+        return seen.sorted()
+    }
+
+    func resolvedName(for id: String) -> String? { resolvedNames[id] }
+    func gatedSeconds(for id: String) -> TimeInterval { speakerGatedSeconds[id] ?? 0 }
+
+    /// Manually assign a name to a speaker: relabel their lines and return the
+    /// speaker's centroid embedding for the caller to enroll (nil if no quality-gated
+    /// audio was captured for them yet).
+    @discardableResult
+    func setSpeakerName(_ speakerId: String, as name: String) -> [Float]? {
+        resolvedNames[speakerId] = name
+        confirmed = confirmed.map(assigningSpeaker)
+        if let v = volatileTail { volatileTail = assigningSpeaker(v) }
+        publish()
+        let embs = speakerEmbeddings[speakerId] ?? []
+        guard !embs.isEmpty else { return nil }
+        return VoiceprintStore.normalized(VoiceprintStore.mean(embs))
     }
 
     /// Drain both rings and sum sample-wise into one mono buffer.

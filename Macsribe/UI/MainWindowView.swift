@@ -118,8 +118,14 @@ struct RecordDetailView: View {
     @ViewBuilder private var content: some View {
         switch mode {
         case .live:
-            LiveTranscriptView(segments: recording.segments, isRecording: recording.isRecording)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            LiveTranscriptView(
+                segments: recording.segments,
+                isRecording: recording.isRecording,
+                people: vault.people,
+                onNameSpeaker: settings.transcriptionEngine == .fluidAudio
+                    ? { id, name in recording.nameSpeaker(id, as: name) } : nil
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .preview:
             VStack(spacing: 0) {
                 NotesActionBar(

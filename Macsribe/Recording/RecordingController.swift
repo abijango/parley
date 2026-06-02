@@ -103,7 +103,11 @@ final class RecordingController: ObservableObject {
         case .whisperKit:
             engine = WhisperKitEngine(models: models, settings: settings)
         case .fluidAudio:
-            engine = FluidAudioEngine(settings: settings)
+            let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
+                                         identificationThreshold: settings.identificationThreshold)
+            // Auto-add a recognized person to the attendees list (above threshold).
+            fluid.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
+            engine = fluid
         }
         engine.onSegmentsChanged = { [weak self] merged in
             guard let self else { return }
@@ -112,6 +116,35 @@ final class RecordingController: ObservableObject {
             self.journal?.append(confirmed: self.engine?.confirmedTimeline() ?? [])
         }
         return engine
+    }
+
+    // MARK: Speaker naming / enrollment (FluidAudio engine)
+
+    /// Name a diarized speaker: relabel their transcript lines, enroll or refine their
+    /// voiceprint (so future sessions recognise them), and add them to attendees.
+    func nameSpeaker(_ speakerId: String, as rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let fluid = engine as? FluidAudioEngine else { return }
+        let centroid = fluid.setSpeakerName(speakerId, as: name)
+        if let centroid {
+            if let existing = voiceprints.voiceprints.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                voiceprints.addSample(to: existing.id, embedding: centroid)
+            } else {
+                voiceprints.enroll(name: name, embedding: centroid)
+            }
+        } else {
+            AppLog.log("Named speaker \(speakerId) as \(name) but no quality-gated audio yet — not enrolled", category: "record")
+        }
+        addAttendeeIfAbsent(name)
+    }
+
+    /// Append a name to the comma-separated attendees list if not already present.
+    private func addAttendeeIfAbsent(_ rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let current = TranscriptWriter.splitAttendees(attendees)
+        guard !current.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) else { return }
+        attendees = current.isEmpty ? name : attendees + ", " + name
     }
 
     private var didWarmup = false
