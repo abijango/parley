@@ -508,6 +508,13 @@ private struct FluidModelSection: View {
             .padding(8)
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
 
+            if models.status == .downloaded {
+                Label("Active — used automatically while the engine is FluidAudio. Start a recording to use it.",
+                      systemImage: "checkmark.seal.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Text("Stored in \(FluidModelManager.modelsDirectory.path)")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.middle)
@@ -527,7 +534,7 @@ private struct FluidModelSection: View {
                 Text("Downloading…").font(.caption).foregroundStyle(.secondary)
             }
         case .downloaded:
-            Label("Ready", systemImage: "checkmark.circle.fill")
+            Label("Active", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green).font(.callout)
         case .failed(let msg):
             VStack(alignment: .trailing, spacing: 2) {
