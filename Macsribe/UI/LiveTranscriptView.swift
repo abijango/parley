@@ -11,6 +11,8 @@ struct LiveTranscriptView: View {
     let segments: [Segment]
     let isRecording: Bool
     var people: [String] = []
+    /// The attendees already selected for this call — shown as one-tap picks.
+    var attendees: [String] = []
     var onNameSpeaker: ((String, String) -> Void)? = nil
 
     var body: some View {
@@ -18,7 +20,7 @@ struct LiveTranscriptView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(segments) { segment in
-                        TranscriptRow(segment: segment, people: people, onNameSpeaker: onNameSpeaker)
+                        TranscriptRow(segment: segment, people: people, attendees: attendees, onNameSpeaker: onNameSpeaker)
                             .id(segment.id)
                     }
                     Color.clear.frame(height: 1).id(Self.bottomID)
@@ -54,6 +56,7 @@ struct LiveTranscriptView: View {
 private struct TranscriptRow: View {
     let segment: Segment
     let people: [String]
+    let attendees: [String]
     let onNameSpeaker: ((String, String) -> Void)?
 
     @State private var showNamer = false
@@ -92,21 +95,38 @@ private struct TranscriptRow: View {
     }
 
     private func namer(id: String, commit: @escaping (String, String) -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let d = draft.trimmingCharacters(in: .whitespaces)
+        let attendeeSet = Set(attendees.map { $0.lowercased() })
+        let matches: [String] = d.isEmpty ? [] : people.filter {
+            $0.lowercased().contains(d.lowercased())
+                && $0.caseInsensitiveCompare(d) != .orderedSame
+                && !attendeeSet.contains($0.lowercased())
+        }.prefix(5).map { $0 }
+
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Name this speaker").font(.headline)
-            TextField("Name", text: $draft)
+
+            // One-tap picks: people already selected as attendees for this call.
+            if !attendees.isEmpty {
+                Text("In this call").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(attendees, id: \.self) { name in
+                        Button(name) { commit(id, name); showNamer = false }
+                            .buttonStyle(.bordered)
+                    }
+                }
+                Divider()
+            }
+
+            Text("Other name").font(.caption).foregroundStyle(.secondary)
+            TextField("Type a name", text: $draft)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 220)
+                .frame(width: 240)
                 .onSubmit { save(id, commit) }
 
-            let matches = people.filter {
-                !draft.trimmingCharacters(in: .whitespaces).isEmpty
-                    && $0.lowercased().contains(draft.lowercased())
-                    && $0.caseInsensitiveCompare(draft) != .orderedSame
-            }.prefix(5)
             if !matches.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(matches), id: \.self) { p in
+                    ForEach(matches, id: \.self) { p in
                         Button(p) { draft = p }.buttonStyle(.plain).font(.callout)
                     }
                 }
@@ -116,11 +136,11 @@ private struct TranscriptRow: View {
                 Spacer()
                 Button("Save") { save(id, commit) }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(d.isEmpty)
             }
         }
         .padding(12)
-        .frame(width: 248)
+        .frame(width: 264)
     }
 
     private func save(_ id: String, _ commit: (String, String) -> Void) {

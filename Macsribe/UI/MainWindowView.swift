@@ -122,6 +122,7 @@ struct RecordDetailView: View {
                 segments: recording.segments,
                 isRecording: recording.isRecording,
                 people: vault.people,
+                attendees: TranscriptWriter.splitAttendees(recording.attendees),
                 onNameSpeaker: settings.transcriptionEngine == .fluidAudio
                     ? { id, name in recording.nameSpeaker(id, as: name) } : nil
             )
