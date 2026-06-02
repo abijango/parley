@@ -136,7 +136,9 @@ final class FluidAudioEngine: TranscriptionEngine {
         let start = update.tokenTimings.first.map { startElapsed + $0.startTime } ?? elapsedNow(startElapsed)
         let end = update.tokenTimings.last.map { startElapsed + $0.endTime } ?? start
         let seg = Segment(track: .remote, start: start, end: end, text: text, confirmed: update.isConfirmed)
-        AppLog.log("FluidAudio update (\(update.isConfirmed ? "confirmed" : "volatile")): \(text.prefix(60))", category: "record")
+        // Log metadata only — never transcript content (it lands in a persistent
+        // log file; meeting speech is sensitive).
+        AppLog.log("FluidAudio update (\(update.isConfirmed ? "confirmed" : "volatile")): \(text.count) chars", category: "record")
         if update.isConfirmed {
             confirmed.append(seg)
             volatileTail = nil
