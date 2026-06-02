@@ -83,6 +83,7 @@ struct RecordDetailView: View {
             Divider()
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            offlinePassBar
             Divider()
             footer
         }
@@ -434,6 +435,32 @@ struct RecordDetailView: View {
     }
 
     // MARK: Footer
+
+    /// A thin strip under the transcript showing the post-stop whole-recording
+    /// diarization pass: a spinner while it runs, then what it changed. Lingers
+    /// until the next recording starts so a fast pass is still noticed.
+    @ViewBuilder private var offlinePassBar: some View {
+        switch recording.offlinePass {
+        case .idle:
+            EmptyView()
+        case .running:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center)
+                Text("Offline Speaker Detection…").font(.caption)
+                Spacer()
+            }
+            .padding(.horizontal, 16).padding(.vertical, 6)
+            .background(.quaternary.opacity(0.35))
+        case .done(let note):
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.seal.fill").foregroundStyle(.green).font(.caption)
+                Text(note).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Spacer()
+            }
+            .padding(.horizontal, 16).padding(.vertical, 6)
+            .background(.quaternary.opacity(0.35))
+        }
+    }
 
     private var footer: some View {
         HStack {

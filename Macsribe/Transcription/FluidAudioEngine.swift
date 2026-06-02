@@ -322,8 +322,23 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// global speaker set (unlike the incremental chunks, which drift / over-split
     /// on hard audio) — and replace the live labels. This is the authoritative
     /// labeling used for the final transcript and the review panel.
-    func finalizeDiarization() async {
-        guard let url = mixedAudioURL else { return }
+    /// Result of the offline pass, surfaced to the UI so the user sees that it ran,
+    /// how long it took, and what it changed.
+    struct FinalizeSummary: Sendable {
+        let speakerCount: Int
+        let relabeled: Bool
+        let note: String
+    }
+
+    @discardableResult
+    func finalizeDiarization() async -> FinalizeSummary {
+        let startedAt = Date()
+        AppLog.log("FluidAudio offline diarization pass started…", category: "record")
+        guard let url = mixedAudioURL else {
+            await backfillClips()
+            return FinalizeSummary(speakerCount: callSpeakerIds().count, relabeled: false,
+                                   note: "Offline pass skipped — no audio")
+        }
         let mic = micArchiveURL, sys = systemArchiveURL
         let threshold = Float(settings.diarizationThreshold)
         struct Seg: Sendable { let id: String; let start: TimeInterval; let end: TimeInterval; let emb: [Float]; let q: Float }
@@ -345,8 +360,15 @@ final class FluidAudioEngine: TranscriptionEngine {
                     end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
             }
         }.value
+        // The offline pass can come back empty on quiet/hard audio. Fall back to the
+        // live (chunked) labels — but STILL retain voice clips now that mixed.caf
+        // exists (clips can't be captured mid-call, before the clean mix is built).
         guard let segs, !segs.isEmpty else {
-            AppLog.log("finalizeDiarization: no final segments — keeping live labels", category: "record"); return
+            AppLog.log("finalizeDiarization: no final segments — keeping live labels", category: "record")
+            await backfillClips()
+            let n = callSpeakerIds().count
+            return FinalizeSummary(speakerCount: n, relabeled: false,
+                                   note: "Offline pass: kept live labels · \(n) speaker\(n == 1 ? "" : "s")")
         }
         diarSegments = segs.map { ($0.id, $0.start, $0.end) }
         var emb: [String: [[Float]]] = [:]
@@ -358,8 +380,28 @@ final class FluidAudioEngine: TranscriptionEngine {
         speakerEmbeddings = emb
         speakerGatedSeconds = secs
         autoIdentify()   // re-applies known names by voice (ids may differ from the live pass)
-        publish()
-        AppLog.log("FluidAudio final diarization: \(Set(segs.map(\.id)).count) speaker(s)", category: "record")
+        publish()        // re-renders the transcript with the cleaned-up speaker labels
+        await backfillClips()
+        let n = Set(segs.map(\.id)).count
+        let elapsed = Date().timeIntervalSince(startedAt)
+        AppLog.log("FluidAudio final diarization: \(n) speaker(s) in \(String(format: "%.1fs", elapsed))", category: "record")
+        return FinalizeSummary(speakerCount: n, relabeled: true,
+                               note: "Offline Speaker Detection complete · \(n) speaker\(n == 1 ? "" : "s") · \(String(format: "%.1fs", elapsed))")
+    }
+
+    /// After stop (mixed.caf now exists), retain a short voice clip for every
+    /// resolved speaker that doesn't have one yet — covers both auto-identified
+    /// and manually-named speakers. Clips can't be captured mid-call because the
+    /// clean mixed file is only built at stop.
+    private func backfillClips() async {
+        guard let store = voiceprints else { return }
+        for (sid, name) in resolvedNames {
+            guard let vp = store.voiceprint(named: name), vp.audioSample == nil else { continue }
+            if let clip = await repAudioSample(for: sid) {
+                store.attachAudioSample(to: vp.id, samples: clip)
+                AppLog.log("Backfilled voice clip for \(name) (\(clip.count) samples)", category: "record")
+            }
+        }
     }
 
     /// The diarized speaker whose turn overlaps `[start, end]` most (nil if none yet).
@@ -406,6 +448,19 @@ final class FluidAudioEngine: TranscriptionEngine {
         var out = [Float](repeating: 0, count: n)
         for i in 0..<m.count { out[i] += m[i] }
         for i in 0..<s.count { out[i] += s[i] }
+        // A mic capture of an acoustic re-recording is often very quiet. That both
+        // makes playback inaudible AND starves the whole-file diarizer's speech
+        // detection (it returns 0 segments while the chunked live pass — catching
+        // louder bursts — finds speakers). Peak-normalize the summed mix to ~-3 dBFS
+        // so the saved file is audible and the offline pass has a strong enough
+        // signal to segment. Gain is capped so a near-silent file isn't amplified
+        // into noise.
+        var peak: Float = 0
+        for v in out { peak = max(peak, abs(v)) }
+        if peak > 0.0001 {
+            let gain = min(20, 0.7 / peak)
+            if gain > 1 { for i in 0..<n { out[i] *= gain } }
+        }
         for i in 0..<n { out[i] = max(-1, min(1, out[i])) }
         guard let buffer = makeBuffer(out),
               let file = try? AVAudioFile(forWriting: output, settings: format.settings) else { return false }

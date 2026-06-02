@@ -56,6 +56,15 @@ final class RecordingController: ObservableObject {
     /// in the "Assign speakers" sheet (nil when there's nothing to review).
     @Published var pendingSpeakerReview: SpeakerReview?
 
+    /// Progress of the post-stop whole-recording diarization pass (FluidAudio only),
+    /// surfaced as a strip at the bottom of the record screen.
+    enum OfflinePass: Equatable {
+        case idle
+        case running
+        case done(String)
+    }
+    @Published private(set) var offlinePass: OfflinePass = .idle
+
     let models = ModelManager()
     let fluidModels = FluidModelManager()
     let voiceprints = VoiceprintStore()
@@ -254,6 +263,7 @@ final class RecordingController: ObservableObject {
             meetingTitle = "Recorded call"   // fallback for the notification-Start path
         }
         state = .preparing
+        offlinePass = .idle
         segments = []
         lastResult = nil
         lastTranscriptURL = nil
@@ -478,8 +488,10 @@ final class RecordingController: ObservableObject {
         Task { [weak self] in
             await engine?.stop()
             if let fluid = engine as? FluidAudioEngine {
-                await fluid.finalizeDiarization()
+                self?.offlinePass = .running
+                let summary = await fluid.finalizeDiarization()
                 guard let self else { return }
+                self.offlinePass = .done(summary.note)
                 let speakers = fluid.speakerSummaries()
                 if !speakers.isEmpty {
                     self.pendingSpeakerReview = SpeakerReview(

@@ -45,6 +45,11 @@ final class VoiceprintStore: ObservableObject {
         return best.map { (voiceprint: $0.0, score: $0.1) }
     }
 
+    /// The saved voiceprint with this name (case-insensitive), if any.
+    func voiceprint(named name: String) -> Voiceprint? {
+        voiceprints.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
     // MARK: - Mutations (persist immediately)
 
     @discardableResult
