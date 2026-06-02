@@ -77,7 +77,7 @@ enum TranscriptionEngineKind: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .whisperKit: return "WhisperKit"
-        case .fluidAudio: return "FluidAudio (speaker ID)"
+        case .fluidAudio: return "FluidAudio"
         }
     }
     var blurb: String {
@@ -181,7 +181,7 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.captureMode) var captureModeRaw: String = CaptureMode.systemWide.rawValue
     @AppStorage(Key.model) var modelRaw: String = WhisperModel.small.rawValue
     @AppStorage(Key.computeMode) var computeModeRaw: String = ComputeMode.gpu.rawValue
-    @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.whisperKit.rawValue
+    @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.fluidAudio.rawValue
     @AppStorage(Key.parakeetVersion) var parakeetVersionRaw: String = FluidParakeetVersion.v3.rawValue
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"

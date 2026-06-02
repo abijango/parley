@@ -241,92 +241,84 @@ struct SettingsView: View {
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if settings.transcriptionEngine == .fluidAudio {
-                Picker("Parakeet model", selection: Binding(
-                    get: { settings.parakeetVersion }, set: { settings.parakeetVersion = $0 }
-                )) {
-                    ForEach(FluidParakeetVersion.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented).fixedSize()
-                .disabled(recording.isRecording)
-                Text("v3 is multilingual (default); v2 is English-only. The Whisper model below applies to the WhisperKit engine.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
             Divider()
-            Text("Active model").font(.headline)
-            Text("Bigger models are more accurate but slower and larger. The active model is used for new recordings.")
-                .font(.caption).foregroundStyle(.secondary)
 
-            VStack(spacing: 0) {
-                ForEach(WhisperModel.allCases) { model in
-                    modelRow(model)
-                    if model != WhisperModel.allCases.last { Divider() }
-                }
-            }
-            .padding(8)
-            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-            .disabled(recording.isRecording)   // never swap the model out from under a live recording
+            if settings.transcriptionEngine == .whisperKit {
+                Text("Active model").font(.headline)
+                Text("Bigger models are more accurate but slower and larger. The active model is used for new recordings.")
+                    .font(.caption).foregroundStyle(.secondary)
 
-            Text("Stored in \(AppPaths.modelsDirectory.path)")
-                .font(.caption2).foregroundStyle(.tertiary)
-                .lineLimit(1).truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            if recording.isRecording {
-                Text("Model and compute can't be changed while recording.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
-
-            Divider()
-            Text("Compute").font(.headline)
-            Picker("", selection: Binding(
-                get: { settings.computeMode }, set: { settings.computeMode = $0 }
-            )) {
-                ForEach(ComputeMode.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
-            .disabled(recording.isRecording)
-            Text(settings.computeMode.blurb)
-                .font(.caption2).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let advisory = models.memoryAdvisory {
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "memorychip").foregroundStyle(.orange)
-                    Text(advisory).font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                VStack(spacing: 0) {
+                    ForEach(WhisperModel.allCases) { model in
+                        modelRow(model)
+                        if model != WhisperModel.allCases.last { Divider() }
+                    }
                 }
                 .padding(8)
-                .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
-            }
+                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+                .disabled(recording.isRecording)   // never swap the model out from under a live recording
 
-            Divider()
-            Text("Memory").font(.headline)
-            Toggle("Unload the model when idle to free memory", isOn: $settings.idleUnloadEnabled)
-            if settings.idleUnloadEnabled {
-                HStack(spacing: 8) {
-                    Stepper("Unload after \(Int(settings.idleUnloadMinutes)) min idle",
-                            value: $settings.idleUnloadMinutes, in: 1...60, step: 1)
-                        .fixedSize()
-                }
-            }
-            Text("Reclaims the model's memory after inactivity. It reloads on the next detected call or recording — capture starts immediately and the transcript catches up once the model finishes loading.")
-                .font(.caption2).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-            HStack {
-                Text("If transcription crashes on load, the compiled-model cache may be corrupt.")
+                Text("Stored in \(AppPaths.modelsDirectory.path)")
                     .font(.caption2).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer()
-                Button("Reset model cache") {
-                    ModelManager.clearCompiledCache()
-                    Task { await models.prepare(settings.model) }
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if recording.isRecording {
+                    Text("Model and compute can't be changed while recording.")
+                        .font(.caption2).foregroundStyle(.tertiary)
                 }
+
+                Divider()
+                Text("Compute").font(.headline)
+                Picker("", selection: Binding(
+                    get: { settings.computeMode }, set: { settings.computeMode = $0 }
+                )) {
+                    ForEach(ComputeMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
                 .disabled(recording.isRecording)
+                Text(settings.computeMode.blurb)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let advisory = models.memoryAdvisory {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "memorychip").foregroundStyle(.orange)
+                        Text(advisory).font(.caption2).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(8)
+                    .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+                }
+
+                Divider()
+                Text("Memory").font(.headline)
+                Toggle("Unload the model when idle to free memory", isOn: $settings.idleUnloadEnabled)
+                if settings.idleUnloadEnabled {
+                    HStack(spacing: 8) {
+                        Stepper("Unload after \(Int(settings.idleUnloadMinutes)) min idle",
+                                value: $settings.idleUnloadMinutes, in: 1...60, step: 1)
+                            .fixedSize()
+                    }
+                }
+                Text("Reclaims the model's memory after inactivity. It reloads on the next detected call or recording — capture starts immediately and the transcript catches up once the model finishes loading.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                HStack {
+                    Text("If transcription crashes on load, the compiled-model cache may be corrupt.")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Reset model cache") {
+                        ModelManager.clearCompiledCache()
+                        Task { await models.prepare(settings.model) }
+                    }
+                    .disabled(recording.isRecording)
+                }
+            } else {
+                FluidModelSection(models: recording.fluidModels, isRecording: recording.isRecording)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -486,6 +478,61 @@ struct SettingsView: View {
                     .font(.system(.caption, design: .monospaced))
                     .frame(height: 120)
                     .border(.quaternary)
+            }
+        }
+    }
+}
+
+/// The Active-model section shown when the FluidAudio engine is selected: the
+/// Parakeet speech model with its download / ready state (replaces the Whisper
+/// model list, which doesn't apply to this engine).
+private struct FluidModelSection: View {
+    @ObservedObject var models: FluidModelManager
+    let isRecording: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Speech model").font(.headline)
+            Text("FluidAudio runs Parakeet on-device for transcription, plus diarization and speaker identification.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Parakeet TDT 0.6b v3 (multilingual)").font(.body.weight(.semibold))
+                    Text("Streaming on-device ASR. Downloads on first use.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                statusControl
+            }
+            .padding(8)
+            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+
+            Text("Stored in \(FluidModelManager.modelsDirectory.path)")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { models.refreshPresence() }
+    }
+
+    @ViewBuilder private var statusControl: some View {
+        switch models.status {
+        case .unknown, .notDownloaded:
+            Button("Download") { models.download() }.disabled(isRecording)
+        case .downloading:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Downloading…").font(.caption).foregroundStyle(.secondary)
+            }
+        case .downloaded:
+            Label("Ready", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green).font(.callout)
+        case .failed(let msg):
+            VStack(alignment: .trailing, spacing: 2) {
+                Button("Retry") { models.download() }.disabled(isRecording)
+                Text(msg).font(.caption2).foregroundStyle(.red).lineLimit(2)
             }
         }
     }

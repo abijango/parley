@@ -53,6 +53,7 @@ final class RecordingController: ObservableObject {
     @Published var manualNotes: String = ""
 
     let models = ModelManager()
+    let fluidModels = FluidModelManager()
     let vault = VaultDirectory()
     let notes = NotesGenerator()
     let store = TranscriptStore()
@@ -185,8 +186,15 @@ final class RecordingController: ObservableObject {
 
     /// Loads (and on first run downloads) the model in the background so the
     /// first Start is instant instead of paying cold-start latency at record time.
+    /// Engine-aware: only the WhisperKit path uses `ModelManager`; the FluidAudio
+    /// engine loads its own model at record time (we just check presence here).
     func preloadModel() {
-        Task { _ = await models.prepare(settings.model) }
+        switch settings.transcriptionEngine {
+        case .whisperKit:
+            Task { _ = await models.prepare(settings.model) }
+        case .fluidAudio:
+            fluidModels.refreshPresence()
+        }
     }
 
     // MARK: Start / stop
