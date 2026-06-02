@@ -158,7 +158,9 @@ struct RecordDetailView: View {
                 capturePicker
                 if settings.captureMode == .perApp { appPicker }
                 Spacer()
-                Text(settings.model.label)
+                Text(settings.transcriptionEngine == .fluidAudio
+                     ? "FluidAudio · Parakeet v3"
+                     : settings.model.label)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

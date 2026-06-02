@@ -15,7 +15,9 @@ import FluidAudio
 @MainActor
 final class FluidAudioEngine: TranscriptionEngine {
     private let settings: AppSettings
-    private let asr = SlidingWindowAsrManager()
+    // `.streaming` (11s chunks, low latency) — `.default` uses 15s chunks and
+    // won't emit anything until ~15s of audio, which reads as "no transcript".
+    private let asr = SlidingWindowAsrManager(config: .streaming)
 
     // Timeline state (main actor).
     private var seeded: [Segment] = []
@@ -88,10 +90,17 @@ final class FluidAudioEngine: TranscriptionEngine {
         // treated as silence for the gap (e.g. muted mic, or no system audio).
         let asr = self.asr
         mixerTask = Task.detached {
+            var fedSamples = 0
+            var lastLogged = 0
             while !Task.isCancelled {
                 if let mixed = Self.mix(mic: micRing, system: systemRing), !mixed.isEmpty,
                    let buffer = Self.makeBuffer(mixed) {
                     await asr.streamAudio(buffer)
+                    fedSamples += mixed.count
+                    if fedSamples - lastLogged >= 16_000 * 5 {   // ~every 5s of audio
+                        lastLogged = fedSamples
+                        AppLog.log("FluidAudio fed ~\(fedSamples / 16_000)s of audio to ASR", category: "record")
+                    }
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
@@ -127,6 +136,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         let start = update.tokenTimings.first.map { startElapsed + $0.startTime } ?? elapsedNow(startElapsed)
         let end = update.tokenTimings.last.map { startElapsed + $0.endTime } ?? start
         let seg = Segment(track: .remote, start: start, end: end, text: text, confirmed: update.isConfirmed)
+        AppLog.log("FluidAudio update (\(update.isConfirmed ? "confirmed" : "volatile")): \(text.prefix(60))", category: "record")
         if update.isConfirmed {
             confirmed.append(seg)
             volatileTail = nil
