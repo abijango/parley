@@ -90,9 +90,79 @@ final class FluidAudioEngine: TranscriptionEngine {
 
     // MARK: - Derived timeline
 
-    func confirmedTimeline() -> [Segment] { build(units: confirmedUnits) }
-    func finalTimeline() -> [Segment] { build(units: confirmedUnits + (volatileUnit.map { [$0] } ?? [])) }
+    func confirmedTimeline() -> [Segment] { derive(confirmedUnits, volatile: nil) }
+    func finalTimeline() -> [Segment] { derive(confirmedUnits, volatile: volatileUnit) }
     func seed(_ segments: [Segment]) { seeded = segments; publish() }
+
+    /// Derive display segments. When a diarization timeline exists, attribution is
+    /// DIARIZATION-FIRST: the diarized turns are authoritative for who/when, and ASR
+    /// words are grouped onto them. Without diarization yet, falls back to plain ASR
+    /// units (track-labelled).
+    private func derive(_ confirmed: [ASRUnit], volatile: ASRUnit?) -> [Segment] {
+        guard !diarSegments.isEmpty else {
+            return build(units: confirmed + (volatile.map { [$0] } ?? []))
+        }
+        var out = seeded
+        out.append(contentsOf: diarizationFirst(confirmed))
+        // Keep the in-progress tail as a SINGLE stable row (splitting it each update
+        // caused the earlier flicker); label it by the speaker at its midpoint.
+        if let v = volatile, let f = v.tokens.first, let l = v.tokens.last {
+            let spk = speakerAt((f.start + l.end) / 2)
+            out.append(Segment(id: v.id, track: .remote, start: f.start, end: l.end, text: v.text,
+                               confirmed: false, speakerId: spk, speakerName: spk.flatMap { resolvedNames[$0] }))
+        }
+        return out.sorted { $0.start < $1.start }
+    }
+
+    /// Build segments from ALL confirmed tokens + the diarization timeline: group
+    /// tokens into whole words (▁ marks a word start, so a speaker change never cuts a
+    /// word), assign each word the diarized speaker at its midpoint, and merge
+    /// consecutive same-speaker words into one segment. Operates globally (across ASR
+    /// units), so a speaker's turn isn't fragmented by ASR pause boundaries.
+    private func diarizationFirst(_ units: [ASRUnit]) -> [Segment] {
+        let toks = units.flatMap { $0.tokens }.sorted { $0.start < $1.start }
+        guard !toks.isEmpty else { return [] }
+        var words: [[Tok]] = []
+        for t in toks {
+            if words.isEmpty || t.text.hasPrefix("\u{2581}") { words.append([t]) }
+            else { words[words.count - 1].append(t) }
+        }
+        var runs: [(spk: String?, toks: [Tok])] = []
+        for w in words {
+            let spk = speakerAt((w.first!.start + w.last!.end) / 2)
+            if var last = runs.last, last.spk == spk {
+                last.toks.append(contentsOf: w); runs[runs.count - 1] = last
+            } else {
+                runs.append((spk, w))
+            }
+        }
+        return runs.compactMap { run -> Segment? in
+            guard let first = run.toks.first, let last = run.toks.last else { return nil }
+            let text = Self.reconstruct(run.toks.map(\.text))
+            guard !text.isEmpty else { return nil }
+            // Stable id keyed by run start (NOT speaker) so resolving a name later
+            // doesn't churn the row identity.
+            let key = "df@\(Int(first.start * 100))"
+            let id = runIds[key] ?? { let u = UUID(); runIds[key] = u; return u }()
+            return Segment(id: id, track: .remote, start: first.start, end: last.end, text: text,
+                           confirmed: true, speakerId: run.spk, speakerName: run.spk.flatMap { resolvedNames[$0] })
+        }
+    }
+
+    /// The diarized speaker active at time `t`: the turn containing it, else the turn
+    /// with the NEAREST BOUNDARY. (A long turn's midpoint is far from its edges, so
+    /// nearest-midpoint mis-assigned gap words to distant long turns — the smearing
+    /// that mixed speakers within a line. Boundary distance fixes it.)
+    private func speakerAt(_ t: TimeInterval) -> String? {
+        guard !diarSegments.isEmpty else { return nil }
+        for d in diarSegments where t >= d.start && t <= d.end { return d.speakerId }
+        var best: (id: String, dist: TimeInterval)?
+        for d in diarSegments {
+            let dist = min(abs(t - d.start), abs(t - d.end))
+            if dist < (best?.dist ?? .greatestFiniteMagnitude) { best = (d.speakerId, dist) }
+        }
+        return best?.id
+    }
 
     /// Derive display segments: seeded segments + each ASR unit split into runs of
     /// consecutive same-speaker tokens.
@@ -457,7 +527,8 @@ final class FluidAudioEngine: TranscriptionEngine {
             return FinalizeSummary(speakerCount: n, relabeled: repassed,
                                    note: "Offline pass: kept live labels · \(n) speaker\(n == 1 ? "" : "s")\(suffix)")
         }
-        diarSegments = segs.map { ($0.id, $0.start, $0.end) }
+        // Time-ordered so the diarization-first attribution scans turns in order.
+        diarSegments = segs.map { ($0.id, $0.start, $0.end) }.sorted { $0.start < $1.start }
         var emb: [String: [[Float]]] = [:]
         var secs: [String: TimeInterval] = [:]
         for s in segs where s.q >= minSegmentQuality && !s.emb.isEmpty {

@@ -29,6 +29,10 @@ do {
 }
 line("Decoded \(samples.count) samples (~\(String(format: "%.1f", Double(samples.count) / 16000.0))s @16kHz mono)")
 
+// Captured across sections for the diarization-first attribution validation below.
+var asrTokens: [(text: String, start: Double, end: Double)] = []
+var diarSegs: [(spk: String, start: Double, end: Double)] = []
+
 // ───────────────────────────── ASR (Parakeet TDT v3) ─────────────────────────────
 line("\n[1/2] ASR — Parakeet TDT 0.6b v3 (multilingual)")
 do {
@@ -43,13 +47,29 @@ do {
     line(String(format: "  confidence: %.3f   audio: %.1fs   proc: %.2fs   RTFx: %.1fx",
                 result.confidence, result.duration, result.processingTime, result.rtfx))
     if let timings = result.tokenTimings, !timings.isEmpty {
-        line("  token timings: \(timings.count) tokens; first 8:")
-        for t in timings.prefix(8) {
-            line(String(format: "    %@  [%.2f–%.2fs]  conf %.2f",
-                        t.token.replacingOccurrences(of: "\u{2581}", with: "·"), t.startTime, t.endTime, t.confidence))
-        }
+        line("  [transcribe(URL)] token timings: \(timings.count) tokens; range \(String(format: "%.2f–%.2fs", timings.first!.startTime, timings.last!.endTime)) (audio \(String(format: "%.1fs", result.duration)))")
     } else {
         line("  token timings: NONE returned")
+    }
+
+    // The APP uses the [Float] overload — transcribe(samples). Compare its token
+    // time RANGE to the audio length: if it doesn't reach ~audio end, the app's
+    // ASR timeline is compressed/misaligned vs the diarization (which uses samples).
+    var ds2 = TdtDecoderState.make(decoderLayers: await asr.decoderLayerCount)
+    let r2 = try await asr.transcribe(samples, decoderState: &ds2)
+    let audioLen = Double(samples.count) / 16000.0
+    if let t2 = r2.tokenTimings, !t2.isEmpty {
+        asrTokens = t2.map { ($0.token, $0.startTime, $0.endTime) }
+        line(String(format: "  [transcribe([Float]) — APP PATH] %d tokens; range %.2f–%.2fs (audio %.1fs)%@",
+                    t2.count, t2.first!.startTime, t2.last!.endTime, audioLen,
+                    t2.last!.endTime < audioLen - 10 ? "  ⚠️ TIMELINE SHORT — misaligned vs diarization" : ""))
+        line("  [Float] last 6 token times:")
+        for t in t2.suffix(6) {
+            line(String(format: "    %@  [%.2f–%.2fs]",
+                        t.token.replacingOccurrences(of: "\u{2581}", with: "·"), t.startTime, t.endTime))
+        }
+    } else {
+        line("  [transcribe([Float])] token timings: NONE returned")
     }
 } catch {
     FileHandle.standardError.write(Data("  ASR FAILED: \(error)\n".utf8))
@@ -76,6 +96,9 @@ do {
     diarizer.initialize(models: diarModels)
 
     let result = try diarizer.performCompleteDiarization(samples, sampleRate: 16000)
+    for seg in result.segments {
+        diarSegs.append((spk: seg.speakerId, start: Double(seg.startTimeSeconds), end: Double(seg.endTimeSeconds)))
+    }
     let speakers = Set(result.segments.map(\.speakerId)).sorted()
     line("  distinct speakers: \(speakers.count)  → \(speakers.joined(separator: ", "))")
     line("  segments: \(result.segments.count)  (embedding dim: \(result.segments.first?.embedding.count ?? 0))")
@@ -133,6 +156,39 @@ do {
 } catch {
     FileHandle.standardError.write(Data("  DIARIZATION FAILED: \(error)\n".utf8))
     exit(3)
+}
+
+// ───────────── Diarization-first attribution (candidate transcript builder) ─────────────
+// Assign each ASR token to a diarized speaker: the segment containing its midpoint,
+// else the segment with the NEAREST BOUNDARY (not nearest midpoint — a long segment's
+// midpoint is far from its edges, which is what smeared gap tokens onto the wrong
+// speaker before). Group consecutive same-speaker tokens into lines. The diarization
+// is authoritative for WHO/WHEN; ASR only supplies the words.
+if !asrTokens.isEmpty && !diarSegs.isEmpty {
+    func speakerFor(_ mid: Double) -> String {
+        for s in diarSegs where mid >= s.start && mid <= s.end { return s.spk }
+        var best: (spk: String, dist: Double)?
+        for s in diarSegs {
+            let d = Swift.min(abs(mid - s.start), abs(mid - s.end))
+            if d < (best?.dist ?? .infinity) { best = (s.spk, d) }
+        }
+        return best?.spk ?? "?"
+    }
+    struct L { var spk: String; var start: Double; var end: Double; var text: String }
+    var lines: [L] = []
+    for t in asrTokens {
+        let spk = speakerFor((t.start + t.end) / 2)
+        if var last = lines.last, last.spk == spk {
+            last.end = t.end; last.text += t.text; lines[lines.count - 1] = last
+        } else {
+            lines.append(L(spk: spk, start: t.start, end: t.end, text: t.text))
+        }
+    }
+    line("\n[DIARIZATION-FIRST attribution] \(lines.count) lines:")
+    for l in lines {
+        let txt = l.text.replacingOccurrences(of: "\u{2581}", with: " ").trimmingCharacters(in: .whitespaces)
+        line(String(format: "  Speaker %@  [%.1f–%.1fs]  %@", l.spk, l.start, l.end, String(txt.prefix(72))))
+    }
 }
 
 line("\n✅ Smoke test complete — both ASR and diarization produced output.")
