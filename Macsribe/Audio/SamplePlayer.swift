@@ -52,6 +52,36 @@ final class SamplePlayer {
         }
     }
 
+    /// Play a raw in-memory mono clip (e.g. a retained voiceprint sample).
+    func play(samples: [Float], sampleRate: Double = 16_000) {
+        stop()
+        guard !samples.isEmpty,
+              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
+        else { return }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { src in
+            if let base = src.baseAddress { buffer.floatChannelData![0].update(from: base, count: samples.count) }
+        }
+        let node = AVAudioPlayerNode()
+        engine.attach(node)
+        engine.connect(node, to: engine.mainMixerNode, format: format)
+        node.scheduleBuffer(buffer, at: nil)
+        nodes.append(node)
+        do {
+            try engine.start()
+            running = true
+            node.play()
+        } catch {
+            AppLog.log("SamplePlayer: engine failed to start: \(error.localizedDescription)", category: "record")
+            stop(); return
+        }
+        let duration = Double(samples.count) / sampleRate
+        stopTimer = Timer.scheduledTimer(withTimeInterval: duration + 0.2, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stop() }
+        }
+    }
+
     func stop() {
         stopTimer?.invalidate(); stopTimer = nil
         for node in nodes { node.stop(); engine.detach(node) }

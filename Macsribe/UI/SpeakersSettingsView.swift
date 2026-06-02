@@ -11,6 +11,7 @@ struct SpeakersSettingsView: View {
     @State private var renamingID: UUID?
     @State private var renameText = ""
     @State private var status: String?
+    @State private var player = SamplePlayer()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -55,6 +56,7 @@ struct SpeakersSettingsView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onDisappear { player.stop() }
         .sheet(isPresented: Binding(get: { renamingID != nil }, set: { if !$0 { renamingID = nil } })) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Rename speaker").font(.headline)
@@ -73,10 +75,17 @@ struct SpeakersSettingsView: View {
 
     private func row(_ vp: Voiceprint) -> some View {
         HStack {
+            // Play the retained enrolment clip to confirm this voiceprint is the
+            // right person (rename/delete to reassign if it's a mismatch).
+            Button { playClip(vp) } label: { Image(systemName: "play.circle") }
+                .buttonStyle(.plain)
+                .disabled(vp.audioSample == nil)
+                .help(vp.audioSample == nil ? "No saved clip for this voice" : "Play the saved voice clip")
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(vp.name).font(.body.weight(.medium))
                 Text("\(vp.sampleCount) sample\(vp.sampleCount == 1 ? "" : "s")"
-                     + (vp.audioSample != nil ? " · clip kept" : "")
+                     + (vp.audioSample != nil ? " · clip kept" : " · no clip")
                      + " · updated \(vp.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption2).foregroundStyle(.secondary)
             }
@@ -88,6 +97,12 @@ struct SpeakersSettingsView: View {
             .buttonStyle(.borderless)
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
+    }
+
+    private func playClip(_ vp: Voiceprint) {
+        guard let data = vp.audioSample else { return }
+        let samples = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        player.play(samples: samples)
     }
 
     private func commitRename() {
