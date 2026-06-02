@@ -7,6 +7,7 @@ import AppKit
 struct HistoryView: View {
     @EnvironmentObject private var recording: RecordingController
     @EnvironmentObject private var store: TranscriptStore
+    @EnvironmentObject private var vault: VaultDirectory
     @ObservedObject private var settings = AppSettings.shared
     @State private var selection: TranscriptItem.ID?
     @State private var filter: HistoryFilter = .all
@@ -14,13 +15,14 @@ struct HistoryView: View {
     @State private var runningItemID: TranscriptItem.ID?
 
     enum HistoryFilter: String, CaseIterable, Identifiable {
-        case all = "All", unprocessed = "Unprocessed", processed = "Processed"
+        case all = "All", needsSpeakers = "Unassigned", unprocessed = "Unprocessed", processed = "Processed"
         var id: String { rawValue }
     }
 
     private var filteredItems: [TranscriptItem] {
         switch filter {
         case .all: return store.items
+        case .needsSpeakers: return store.items.filter { $0.hasUnnamedSpeakers }
         case .unprocessed: return store.items.filter { !$0.isProcessed }
         case .processed: return store.items.filter { $0.isProcessed }
         }
@@ -30,6 +32,9 @@ struct HistoryView: View {
     @State private var showDiff = false
     /// Item awaiting the "speakers not assigned" confirmation before processing.
     @State private var pendingProcessItem: TranscriptItem?
+    /// Add-attendee popover (for someone present who didn't speak / was forgotten).
+    @State private var addingAttendee = false
+    @State private var attendeeDraft = ""
 
     var body: some View {
         HSplitView {
@@ -126,6 +131,11 @@ struct HistoryView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
+                if item.hasUnnamedSpeakers {
+                    Image(systemName: "person.crop.circle.badge.exclamationmark")
+                        .foregroundStyle(.orange).font(.caption)
+                        .help("Speakers not assigned — needs review")
+                }
                 statusBadge(item)
             }
             HStack(spacing: 6) {
@@ -200,6 +210,19 @@ struct HistoryView: View {
                 Spacer()
                 statusBadge(item)
             }
+            if item.hasUnnamedSpeakers {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle.badge.exclamationmark").foregroundStyle(.orange)
+                    Text(audioAvailable(item)
+                         ? "Speakers aren't assigned yet. Detect & name them so the summary attributes everything correctly."
+                         : "Speakers aren't assigned and the audio is no longer available to detect them.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+            }
             actionRow(item)
             if recording.offlinePass == .running {
                 HStack(spacing: 6) {
@@ -244,29 +267,89 @@ struct HistoryView: View {
                 }
             }
 
+            addAttendeeButton(item)
+
             if audioAvailable(item) {
-                Button {
-                    detectSpeakers(item)
-                } label: {
-                    Label("Detect speakers", systemImage: "person.2.wave.2")
+                // When speakers still need assigning, this is the primary action;
+                // otherwise it's a secondary "re-run".
+                if item.hasUnnamedSpeakers {
+                    Button { detectSpeakers(item) } label: {
+                        Label("Detect speakers", systemImage: "person.2.wave.2")
+                    }
+                    .buttonStyle(.borderedProminent).disabled(busy)
+                    .help("Diarize this recording and assign names")
+                } else {
+                    Button { detectSpeakers(item) } label: {
+                        Label("Detect speakers", systemImage: "person.2.wave.2")
+                    }
+                    .disabled(busy)
+                    .help("Re-run diarization + speaker ID on this recording's audio")
                 }
-                .disabled(busy)
-                .help("Re-run diarization + speaker ID on this recording's audio, then assign names")
             }
 
             Spacer()
 
-            Button {
-                // Warn (but allow) if the transcript still has unnamed speakers — the
-                // summary attributes actions/discussion to whoever's labelled.
-                if unattributed(item) { pendingProcessItem = item } else { startProcessing(item) }
-            } label: {
-                Label(item.isProcessed ? "Re-process" : "Process",
-                      systemImage: "arrow.triangle.2.circlepath")
+            // Warn (but allow) if the transcript still has unnamed speakers — the
+            // summary attributes actions/discussion to whoever's labelled.
+            let processLabel = Label(item.isProcessed ? "Re-process" : "Process",
+                                     systemImage: "arrow.triangle.2.circlepath")
+            if item.hasUnnamedSpeakers && audioAvailable(item) {
+                Button { pendingProcessItem = item } label: { processLabel }
+                    .buttonStyle(.bordered).disabled(busy)
+            } else {
+                Button {
+                    if unattributed(item) { pendingProcessItem = item } else { startProcessing(item) }
+                } label: { processLabel }
+                .buttonStyle(.borderedProminent).disabled(busy)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(busy)
         }
+    }
+
+    /// Add a present-but-non-speaking (or forgotten) attendee to this transcript.
+    private func addAttendeeButton(_ item: TranscriptItem) -> some View {
+        Button { attendeeDraft = ""; addingAttendee = true } label: {
+            Label("Add attendee", systemImage: "person.badge.plus")
+        }
+        .disabled(busy)
+        .popover(isPresented: $addingAttendee) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add an attendee").font(.headline)
+                Text("For someone who was present but didn't speak, or a name missed during the call. No transcript line is attributed to them.")
+                    .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                TextField("Name", text: $attendeeDraft)
+                    .textFieldStyle(.roundedBorder).frame(width: 240)
+                    .onSubmit { commitAddAttendee(item) }
+                let matches = attendeeMatches(item)
+                if !matches.isEmpty {
+                    ForEach(matches, id: \.self) { p in
+                        Button(p) { attendeeDraft = p }.buttonStyle(.plain).font(.callout)
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("Add") { commitAddAttendee(item) }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(attendeeDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(12).frame(width: 270)
+        }
+    }
+
+    private func attendeeMatches(_ item: TranscriptItem) -> [String] {
+        let d = attendeeDraft.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !d.isEmpty else { return [] }
+        let have = Set(item.meta.attendees.map { $0.lowercased() })
+        return vault.people.filter { $0.lowercased().contains(d) && !have.contains($0.lowercased()) }
+            .prefix(5).map { $0 }
+    }
+
+    private func commitAddAttendee(_ item: TranscriptItem) {
+        let name = attendeeDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        recording.addAttendeeToTranscript(item.url, name: name)
+        addingAttendee = false
+        attendeeDraft = ""
     }
 
     /// Detection or note generation is in flight — disable the action buttons.

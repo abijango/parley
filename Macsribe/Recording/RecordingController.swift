@@ -630,6 +630,46 @@ final class RecordingController: ObservableObject {
         }
     }
 
+    /// Add an attendee to an already-saved transcript — e.g. someone present who
+    /// didn't speak, or a name forgotten during the call. Updates the frontmatter
+    /// AND the body "**Attendees:**" header so it shows in History, flows into the
+    /// AI summary, and is remembered in the vault. (Speaking attendees are named via
+    /// the speaker review; this is for non-speaking / forgotten ones.)
+    func addAttendeeToTranscript(_ url: URL, name rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        var names: [String] = []
+        TranscriptWriter.updateFrontmatter(at: url) { meta in
+            if !meta.attendees.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+                meta.attendees.append(name)
+            }
+            names = meta.attendees
+        }
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            let updated = Self.replaceAttendeeHeader(in: text, with: names)
+            if updated != text { try? updated.write(to: url, atomically: true, encoding: .utf8) }
+        }
+        vault.addPeople([name])
+        store.refresh()
+        AppLog.log("Added attendee \(name) to \(url.lastPathComponent)", category: "history")
+    }
+
+    /// Replace (or insert after the Date line) the body "**Attendees:**" header so it
+    /// matches the frontmatter list.
+    private static func replaceAttendeeHeader(in text: String, with names: [String]) -> String {
+        guard !names.isEmpty else { return text }
+        var lines = text.components(separatedBy: "\n")
+        let line = "**Attendees:** \(names.joined(separator: ", "))"
+        if let idx = lines.firstIndex(where: { $0.hasPrefix("**Attendees:**") }) {
+            lines[idx] = line
+        } else if let dateIdx = lines.firstIndex(where: { $0.hasPrefix("**Date:**") }) {
+            lines.insert(line, at: dateIdx + 1)
+        } else {
+            return text
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// Finish the review: clear the sheet and rewrite the just-written transcript
     /// with the (possibly newly-named) speakers + updated attendees.
     func finishSpeakerReview() {

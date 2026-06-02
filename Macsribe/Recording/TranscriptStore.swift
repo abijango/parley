@@ -7,13 +7,18 @@ struct TranscriptItem: Identifiable, Equatable {
     let url: URL
     var meta: TranscriptMeta
     var isProcessed: Bool
+    /// The transcript still has generic, unnamed speaker labels ("Speaker N" / "Me" /
+    /// "Remote") — i.e. speakers haven't been assigned yet. Drives the History badge.
+    var hasUnnamedSpeakers: Bool = false
 
     static func == (lhs: TranscriptItem, rhs: TranscriptItem) -> Bool {
         lhs.url == rhs.url
             && lhs.isProcessed == rhs.isProcessed
+            && lhs.hasUnnamedSpeakers == rhs.hasUnnamedSpeakers
             && lhs.meta.status == rhs.meta.status
             && lhs.meta.note == rhs.meta.note
             && lhs.meta.title == rhs.meta.title
+            && lhs.meta.attendees == rhs.meta.attendees
     }
 }
 
@@ -92,9 +97,13 @@ final class TranscriptStore: ObservableObject {
             // Skip the staging dir, hidden files, non-markdown.
             if url.lastPathComponent.hasPrefix(".") { continue }
             guard url.pathExtension.lowercased() == "md" else { continue }
-            var meta = TranscriptWriter.parseFrontmatter(url) ?? fallbackMeta(url, processed: processed)
+            let text = try? String(contentsOf: url, encoding: .utf8)
+            var meta = (text.flatMap { TranscriptWriter.parseFrontmatter(text: $0) })
+                ?? fallbackMeta(url, processed: processed)
             meta.date = resolvedDate(url, meta.date)
-            result.append(TranscriptItem(url: url, meta: meta, isProcessed: processed))
+            let unnamed = text.map(Self.hasGenericSpeakerLabels) ?? false
+            result.append(TranscriptItem(url: url, meta: meta, isProcessed: processed,
+                                         hasUnnamedSpeakers: unnamed))
         }
         return result
     }
@@ -121,6 +130,11 @@ final class TranscriptStore: ObservableObject {
             status: processed ? "processed" : "unprocessed",
             note: nil, audio: nil, type: "recording"
         )
+    }
+
+    /// Whether a transcript body still carries generic (unassigned) speaker labels.
+    private static func hasGenericSpeakerLabels(_ text: String) -> Bool {
+        text.contains("] Speaker ") || text.contains("] Me:") || text.contains("] Remote:")
     }
 
     // MARK: Helpers
