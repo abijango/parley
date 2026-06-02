@@ -343,6 +343,15 @@ final class FluidAudioEngine: TranscriptionEngine {
         return merged
     }
 
+    /// Per-speaker talk-time summary for diagnostics, e.g. "2 speaker(s): 0=28s 1=104s".
+    nonisolated private static func speakerBreakdown(_ segs: [Seg]) -> String {
+        var talk: [String: TimeInterval] = [:]
+        for s in segs { talk[s.id, default: 0] += max(0, s.end - s.start) }
+        let parts = talk.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(String(format: "%.0fs", $0.value))" }
+        return "\(talk.count) speaker(s): \(parts.joined(separator: " "))"
+    }
+
     // Pure vector helpers (local so they're callable from nonisolated static code).
     nonisolated private static func normalize(_ v: [Float]) -> [Float] {
         let n = sqrt(v.reduce(0) { $0 + $1 * $1 })
@@ -458,10 +467,12 @@ final class FluidAudioEngine: TranscriptionEngine {
                     Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
                         end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
                 }
+                AppLog.log("finalize: raw diar \(Self.speakerBreakdown(mapped))", category: "record")
                 // "Expected speakers": if the diarizer over-split, merge the closest
                 // speaker centroids down to the user-specified count.
                 if targetSpeakers > 0 {
                     mapped = Self.collapseToTargetSpeakers(mapped, target: targetSpeakers)
+                    AppLog.log("finalize: after collapse→\(targetSpeakers): \(Self.speakerBreakdown(mapped))", category: "record")
                 }
                 segs = mapped
             } else {

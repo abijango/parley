@@ -118,20 +118,24 @@ enum TurnSensitivity: String, CaseIterable, Identifiable {
         case .fine: return "Fine"
         }
     }
-    /// Shortest turn (seconds) the diarizer will keep as its own segment.
+    /// Shortest turn (seconds) the diarizer will keep as its own segment. Kept at /
+    /// near the library default — going much below ~0.5 s yields segments too short
+    /// for a reliable speaker embedding, which degrades clustering (one voice splits
+    /// into several, and quieter speakers get absorbed). The main "rapid turn" lever
+    /// is `minSilenceGap`, which cuts at natural pauses without shrinking segments.
     var minSpeechDuration: Float {
         switch self {
         case .relaxed: return 1.0
-        case .balanced: return 0.5
-        case .fine: return 0.3
+        case .balanced: return 0.75
+        case .fine: return 0.5
         }
     }
     /// Shortest pause (seconds) that splits one turn from the next.
     var minSilenceGap: Float {
         switch self {
         case .relaxed: return 0.5
-        case .balanced: return 0.25
-        case .fine: return 0.15
+        case .balanced: return 0.35
+        case .fine: return 0.2
         }
     }
     var blurb: String {
