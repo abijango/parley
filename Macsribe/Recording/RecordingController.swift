@@ -81,12 +81,10 @@ final class RecordingController: ObservableObject {
     /// may be auto-stopped on call end; user-started recordings are not).
     private var startedByDetection = false
 
-    // Transcription
-    private let service = TranscriptionService()
-    private let merger = TranscriptMerger()
-    private var micPipeline: TrackPipeline?
-    private var systemPipeline: TrackPipeline?
-    private var pipelineTasks: [Task<Void, Never>] = []
+    // Transcription — the active engine (WhisperKit or FluidAudio), chosen per
+    // session from settings. Owns the pipelines/service/merger (or its native
+    // equivalents) and reports the merged timeline back via `onSegmentsChanged`.
+    private var engine: TranscriptionEngine?
 
     var isRecording: Bool { state == .recording }
 
@@ -94,13 +92,27 @@ final class RecordingController: ObservableObject {
     /// manager can refuse to delete the in-progress recording's audio.
     var currentSessionID: String? { isRecording ? manifest?.id : nil }
 
-    init() {
-        merger.onChange = { [weak self] merged in
+    /// Build the transcription engine for this session from settings (gated to
+    /// the next recording — no mid-session switch) and wire segment publishing +
+    /// the confirmed-segment journal.
+    private func makeEngine() -> TranscriptionEngine {
+        let engine: TranscriptionEngine
+        switch settings.transcriptionEngine {
+        case .whisperKit:
+            engine = WhisperKitEngine(models: models, settings: settings)
+        case .fluidAudio:
+            // The native FluidAudio engine lands in the next increment; until then
+            // fall back to WhisperKit so a selection is never silently broken.
+            AppLog.log("FluidAudio engine not yet wired — falling back to WhisperKit", category: "record")
+            engine = WhisperKitEngine(models: models, settings: settings)
+        }
+        engine.onSegmentsChanged = { [weak self] merged in
             guard let self else { return }
             self.segments = merged
             // Persist confirmed segments as they land (near-zero crash loss).
-            self.journal?.append(confirmed: self.merger.confirmedTimeline())
+            self.journal?.append(confirmed: self.engine?.confirmedTimeline() ?? [])
         }
+        return engine
     }
 
     private var didWarmup = false
@@ -194,7 +206,7 @@ final class RecordingController: ObservableObject {
         lastResult = nil
         lastTranscriptURL = nil
         manualNotes = ""
-        merger.reset()
+        engine = makeEngine()
 
         guard await PermissionManager.requestMicrophone() else {
             micDenied = true
@@ -236,7 +248,7 @@ final class RecordingController: ObservableObject {
         manualNotes = m.manualNotes
         lastResult = nil
         lastTranscriptURL = nil
-        merger.reset()
+        engine = makeEngine()
 
         guard await PermissionManager.requestMicrophone() else {
             micDenied = true
@@ -255,7 +267,7 @@ final class RecordingController: ObservableObject {
         let offset = max(session.durationSeconds, prior.map(\.end).max() ?? 0)
         let marker = Segment(track: .me, start: offset, end: offset,
                              text: "— recording resumed after interruption —", confirmed: true)
-        merger.seed(prior + [marker])
+        engine?.seed(prior + [marker])
         journal = SegmentJournal(url: journalURL, alreadyWritten: Set(prior.map(\.id)))
         journal?.append(confirmed: [marker])
 
@@ -295,32 +307,16 @@ final class RecordingController: ObservableObject {
             return
         }
 
-        // Anchor both pipelines to the shared timeline (0 for a fresh start, or
-        // the prior duration when resuming).
-        let micPipeline = TrackPipeline(track: .me, ring: micRing, service: service, merger: merger, startElapsed: startOffset)
-        let systemPipeline = TrackPipeline(track: .remote, ring: systemRing, service: service, merger: merger, startElapsed: startOffset)
-        self.micPipeline = micPipeline
-        self.systemPipeline = systemPipeline
-        pipelineTasks = [
-            Task { await micPipeline.run() },
-            Task { await systemPipeline.run() },
-        ]
+        // Hand the capture rings to the active engine, anchored to the shared
+        // timeline (0 for a fresh start, or the prior duration when resuming). The
+        // engine loads its model in the background and holds audio until ready.
+        engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
 
         startMeterTimer()
         startPartialTimer()
         if reactivate { reactivateSessionManifest(dir: sessionDir) }
         else { beginSessionManifest(dir: sessionDir) }
         state = .recording
-
-        // Load the model in the background; pipelines hold audio until it's set.
-        Task {
-            if let kit = await models.prepare(settings.model) {
-                await service.setModel(kit)
-                AppLog.log("Model ready — live transcription active", category: "record")
-            } else {
-                AppLog.log("Model failed to load; capturing audio only (archive preserved, re-processable)", category: "record")
-            }
-        }
     }
 
     /// Next free audio-segment index in a session dir (resume writes mic.2.caf, …).
@@ -358,7 +354,7 @@ final class RecordingController: ObservableObject {
     /// crash mid-recording can be recovered on next launch.
     private func writePartial() {
         guard let dir = sessionDirectory else { return }
-        let segments = merger.finalTimeline()
+        let segments = engine?.finalTimeline() ?? []
         guard !segments.isEmpty else { return }
         let body = TranscriptWriter.makeBody(
             title: meetingTitle.isEmpty ? "Recovered recording" : meetingTitle,
@@ -415,17 +411,10 @@ final class RecordingController: ObservableObject {
         micCapture = nil
         systemCapture = nil
 
-        let mic = micPipeline
-        let system = systemPipeline
-        Task {
-            await mic?.stop()
-            await system?.stop()
-            await service.clear()   // release the recording-time model ref (frees on model switch)
-        }
-        pipelineTasks.forEach { $0.cancel() }
-        pipelineTasks = []
-        micPipeline = nil
-        systemPipeline = nil
+        // Tear down the engine off the main actor; finalize() below reads the
+        // already-populated timeline synchronously, so it needn't wait on this.
+        let engine = self.engine
+        Task { await engine?.stop() }
         clock = nil
 
         finalize()
@@ -435,7 +424,7 @@ final class RecordingController: ObservableObject {
     /// produce the polished note. Runs off the main thread; never blocks quit.
     private func finalize() {
         // Include the trailing unconfirmed tail — on stop it's final.
-        let segments = merger.finalTimeline()
+        let segments = engine?.finalTimeline() ?? []
         AppLog.log("Recording stopped — \(segments.count) segments (confirmed + tail)", category: "record")
         // Always save (even with no speech) so a recorded call is never lost and
         // its audio stays linked in History — rather than silently discarded.

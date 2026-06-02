@@ -228,6 +228,19 @@ struct SettingsView: View {
 
     private var transcriptionTab: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("Engine").font(.headline)
+            Picker("", selection: Binding(
+                get: { settings.transcriptionEngine }, set: { settings.transcriptionEngine = $0 }
+            )) {
+                ForEach(TranscriptionEngineKind.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .disabled(recording.isRecording)   // engine applies to the next session, never mid-recording
+            Text(settings.transcriptionEngine.blurb)
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
             Text("Active model").font(.headline)
             Text("Bigger models are more accurate but slower and larger. The active model is used for new recordings.")
                 .font(.caption).foregroundStyle(.secondary)

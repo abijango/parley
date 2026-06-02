@@ -67,6 +67,27 @@ enum ComputeMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// Which transcription engine a recording uses. Chosen in Settings; applies to
+/// the NEXT recording session (no mid-session switch).
+enum TranscriptionEngineKind: String, CaseIterable, Identifiable {
+    case whisperKit   // original WhisperKit path — transcription only, no speaker ID
+    case fluidAudio   // native FluidAudio stack — transcription + speaker identification
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .whisperKit: return "WhisperKit"
+        case .fluidAudio: return "FluidAudio (speaker ID)"
+        }
+    }
+    var blurb: String {
+        switch self {
+        case .whisperKit: return "OpenAI Whisper on-device. High accuracy, no speaker labels — the original, well-tested path."
+        case .fluidAudio: return "Native Parakeet ASR + on-device diarization & speaker identification. Labels who spoke."
+        }
+    }
+}
+
 /// App-wide settings persisted via UserDefaults (`@AppStorage`).
 /// TODO(app-name): the AppStorage keys are namespaced with a literal prefix below.
 @MainActor
@@ -93,6 +114,7 @@ final class AppSettings: ObservableObject {
         static let callEndGraceSeconds = "macsribe.callEndGraceSeconds"
         static let idleUnloadEnabled = "macsribe.idleUnloadEnabled"
         static let idleUnloadMinutes = "macsribe.idleUnloadMinutes"
+        static let transcriptionEngine = "macsribe.transcriptionEngine"
     }
 
     // MARK: Memory
@@ -144,6 +166,7 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.captureMode) var captureModeRaw: String = CaptureMode.systemWide.rawValue
     @AppStorage(Key.model) var modelRaw: String = WhisperModel.small.rawValue
     @AppStorage(Key.computeMode) var computeModeRaw: String = ComputeMode.gpu.rawValue
+    @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.whisperKit.rawValue
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt
@@ -162,6 +185,12 @@ final class AppSettings: ObservableObject {
     var computeMode: ComputeMode {
         get { ComputeMode(rawValue: computeModeRaw) ?? .gpu }
         set { computeModeRaw = newValue.rawValue }
+    }
+
+    /// Transcription engine for the next recording session.
+    var transcriptionEngine: TranscriptionEngineKind {
+        get { TranscriptionEngineKind(rawValue: transcriptionEngineRaw) ?? .whisperKit }
+        set { transcriptionEngineRaw = newValue.rawValue }
     }
 
     /// Root folders (vault-relative) to scan for filing destinations.
