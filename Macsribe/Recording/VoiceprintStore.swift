@@ -91,14 +91,27 @@ final class VoiceprintStore: ObservableObject {
     // MARK: - Persistence
 
     func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { voiceprints = []; return }
-        voiceprints = (try? JSONDecoder().decode([Voiceprint].self, from: data)) ?? []
+        guard let raw = try? Data(contentsOf: fileURL) else { voiceprints = []; return }
+        // Encrypted at rest; transparently migrate a legacy plaintext store.
+        if let plain = try? VoiceprintCrypto.decrypt(raw),
+           let prints = try? JSONDecoder().decode([Voiceprint].self, from: plain) {
+            voiceprints = prints
+        } else if let prints = try? JSONDecoder().decode([Voiceprint].self, from: raw) {
+            voiceprints = prints
+            AppLog.log("Migrating \(prints.count) voiceprint(s) to encrypted storage", category: "model")
+            save()   // re-write encrypted
+        } else {
+            voiceprints = []
+        }
     }
 
     private func save() {
         AppPaths.ensureDirectory(fileURL.deletingLastPathComponent())
         guard let data = try? JSONEncoder().encode(voiceprints) else { return }
-        try? data.write(to: fileURL, options: .atomic)   // Phase 6 will encrypt this file
+        guard let sealed = try? VoiceprintCrypto.encrypt(data) else {
+            AppLog.log("Failed to encrypt voiceprint store — not saving plaintext", category: "model"); return
+        }
+        try? sealed.write(to: fileURL, options: .atomic)
     }
 
     // MARK: - Vector math (cosine over L2-normalized embeddings)
