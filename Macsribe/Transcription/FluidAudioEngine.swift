@@ -330,17 +330,24 @@ final class FluidAudioEngine: TranscriptionEngine {
         let segs: [Seg]? = await Task.detached {
             // Build a CLEAN mixed file from the archived tracks (the live per-tick
             // mixer is glitchy — fine for streaming ASR, bad for diarization + playback).
-            _ = Self.buildCleanMix(mic: mic, system: sys, output: url)
-            guard let samples = try? AudioConverter().resampleAudioFile(url), !samples.isEmpty,
-                  let diar = try? await Self.makeDiarizer(clusterThreshold: threshold),
-                  let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000)
-            else { return nil }
+            let built = Self.buildCleanMix(mic: mic, system: sys, output: url)
+            guard let samples = try? AudioConverter().resampleAudioFile(url), !samples.isEmpty else {
+                AppLog.log("finalizeDiarization: couldn't read clean mix (built=\(built))", category: "record"); return nil
+            }
+            guard let diar = try? await Self.makeDiarizer(clusterThreshold: threshold) else {
+                AppLog.log("finalizeDiarization: diarizer init failed", category: "record"); return nil
+            }
+            guard let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000) else {
+                AppLog.log("finalizeDiarization: diarization failed", category: "record"); return nil
+            }
             return result.segments.map {
                 Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
                     end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
             }
         }.value
-        guard let segs, !segs.isEmpty else { return }
+        guard let segs, !segs.isEmpty else {
+            AppLog.log("finalizeDiarization: no final segments — keeping live labels", category: "record"); return
+        }
         diarSegments = segs.map { ($0.id, $0.start, $0.end) }
         var emb: [String: [[Float]]] = [:]
         var secs: [String: TimeInterval] = [:]
@@ -365,17 +372,22 @@ final class FluidAudioEngine: TranscriptionEngine {
         return best?.id
     }
 
-    /// Drain both rings and sum sample-wise into one mono buffer.
+    /// Drain both rings and sum into one mono buffer, ANCHORED to the mic ring as the
+    /// real-time clock (the mic tap runs continuously at 16 kHz even during silence).
+    /// Reading the system ring up to the mic's count keeps the mixed stream at true
+    /// real-time length — `max()` + zero-pad would over-count when the rings are out
+    /// of phase, stretching the ASR timeline out of sync with the clean mixed file.
     nonisolated private static func mix(mic: AudioRingBuffer, system: AudioRingBuffer) -> [Float]? {
-        let n = max(mic.availableToRead, system.availableToRead)
+        let n = mic.availableToRead
         guard n > 0 else { return nil }
         var micBuf = [Float](), sysBuf = [Float]()
         let rm = mic.read(maxCount: n, into: &micBuf)
-        let rs = system.read(maxCount: n, into: &sysBuf)
-        var out = [Float](repeating: 0, count: n)
+        guard rm > 0 else { return nil }
+        let rs = system.read(maxCount: rm, into: &sysBuf)   // up to mic's count; system excess waits
+        var out = [Float](repeating: 0, count: rm)
         for i in 0..<rm { out[i] += micBuf[i] }
-        for i in 0..<rs { out[i] += sysBuf[i] }
-        for i in 0..<n { out[i] = max(-1, min(1, out[i])) }   // soft clip the summed signal
+        for i in 0..<min(rs, rm) { out[i] += sysBuf[i] }
+        for i in 0..<rm { out[i] = max(-1, min(1, out[i])) }   // soft clip the summed signal
         return out
     }
 
