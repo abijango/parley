@@ -398,6 +398,45 @@ struct SettingsView: View {
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Picker("Expected speakers", selection: $settings.expectedSpeakerCount) {
+                    Text("Auto").tag(0)
+                    ForEach(2...8, id: \.self) { Text("\($0)").tag($0) }
+                }
+                .pickerStyle(.menu).frame(maxWidth: 220).disabled(recording.isRecording)
+                Text("If you know the headcount, set it — the offline pass merges any over-split voices down to exactly this many speakers. Leave on Auto when unsure.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Picker("Turn sensitivity", selection: Binding(
+                    get: { settings.turnSensitivity }, set: { settings.turnSensitivity = $0 })) {
+                    ForEach(TurnSensitivity.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).frame(maxWidth: 320).disabled(recording.isRecording)
+                Text(settings.turnSensitivity.blurb)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                Text("Speaker recognition").font(.headline)
+                HStack(spacing: 10) {
+                    Slider(value: $settings.identificationThreshold, in: 0.40...0.85, step: 0.05)
+                        .frame(maxWidth: 260)
+                    Text(String(format: "%.2f", settings.identificationThreshold))
+                        .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
+                }
+                Text("How close a voice must be to a saved person before it's auto-named. Higher = stricter (fewer wrong names, but may miss a known voice); lower = more eager (may attach the wrong person). Separate from speaker separation above.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Slider(value: $settings.minSpeechToIdentify, in: 2...15, step: 1)
+                        .frame(maxWidth: 260)
+                    Text("\(Int(settings.minSpeechToIdentify)) s")
+                        .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
+                }
+                Text("How much clean speech from a speaker before they're auto-identified and named. Lower names people sooner but on less evidence.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Divider()
                 Text("Final transcript").font(.headline)
                 Toggle("Re-transcribe the whole recording after stopping", isOn: $settings.offlineAsrRepass)

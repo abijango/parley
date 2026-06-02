@@ -72,7 +72,10 @@ control for the FluidAudio model.
 > and must not be conflated: FluidAudio's in-session `clusteringThreshold` /
 > `diarizationThreshold` (groups voices within one recording, default **0.6**) vs. our
 > cross-session `identificationThreshold` (matches a voice to a saved person, default
-> **0.6**). Both are adjustable in **Settings → Transcription**.
+> **0.6**). Both are adjustable in **Settings → Transcription**, along with **Expected
+> speakers** (force the offline pass to exactly N speakers), **Turn sensitivity**
+> (how aggressively rapid back-and-forth is split), and how much speech is required
+> before a voice is auto-named.
 
 ## Requirements
 

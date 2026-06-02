@@ -62,7 +62,6 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// speakerId → resolved person name (auto-identified or manually assigned).
     private var resolvedNames: [String: String] = [:]
     private let minSegmentQuality: Float = 0.4
-    private let minSecondsToAutoIdentify: TimeInterval = 5
     private let minSecondsToEnroll: TimeInterval = 3
 
     // Background work.
@@ -173,6 +172,7 @@ final class FluidAudioEngine: TranscriptionEngine {
     func start(micRing: AudioRingBuffer, systemRing: AudioRingBuffer, startElapsed: TimeInterval) {
         let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
         let clusterThreshold = Float(settings.diarizationThreshold)
+        let sens = settings.turnSensitivity
         loadTask = Task { [weak self] in
             do {
                 let models = try await AsrModels.downloadAndLoad(version: version)
@@ -180,7 +180,8 @@ final class FluidAudioEngine: TranscriptionEngine {
                 try await self?.asr.startStreaming()
                 AppLog.log("FluidAudio engine ready — Parakeet \(version) sliding-window streaming", category: "record")
                 self?.beginConsumingAndMixing(micRing: micRing, systemRing: systemRing,
-                                              startElapsed: startElapsed, clusterThreshold: clusterThreshold)
+                                              startElapsed: startElapsed, clusterThreshold: clusterThreshold,
+                                              minSpeechDuration: sens.minSpeechDuration, minSilenceGap: sens.minSilenceGap)
             } catch {
                 AppLog.log("FluidAudio engine failed to start: \(error.localizedDescription); capturing audio only (archive preserved)", category: "record")
             }
@@ -200,7 +201,8 @@ final class FluidAudioEngine: TranscriptionEngine {
     // MARK: - Consume updates + feed mixed audio
 
     private func beginConsumingAndMixing(micRing: AudioRingBuffer, systemRing: AudioRingBuffer,
-                                         startElapsed: TimeInterval, clusterThreshold: Float) {
+                                         startElapsed: TimeInterval, clusterThreshold: Float,
+                                         minSpeechDuration: Float, minSilenceGap: Float) {
         streamStart = Date()
 
         updatesTask = Task { [weak self] in
@@ -238,7 +240,9 @@ final class FluidAudioEngine: TranscriptionEngine {
         // Diarize in ~10s chunks on a long-lived DiarizerManager so in-session
         // speaker ids stay consistent; rebase each chunk's times by its start offset.
         diarTask = Task.detached { [weak self] in
-            guard let diar = try? await Self.makeDiarizer(clusterThreshold: clusterThreshold) else {
+            guard let diar = try? await Self.makeDiarizer(clusterThreshold: clusterThreshold,
+                                                          minSpeechDuration: minSpeechDuration,
+                                                          minSilenceGap: minSilenceGap) else {
                 AppLog.log("FluidAudio diarizer failed to initialize — transcript will have no speaker labels", category: "record")
                 return
             }
@@ -270,19 +274,85 @@ final class FluidAudioEngine: TranscriptionEngine {
     }
 
     /// Load diarization models and build a session-long manager (owned by the diarTask).
-    nonisolated private static func makeDiarizer(clusterThreshold: Float) async throws -> DiarizerManager {
+    nonisolated private static func makeDiarizer(
+        clusterThreshold: Float, minSpeechDuration: Float = 0.5, minSilenceGap: Float = 0.25
+    ) async throws -> DiarizerManager {
         let models = try await DiarizerModels.downloadIfNeeded()
         var config = DiarizerConfig()
         config.clusteringThreshold = clusterThreshold
-        // Finer turn segmentation so rapid back-and-forth (short ~1 s turns with brief
-        // gaps) splits into separate speaker turns instead of collapsing into one. The
-        // library defaults (minSpeechDuration 1.0, minSilenceGap 0.5) merge fast dialogue
-        // into a single segment, which then maps entirely to one speaker downstream.
-        config.minSpeechDuration = 0.5
-        config.minSilenceGap = 0.25
+        // Turn segmentation (user-tunable via "Turn sensitivity"). Finer values split
+        // rapid back-and-forth into separate turns; the library defaults (1.0 / 0.5)
+        // merge fast dialogue into one segment that then maps to a single speaker.
+        config.minSpeechDuration = minSpeechDuration
+        config.minSilenceGap = minSilenceGap
         let diar = DiarizerManager(config: config)
         diar.initialize(models: models)
         return diar
+    }
+
+    /// Force the diarization down to exactly `target` speakers when it over-split:
+    /// agglomeratively merge the closest speaker centroids (by cosine similarity)
+    /// until `target` remain, then relabel every segment. Only merges — if the
+    /// diarizer found `target` or fewer speakers, the segments are returned as-is
+    /// (we can't fabricate a speaker that wasn't separated).
+    nonisolated private static func collapseToTargetSpeakers(_ segs: [Seg], target: Int) -> [Seg] {
+        guard target >= 1 else { return segs }
+        // Group segments by speaker; build a centroid per speaker from its embeddings.
+        var order: [String] = []
+        var bySpeaker: [String: [Seg]] = [:]
+        for s in segs {
+            if bySpeaker[s.id] == nil { order.append(s.id) }
+            bySpeaker[s.id, default: []].append(s)
+        }
+        var centroids: [String: [Float]] = [:]
+        for id in order {
+            let embs = (bySpeaker[id] ?? []).map(\.emb).filter { !$0.isEmpty }
+            if !embs.isEmpty { centroids[id] = normalize(meanVector(embs)) }
+        }
+        let clusterableIds = order.filter { centroids[$0] != nil }
+        guard clusterableIds.count > target else { return segs }
+
+        var clusters: [[String]] = clusterableIds.map { [$0] }
+        func centroidOf(_ cluster: [String]) -> [Float] {
+            normalize(meanVector(cluster.compactMap { centroids[$0] }))
+        }
+        while clusters.count > target {
+            var bestI = 0, bestJ = 1, bestSim = -Float.greatestFiniteMagnitude
+            for i in 0..<clusters.count {
+                let ci = centroidOf(clusters[i])
+                for j in (i + 1)..<clusters.count {
+                    let sim = dotProduct(ci, centroidOf(clusters[j]))
+                    if sim > bestSim { bestSim = sim; bestI = i; bestJ = j }
+                }
+            }
+            clusters[bestI].append(contentsOf: clusters[bestJ])
+            clusters.remove(at: bestJ)
+        }
+        // Map every old speaker id to its cluster's canonical id (smallest id in it).
+        var remap: [String: String] = [:]
+        for cluster in clusters {
+            guard let canonical = cluster.min() else { continue }
+            for id in cluster { remap[id] = canonical }
+        }
+        let merged = segs.map { Seg(id: remap[$0.id] ?? $0.id, start: $0.start, end: $0.end, emb: $0.emb, q: $0.q) }
+        AppLog.log("Collapsed diarization \(clusterableIds.count) → \(target) speaker(s)", category: "record")
+        return merged
+    }
+
+    // Pure vector helpers (local so they're callable from nonisolated static code).
+    nonisolated private static func normalize(_ v: [Float]) -> [Float] {
+        let n = sqrt(v.reduce(0) { $0 + $1 * $1 })
+        return n > 0 ? v.map { $0 / n } : v
+    }
+    nonisolated private static func dotProduct(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count else { return 0 }
+        var s: Float = 0; for i in 0..<a.count { s += a[i] * b[i] }; return s
+    }
+    nonisolated private static func meanVector(_ vs: [[Float]]) -> [Float] {
+        guard let first = vs.first, !vs.isEmpty else { return [] }
+        var acc = [Float](repeating: 0, count: first.count)
+        for v in vs where v.count == acc.count { for i in 0..<acc.count { acc[i] += v[i] } }
+        return acc.map { $0 / Float(vs.count) }
     }
 
     /// Compute fresh embeddings from a retained enrollment clip (raw 16 kHz mono
@@ -317,7 +387,7 @@ final class FluidAudioEngine: TranscriptionEngine {
     private func autoIdentify() {
         guard let store = voiceprints else { return }
         for (id, embs) in speakerEmbeddings where resolvedNames[id] == nil {
-            guard (speakerGatedSeconds[id] ?? 0) >= minSecondsToAutoIdentify, embs.count >= 2 else { continue }
+            guard (speakerGatedSeconds[id] ?? 0) >= settings.minSpeechToIdentify, embs.count >= 2 else { continue }
             let centroid = VoiceprintStore.normalized(VoiceprintStore.mean(embs))
             if let m = store.match(centroid, threshold: identificationThreshold) {
                 resolvedNames[id] = m.voiceprint.name
@@ -362,6 +432,8 @@ final class FluidAudioEngine: TranscriptionEngine {
         let threshold = Float(settings.diarizationThreshold)
         let doAsr = settings.offlineAsrRepass
         let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
+        let sens = settings.turnSensitivity
+        let targetSpeakers = settings.expectedSpeakerCount
         // One detached pass: build the clean mix, resample once, then run the
         // diarizer AND (optionally) the batch ASR over the same samples.
         let pass: OfflinePassResult = await Task.detached {
@@ -374,12 +446,20 @@ final class FluidAudioEngine: TranscriptionEngine {
             }
             // Diarization (independent of ASR — one failing doesn't block the other).
             var segs: [Seg]?
-            if let diar = try? await Self.makeDiarizer(clusterThreshold: threshold),
+            if let diar = try? await Self.makeDiarizer(clusterThreshold: threshold,
+                                                       minSpeechDuration: sens.minSpeechDuration,
+                                                       minSilenceGap: sens.minSilenceGap),
                let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000) {
-                segs = result.segments.map {
+                var mapped = result.segments.map {
                     Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
                         end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
                 }
+                // "Expected speakers": if the diarizer over-split, merge the closest
+                // speaker centroids down to the user-specified count.
+                if targetSpeakers > 0 {
+                    mapped = Self.collapseToTargetSpeakers(mapped, target: targetSpeakers)
+                }
+                segs = mapped
             } else {
                 AppLog.log("finalizeDiarization: diarization unavailable (init or run failed)", category: "record")
             }
