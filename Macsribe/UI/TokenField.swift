@@ -49,17 +49,25 @@ struct TokenField: NSViewRepresentable {
             return parent.completions.filter { $0.lowercased().hasPrefix(q) }
         }
 
-        /// Intercept committed tokens: keep known names, and route the first
-        /// unknown name to the "new contact" form instead of adding it raw.
+        /// Intercept committed tokens: keep names that are either a known contact
+        /// or already in the bound model, and route the first genuinely-new
+        /// (user-typed) name to the "new contact" form instead of adding it raw.
+        /// This also fires when the field re-tokenizes its programmatically-set
+        /// value, so an auto-identified speaker (a voiceprint name, not yet a vault
+        /// contact) must not be dropped just because it isn't in the completions.
         func tokenField(_ tokenField: NSTokenField, shouldAdd tokens: [Any], at index: Int) -> [Any] {
             let known = Set(parent.completions.map { $0.lowercased() })
+            let existing = Set(parent.tokens.map { $0.lowercased() })
             var keep: [Any] = []
             var firstNew: String?
             for case let s as String in tokens {
-                if known.contains(s.lowercased()) {
-                    keep.append(s)
+                let key = s.lowercased()
+                if known.contains(key) || existing.contains(key) {
+                    keep.append(s)                       // known contact, or already an attendee
                 } else if firstNew == nil {
-                    firstNew = s
+                    firstNew = s                         // first new user-typed name → new-contact form
+                } else {
+                    keep.append(s)                       // don't silently drop further new names
                 }
             }
             if let firstNew {
