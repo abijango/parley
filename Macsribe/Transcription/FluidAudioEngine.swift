@@ -59,7 +59,7 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// speakerId → resolved person name (auto-identified or manually assigned).
     private var resolvedNames: [String: String] = [:]
     private let minSegmentQuality: Float = 0.4
-    private let minSecondsToAutoIdentify: TimeInterval = 8
+    private let minSecondsToAutoIdentify: TimeInterval = 5
 
     // Background work.
     private var loadTask: Task<Void, Never>?
@@ -103,26 +103,35 @@ final class FluidAudioEngine: TranscriptionEngine {
         // identities each update (the reported flicker). It gets properly split once
         // it's confirmed.
         if !unit.confirmed {
-            let spk = bestSpeaker(start: firstTok.start, end: lastTok.end)
+            let spk = speakerNear(start: firstTok.start, end: lastTok.end)
             return [Segment(id: unit.id, track: .remote, start: firstTok.start, end: lastTok.end,
                             text: unit.text, confirmed: false,
                             speakerId: spk, speakerName: spk.flatMap { resolvedNames[$0] })]
         }
 
-        // Confirmed: split into runs of consecutive same-speaker tokens.
-        var runs: [(speaker: String?, toks: [Tok])] = []
+        // Group subword tokens into whole WORDS (▁ marks a word start) so a speaker
+        // change never cuts a word in half.
+        var words: [[Tok]] = []
         for t in unit.tokens {
-            let spk = bestSpeaker(start: t.start, end: t.end)
+            if words.isEmpty || t.text.hasPrefix("\u{2581}") { words.append([t]) }
+            else { words[words.count - 1].append(t) }
+        }
+        // Assign each word a speaker (filling gaps with the nearest turn), then group
+        // consecutive same-speaker words into runs.
+        var runs: [(speaker: String?, words: [[Tok]])] = []
+        for w in words {
+            let spk = speakerNear(start: w.first!.start, end: w.last!.end)
             if var last = runs.last, last.speaker == spk {
-                last.toks.append(t); runs[runs.count - 1] = last
+                last.words.append(w); runs[runs.count - 1] = last
             } else {
-                runs.append((spk, [t]))
+                runs.append((spk, [w]))
             }
         }
         let singleRun = runs.count == 1
         return runs.compactMap { run -> Segment? in
-            guard let first = run.toks.first, let last = run.toks.last else { return nil }
-            let text = singleRun ? unit.text : Self.reconstruct(run.toks.map(\.text))
+            let toks = run.words.flatMap { $0 }
+            guard let first = toks.first, let last = toks.last else { return nil }
+            let text = singleRun ? unit.text : Self.reconstruct(toks.map(\.text))
             guard !text.isEmpty else { return nil }
             // Key by unit + run start only (NOT speaker): resolving a run's speaker
             // later must not change the row identity, or it re-renders/flickers.
@@ -134,6 +143,18 @@ final class FluidAudioEngine: TranscriptionEngine {
                            text: text, confirmed: unit.confirmed,
                            speakerId: run.speaker, speakerName: run.speaker.flatMap { resolvedNames[$0] })
         }
+    }
+
+    /// Speaker overlapping `[start, end]`; if none (a diarization gap), the nearest
+    /// turn by midpoint — so gap tokens join a real speaker instead of falling back
+    /// to the "Remote" track label.
+    private func speakerNear(start: TimeInterval, end: TimeInterval) -> String? {
+        if let s = bestSpeaker(start: start, end: end) { return s }
+        guard !diarSegments.isEmpty else { return nil }
+        let mid = (start + end) / 2
+        return diarSegments.min(by: {
+            abs((($0.start + $0.end) / 2) - mid) < abs((($1.start + $1.end) / 2) - mid)
+        })?.speakerId
     }
 
     /// Rebuild readable text from SentencePiece subword tokens (▁ marks word starts).

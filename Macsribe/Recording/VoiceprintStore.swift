@@ -35,7 +35,11 @@ final class VoiceprintStore: ObservableObject {
         var best: (Voiceprint, Double)?
         for vp in voiceprints
         where vp.embeddingModel == Self.embeddingModel && vp.embeddingDim == q.count {
-            let score = Double(Self.dot(q, Self.normalized(vp.centroid)))
+            // Best similarity over the centroid AND each enrolled sample — more
+            // forgiving of cross-session variation than the averaged centroid alone
+            // (the averaged centroid can dilute a match for a less-consistent voice).
+            var score = Double(Self.dot(q, Self.normalized(vp.centroid)))
+            for e in vp.embeddings { score = max(score, Double(Self.dot(q, Self.normalized(e)))) }
             if score >= threshold, score > (best?.1 ?? -Double.infinity) { best = (vp, score) }
         }
         return best.map { (voiceprint: $0.0, score: $0.1) }
