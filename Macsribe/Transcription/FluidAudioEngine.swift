@@ -4,14 +4,13 @@ import FluidAudio
 
 /// Self-contained native transcription engine powered entirely by FluidAudio.
 ///
-/// Phase 2: live transcription only (no speaker labels yet). It mixes the mic and
-/// system capture rings into a single 16 kHz mono stream and drives Parakeet via
-/// `SlidingWindowAsrManager` (which keeps the multilingual v3 model — the EoU
-/// streaming manager would use different, non-v3 models). Confirmed/volatile
-/// updates map onto the existing `Segment` confirmed/tentative model.
+/// Mixes the mic + system capture rings into a single 16 kHz mono stream and runs
+/// everything from that one buffer: Parakeet ASR via `SlidingWindowAsrManager`
+/// (multilingual v3) plus pyannote/WeSpeaker diarization via `DiarizerManager`.
 ///
-/// Diarization + speaker identification are layered on in Phases 3–5; until then
-/// every segment is tagged `.remote` as a neutral placeholder.
+/// Phase 3: each transcript segment is attributed to a diarized speaker ("Speaker N")
+/// by maximum timestamp overlap. Mapping a speaker to a known person (voiceprints)
+/// is Phase 4–5; `track` stays `.remote` as a neutral placeholder for the source.
 @MainActor
 final class FluidAudioEngine: TranscriptionEngine {
     private let settings: AppSettings
@@ -19,16 +18,22 @@ final class FluidAudioEngine: TranscriptionEngine {
     // won't emit anything until ~15s of audio, which reads as "no transcript".
     private let asr = SlidingWindowAsrManager(config: .streaming)
 
+    /// The same mixed audio fed to ASR, buffered for the diarizer (drained in chunks).
+    private let diarRing = AudioRingBuffer(capacity: 16_000 * 60)
+
     // Timeline state (main actor).
     private var seeded: [Segment] = []
     private var confirmed: [Segment] = []
     private var volatileTail: Segment?
     private var streamStart: Date?
+    /// Diarized speaker turns on the session timeline (speakerId + start/end seconds).
+    private var diarSegments: [(speakerId: String, start: TimeInterval, end: TimeInterval)] = []
 
     // Background work.
     private var loadTask: Task<Void, Never>?
     private var updatesTask: Task<Void, Never>?
     private var mixerTask: Task<Void, Never>?
+    private var diarTask: Task<Void, Never>?
 
     /// 16 kHz mono — the format every FluidAudio model consumes.
     private static let format = AVAudioFormat(
@@ -65,7 +70,8 @@ final class FluidAudioEngine: TranscriptionEngine {
         loadTask?.cancel()
         mixerTask?.cancel()
         updatesTask?.cancel()
-        loadTask = nil; mixerTask = nil; updatesTask = nil
+        diarTask?.cancel()
+        loadTask = nil; mixerTask = nil; updatesTask = nil; diarTask = nil
         _ = try? await asr.finish()
         await asr.cleanup()
     }
@@ -85,10 +91,11 @@ final class FluidAudioEngine: TranscriptionEngine {
             }
         }
 
-        // Mix both capture rings into one mono stream and feed the recognizer.
-        // Anchored to whichever ring has more pending data; the shorter ring is
-        // treated as silence for the gap (e.g. muted mic, or no system audio).
+        // Mix both capture rings into one mono stream; feed the recognizer AND
+        // buffer the same samples for the diarizer. Anchored to whichever ring has
+        // more pending data; the shorter ring is treated as silence for the gap.
         let asr = self.asr
+        let diarRing = self.diarRing
         mixerTask = Task.detached {
             var fedSamples = 0
             var lastLogged = 0
@@ -96,6 +103,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                 if let mixed = Self.mix(mic: micRing, system: systemRing), !mixed.isEmpty,
                    let buffer = Self.makeBuffer(mixed) {
                     await asr.streamAudio(buffer)
+                    mixed.withUnsafeBufferPointer { diarRing.write($0) }
                     fedSamples += mixed.count
                     if fedSamples - lastLogged >= 16_000 * 5 {   // ~every 5s of audio
                         lastLogged = fedSamples
@@ -105,6 +113,69 @@ final class FluidAudioEngine: TranscriptionEngine {
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
         }
+
+        // Diarize in ~10s chunks on a long-lived DiarizerManager so in-session
+        // speaker ids stay consistent; rebase each chunk's times by its start offset.
+        diarTask = Task.detached { [weak self] in
+            guard let diar = try? await Self.makeDiarizer() else {
+                AppLog.log("FluidAudio diarizer failed to initialize — transcript will have no speaker labels", category: "record")
+                return
+            }
+            let chunkSamples = 16_000 * 10
+            var processed = 0
+            var scratch = [Float]()
+            while !Task.isCancelled {
+                guard diarRing.availableToRead >= chunkSamples else {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    continue
+                }
+                let n = diarRing.read(maxCount: chunkSamples, into: &scratch)
+                guard n > 0 else { continue }
+                let offset = startElapsed + TimeInterval(processed) / 16_000
+                processed += n
+                guard let result = try? diar.performCompleteDiarization(Array(scratch.prefix(n)), sampleRate: 16_000)
+                else { continue }
+                let segs = result.segments.map {
+                    (speakerId: $0.speakerId,
+                     start: offset + TimeInterval($0.startTimeSeconds),
+                     end: offset + TimeInterval($0.endTimeSeconds))
+                }
+                guard !segs.isEmpty else { continue }
+                await self?.ingestDiarization(segs)
+            }
+        }
+    }
+
+    /// Load diarization models and build a session-long manager (owned by the diarTask).
+    nonisolated private static func makeDiarizer() async throws -> DiarizerManager {
+        let models = try await DiarizerModels.downloadIfNeeded()
+        let diar = DiarizerManager(config: DiarizerConfig())   // clusteringThreshold 0.7 default; tunable
+        diar.initialize(models: models)
+        return diar
+    }
+
+    /// Merge newly-diarized turns and re-attribute known transcript segments.
+    private func ingestDiarization(_ segs: [(speakerId: String, start: TimeInterval, end: TimeInterval)]) {
+        diarSegments.append(contentsOf: segs)
+        confirmed = confirmed.map(assigningSpeaker)
+        if let v = volatileTail { volatileTail = assigningSpeaker(v) }
+        publish()
+    }
+
+    /// Return a copy of `seg` with its `speakerId` set to the diarized speaker whose
+    /// turn overlaps it most (unchanged if no diarized turn overlaps yet).
+    private func assigningSpeaker(_ seg: Segment) -> Segment {
+        guard let id = bestSpeaker(start: seg.start, end: seg.end) else { return seg }
+        var s = seg; s.speakerId = id; return s
+    }
+
+    private func bestSpeaker(start: TimeInterval, end: TimeInterval) -> String? {
+        var best: (id: String, overlap: TimeInterval)?
+        for d in diarSegments {
+            let overlap = min(end, d.end) - max(start, d.start)
+            if overlap > 0, overlap > (best?.overlap ?? 0) { best = (d.speakerId, overlap) }
+        }
+        return best?.id
     }
 
     /// Drain both rings and sum sample-wise into one mono buffer.
@@ -135,7 +206,10 @@ final class FluidAudioEngine: TranscriptionEngine {
         guard !text.isEmpty else { return }
         let start = update.tokenTimings.first.map { startElapsed + $0.startTime } ?? elapsedNow(startElapsed)
         let end = update.tokenTimings.last.map { startElapsed + $0.endTime } ?? start
-        let seg = Segment(track: .remote, start: start, end: end, text: text, confirmed: update.isConfirmed)
+        // Attribute to a diarized speaker now if one already overlaps; otherwise it
+        // stays unlabeled until diarization catches up (ingestDiarization re-attributes).
+        let seg = Segment(track: .remote, start: start, end: end, text: text,
+                          confirmed: update.isConfirmed, speakerId: bestSpeaker(start: start, end: end))
         // Log metadata only — never transcript content (it lands in a persistent
         // log file; meeting speech is sensitive).
         AppLog.log("FluidAudio update (\(update.isConfirmed ? "confirmed" : "volatile")): \(text.count) chars", category: "record")

@@ -34,10 +34,11 @@ struct LiveTranscriptView: View {
             Text(segment.timestamp)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.tertiary)
-            Text(segment.track.label)
+            Text(segment.displaySpeaker)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(color(for: segment.track))
-                .frame(width: 56, alignment: .leading)
+                .foregroundStyle(color(for: segment))
+                .frame(width: 80, alignment: .leading)
+                .lineLimit(1)
             Text(segment.text)
                 .font(.body)
                 .foregroundStyle(segment.confirmed ? .primary : .secondary)
@@ -47,8 +48,14 @@ struct LiveTranscriptView: View {
         .opacity(segment.confirmed ? 1.0 : 0.6)
     }
 
-    private func color(for track: SpeakerTrack) -> Color {
-        switch track {
+    /// Color by diarized speaker when known (stable per-speaker palette), else by track.
+    private func color(for segment: Segment) -> Color {
+        if let id = segment.speakerId {
+            let palette: [Color] = [.green, .orange, .purple, .pink, .teal, .indigo, .brown, .cyan]
+            let idx = abs(id.hashValue) % palette.count
+            return palette[idx]
+        }
+        switch segment.track {
         case .me: return .accentColor
         case .remote: return .green
         }
