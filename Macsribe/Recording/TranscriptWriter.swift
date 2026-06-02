@@ -136,7 +136,7 @@ enum TranscriptWriter {
     static func renderFrontmatter(_ meta: TranscriptMeta) -> String {
         var lines: [String] = ["---"]
         lines.append("title: \(yamlScalar(meta.title))")
-        lines.append("date: \(isoDate(meta.date))")
+        lines.append("date: \(isoDateTime(meta.date))")
         if meta.attendees.isEmpty {
             lines.append("attendees: []")
         } else {
@@ -298,11 +298,27 @@ enum TranscriptWriter {
         return f.string(from: date)
     }
 
+    /// Full timestamp for the frontmatter `date:` field, so the History tab shows the
+    /// real recording time and sorts same-day items correctly. The human-readable
+    /// `**Date:**` header line stays date-only via `isoDate`.
+    static func isoDateTime(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f.string(from: date)
+    }
+
+    /// Parses either the full `yyyy-MM-dd HH:mm:ss` timestamp or a legacy date-only
+    /// `yyyy-MM-dd` value (older transcripts).
     static func parseISODate(_ s: String) -> Date? {
         let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
         f.locale = Locale(identifier: "en_US_POSIX")
-        return f.date(from: s)
+        let trimmed = s.trimmingCharacters(in: .whitespaces)
+        for fmt in ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"] {
+            f.dateFormat = fmt
+            if let d = f.date(from: trimmed) { return d }
+        }
+        return nil
     }
 
     /// Removes characters illegal in filenames (notably `/` and `:` on macOS).

@@ -29,7 +29,13 @@ final class TranscriptStore: ObservableObject {
         var found: [TranscriptItem] = []
         found.append(contentsOf: scan(AppPaths.unprocessedURL, processed: false))
         found.append(contentsOf: scan(AppPaths.processedURL, processed: true))
-        found.sort { $0.meta.date > $1.meta.date }
+        // Newest first; filename is a stable tiebreaker so same-minute items don't
+        // reorder between refreshes.
+        found.sort {
+            $0.meta.date != $1.meta.date
+                ? $0.meta.date > $1.meta.date
+                : $0.url.lastPathComponent > $1.url.lastPathComponent
+        }
         items = found
     }
 
@@ -86,7 +92,8 @@ final class TranscriptStore: ObservableObject {
             // Skip the staging dir, hidden files, non-markdown.
             if url.lastPathComponent.hasPrefix(".") { continue }
             guard url.pathExtension.lowercased() == "md" else { continue }
-            let meta = TranscriptWriter.parseFrontmatter(url) ?? fallbackMeta(url, processed: processed)
+            var meta = TranscriptWriter.parseFrontmatter(url) ?? fallbackMeta(url, processed: processed)
+            meta.date = resolvedDate(url, meta.date)
             result.append(TranscriptItem(url: url, meta: meta, isProcessed: processed))
         }
         return result
@@ -137,6 +144,30 @@ final class TranscriptStore: ObservableObject {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd-HHmm"
         return f.string(from: date)
+    }
+
+    /// Older transcripts stored a date-only frontmatter `date:` (parsed to midnight),
+    /// which makes same-day items tie and sort arbitrarily and shows "00:00" in the
+    /// list. When the parsed date has no time component, recover the real recording
+    /// time from the filename stamp (`yyyy-MM-dd-HHmm`) or the file's creation date.
+    private func resolvedDate(_ url: URL, _ metaDate: Date) -> Date {
+        let cal = Calendar.current
+        let c = cal.dateComponents([.hour, .minute, .second], from: metaDate)
+        guard (c.hour ?? 0) == 0, (c.minute ?? 0) == 0, (c.second ?? 0) == 0 else { return metaDate }
+
+        // Try the filename stamp (recording time, minute precision).
+        let stem = url.deletingPathExtension().lastPathComponent
+        let prefix = stem.range(of: " - ").map { String(stem[stem.startIndex..<$0.lowerBound]) }
+            ?? String(stem.prefix(15))
+        if let stamped = parseStampDate(prefix) {
+            let sc = cal.dateComponents([.hour, .minute], from: stamped)
+            if (sc.hour ?? 0) != 0 || (sc.minute ?? 0) != 0 { return stamped }
+        }
+        // Fall back to the file's creation date (full precision).
+        if let created = try? url.resourceValues(forKeys: [.creationDateKey]).creationDate {
+            return created
+        }
+        return metaDate
     }
 
     private func parseStampDate(_ s: String) -> Date? {
