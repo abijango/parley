@@ -50,6 +50,20 @@ final class RecordingsStore: ObservableObject {
         refresh()
     }
 
+    /// Delete several sessions at once (multi-select + the "older than" purge).
+    func delete(_ folders: [RecordingFolder]) {
+        guard !folders.isEmpty else { return }
+        let bytes = folders.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        for folder in folders { try? FileManager.default.removeItem(at: folder.url) }
+        AppLog.log("Deleted \(folders.count) recording session(s) (\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)))", category: "record")
+        refresh()
+    }
+
+    /// Sessions started before `date` — reusable for a future auto-purge job.
+    func sessions(olderThan date: Date) -> [RecordingFolder] {
+        sessions.filter { $0.date < date }
+    }
+
     /// Recursively sums the byte size of a session folder.
     private static func folderSize(_ url: URL) -> Int64 {
         let fm = FileManager.default

@@ -11,6 +11,10 @@ struct SettingsView: View {
     @EnvironmentObject private var detector: CallDetector
     @StateObject private var recordings = RecordingsStore()
     @State private var pendingDelete: RecordingFolder?
+    @State private var selectedSessions: Set<String> = []
+    @State private var purgeDays = 14
+    @State private var pendingBulkDelete: [RecordingFolder]?
+    @State private var storageStatus: String?
 
     var body: some View {
         TabView {
@@ -122,7 +126,23 @@ struct SettingsView: View {
                     NSWorkspace.shared.activateFileViewerSelecting([AppPaths.recordingsDirectory])
                 }
                 Spacer()
+                if !selectedSessions.isEmpty {
+                    Button("Delete selected (\(selectedSessions.count))", role: .destructive) { confirmDeleteSelected() }
+                }
                 Button("Refresh") { recordings.refresh() }
+            }
+
+            HStack(spacing: 8) {
+                Text("Delete recordings older than").font(.callout)
+                Picker("", selection: $purgeDays) {
+                    ForEach([7, 14, 30, 60, 90], id: \.self) { Text("\($0) days").tag($0) }
+                }
+                .labelsHidden().fixedSize()
+                Button("Delete older", role: .destructive) { confirmPurge() }
+                Spacer()
+            }
+            if let storageStatus {
+                Text(storageStatus).font(.caption2).foregroundStyle(.secondary)
             }
 
             Divider()
@@ -154,11 +174,53 @@ struct SettingsView: View {
         } message: { folder in
             Text("“\(folder.title)” — the audio is removed permanently. Any transcript or note already in your vault is kept.")
         }
+        .confirmationDialog(
+            "Delete \(pendingBulkDelete?.count ?? 0) recording\((pendingBulkDelete?.count ?? 0) == 1 ? "" : "s")?",
+            isPresented: Binding(get: { pendingBulkDelete != nil }, set: { if !$0 { pendingBulkDelete = nil } })
+        ) {
+            if let folders = pendingBulkDelete, !folders.isEmpty {
+                let bytes = folders.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                Button("Delete \(folders.count) · \(byteText(bytes))", role: .destructive) {
+                    recordings.delete(folders)
+                    selectedSessions.removeAll()
+                    storageStatus = "Deleted \(folders.count) recording(s)."
+                    pendingBulkDelete = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingBulkDelete = nil }
+        } message: {
+            Text("Audio is removed permanently. Transcripts and notes in your vault are kept.")
+        }
+    }
+
+    private func confirmDeleteSelected() {
+        let folders = recordings.sessions.filter {
+            selectedSessions.contains($0.id) && $0.id != recording.currentSessionID
+        }
+        if folders.isEmpty { storageStatus = "Nothing to delete."; return }
+        storageStatus = nil
+        pendingBulkDelete = folders
+    }
+
+    private func confirmPurge() {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -purgeDays, to: Date()) ?? Date()
+        let folders = recordings.sessions(olderThan: cutoff).filter { $0.id != recording.currentSessionID }
+        if folders.isEmpty { storageStatus = "No recordings older than \(purgeDays) days."; return }
+        storageStatus = nil
+        pendingBulkDelete = folders
     }
 
     private func sessionRow(_ folder: RecordingFolder) -> some View {
         let isCurrent = folder.id == recording.currentSessionID
         return HStack(spacing: 10) {
+            Toggle("", isOn: Binding(
+                get: { selectedSessions.contains(folder.id) },
+                set: { if $0 { selectedSessions.insert(folder.id) } else { selectedSessions.remove(folder.id) } }
+            ))
+            .labelsHidden().toggleStyle(.checkbox)
+            .disabled(isCurrent)
+            .help(isCurrent ? "Can't select the recording in progress" : "Select for bulk delete")
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(folder.title).font(.callout).lineLimit(1).truncationMode(.middle)
                 HStack(spacing: 6) {
