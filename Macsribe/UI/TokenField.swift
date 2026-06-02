@@ -24,6 +24,13 @@ struct TokenField: NSViewRepresentable {
 
     func updateNSView(_ field: NSTokenField, context: Context) {
         context.coordinator.parent = self
+        field.placeholderString = placeholder
+        // Never reassign objectValue while the user is actively editing: doing so
+        // ends the field editor and commits the currently-highlighted completion as
+        // a token. During a live recording, segment updates re-render this view
+        // constantly, so without this guard each re-render hijacks the in-progress
+        // keystroke (the reported "random attendee got added" bug).
+        if field.currentEditor() != nil { return }
         let current = (field.objectValue as? [String]) ?? []
         if current != tokens { field.objectValue = tokens }
     }
@@ -67,7 +74,9 @@ struct TokenField: NSViewRepresentable {
         private func sync(_ note: Notification) {
             guard let field = note.object as? NSTokenField else { return }
             let values = (field.objectValue as? [String]) ?? []
-            DispatchQueue.main.async { self.parent.tokens = values }
+            DispatchQueue.main.async {
+                if self.parent.tokens != values { self.parent.tokens = values }
+            }
         }
     }
 }
