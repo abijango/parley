@@ -7,12 +7,6 @@ struct MainWindowView: View {
     @EnvironmentObject private var recording: RecordingController
     @State private var selection: SidebarSection? = .record
     @State private var showingRecovery = false
-    // Keep the sidebar pinned inline. On narrow built-in displays the default
-    // `.automatic` behavior collapses/overlays the sidebar — and because the detail
-    // hosts another split view (History), that left the layout broken (blank band,
-    // title bleeding over the list). Forcing `.all` + `.balanced` renders all columns
-    // inline at any width.
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
         case record = "Record", history = "History"
@@ -26,22 +20,24 @@ struct MainWindowView: View {
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            List(SidebarSection.allCases, selection: $selection) { section in
-                Label(section.rawValue, systemImage: section.symbol)
-                    .tag(section)
+        // A plain sidebar + detail (NOT NavigationSplitView): in this fixed menu-bar
+        // utility window, NavigationSplitView's adaptive column-collapsing and
+        // integrated title bar misrendered on narrow built-in displays (blank band,
+        // window title bleeding over the content). A fixed HStack renders identically
+        // at every size.
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            Group {
+                switch selection ?? .record {
+                case .record:
+                    RecordDetailView()
+                case .history:
+                    HistoryView()
+                }
             }
-            .navigationSplitViewColumnWidth(min: 140, ideal: 160, max: 200)
-            .listStyle(.sidebar)
-        } detail: {
-            switch selection ?? .record {
-            case .record:
-                RecordDetailView()
-            case .history:
-                HistoryView()
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 720, minHeight: 560)
         .environmentObject(recording.store)
         // Crash recovery: offer any interrupted sessions on launch; auto-dismiss
@@ -56,6 +52,33 @@ struct MainWindowView: View {
         .onAppear {
             if !recording.pendingRecoveries.isEmpty { showingRecovery = true }
         }
+    }
+
+    /// Fixed-width navigation sidebar (Record / History).
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(SidebarSection.allCases) { section in
+                let isSelected = (selection ?? .record) == section
+                Button {
+                    selection = section
+                } label: {
+                    Label(section.rawValue, systemImage: section.symbol)
+                        .font(.body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .background(isSelected ? Color.accentColor.opacity(0.18) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(isSelected ? Color.accentColor : .primary)
+            }
+            Spacer()
+        }
+        .padding(8)
+        .frame(width: 170)
+        .frame(maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
