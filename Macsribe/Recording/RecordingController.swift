@@ -155,7 +155,10 @@ final class RecordingController: ObservableObject {
     func launchWarmup() {
         guard !didWarmup else { return }
         didWarmup = true
-        AppLog.log("Launch warmup — model=\(settings.model.rawValue), \(MemoryGuard.snapshot()), logs at \(AppLog.fileURL.path)", category: "app")
+        let engineDesc = settings.transcriptionEngine == .fluidAudio
+            ? "FluidAudio (Parakeet \(settings.parakeetVersion.rawValue))"
+            : "WhisperKit (\(settings.model.rawValue))"
+        AppLog.log("Launch warmup — engine=\(engineDesc), \(MemoryGuard.snapshot()), logs at \(AppLog.fileURL.path)", category: "app")
         VaultMigration.runIfNeeded(vault: settings.vaultURL)
         SystemAudioCapture.cleanupLeakedAggregates()    // destroy any aggregate device a crash left behind
         ModelManager.recoverFromCrashedLoadIfNeeded()   // self-heal a corrupt compiled-model cache
@@ -529,7 +532,10 @@ final class RecordingController: ObservableObject {
     /// is a short catch-up at the start of that session.
     private func scheduleIdleUnload() {
         idleUnloadTimer?.invalidate(); idleUnloadTimer = nil
-        guard settings.idleUnloadEnabled else { return }
+        // Idle-unload only applies to the persistent WhisperKit model. FluidAudio
+        // loads its models per-recording and releases them on stop, so there's
+        // nothing to idle-unload (and logging it would be misleading).
+        guard settings.idleUnloadEnabled, settings.transcriptionEngine == .whisperKit else { return }
         let interval = max(60, settings.idleUnloadMinutes * 60)
         idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
