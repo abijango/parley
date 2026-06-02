@@ -175,13 +175,21 @@ if !asrTokens.isEmpty && !diarSegs.isEmpty {
         return best?.spk ?? "?"
     }
     struct L { var spk: String; var start: Double; var end: Double; var text: String }
-    var lines: [L] = []
+    // Group tokens into whole words (word start = ▁ OR a leading space — the offline
+    // ASR uses spaces, not ▁), then assign each WORD a speaker, mirroring the app.
+    var wgroups: [[(text: String, start: Double, end: Double)]] = []
     for t in asrTokens {
-        let spk = speakerFor((t.start + t.end) / 2)
+        if wgroups.isEmpty || t.text.hasPrefix("\u{2581}") || t.text.hasPrefix(" ") { wgroups.append([t]) }
+        else { wgroups[wgroups.count - 1].append(t) }
+    }
+    var lines: [L] = []
+    for w in wgroups {
+        let spk = speakerFor((w.first!.start + w.last!.end) / 2)
+        let wtext = w.map(\.text).joined()
         if var last = lines.last, last.spk == spk {
-            last.end = t.end; last.text += t.text; lines[lines.count - 1] = last
+            last.end = w.last!.end; last.text += wtext; lines[lines.count - 1] = last
         } else {
-            lines.append(L(spk: spk, start: t.start, end: t.end, text: t.text))
+            lines.append(L(spk: spk, start: w.first!.start, end: w.last!.end, text: wtext))
         }
     }
     line("\n[DIARIZATION-FIRST attribution] \(lines.count) lines:")

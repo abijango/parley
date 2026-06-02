@@ -124,7 +124,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         guard !toks.isEmpty else { return [] }
         var words: [[Tok]] = []
         for t in toks {
-            if words.isEmpty || t.text.hasPrefix("\u{2581}") { words.append([t]) }
+            if words.isEmpty || Self.isWordStart(t.text) { words.append([t]) }
             else { words[words.count - 1].append(t) }
         }
         var runs: [(spk: String?, toks: [Tok])] = []
@@ -186,11 +186,12 @@ final class FluidAudioEngine: TranscriptionEngine {
                             speakerId: spk, speakerName: spk.flatMap { resolvedNames[$0] })]
         }
 
-        // Group subword tokens into whole WORDS (▁ marks a word start) so a speaker
-        // change never cuts a word in half.
+        // Group subword tokens into whole WORDS so a speaker change never cuts a word
+        // in half. A word starts on ▁ (streaming ASR) OR a leading space (the offline
+        // batch ASR marks word boundaries with a space, not ▁).
         var words: [[Tok]] = []
         for t in unit.tokens {
-            if words.isEmpty || t.text.hasPrefix("\u{2581}") { words.append([t]) }
+            if words.isEmpty || Self.isWordStart(t.text) { words.append([t]) }
             else { words[words.count - 1].append(t) }
         }
         // Assign each word a speaker (filling gaps with the nearest turn), then group
@@ -232,6 +233,13 @@ final class FluidAudioEngine: TranscriptionEngine {
         return diarSegments.min(by: {
             abs((($0.start + $0.end) / 2) - mid) < abs((($1.start + $1.end) / 2) - mid)
         })?.speakerId
+    }
+
+    /// A token begins a new word if it starts with the SentencePiece ▁ marker
+    /// (streaming ASR) or a literal leading space (the offline batch ASR uses spaces,
+    /// not ▁ — relying only on ▁ collapsed every offline token into one "word").
+    private static func isWordStart(_ text: String) -> Bool {
+        text.hasPrefix("\u{2581}") || text.hasPrefix(" ")
     }
 
     /// Rebuild readable text from SentencePiece subword tokens (▁ marks word starts).
