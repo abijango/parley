@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Concept B (the whimsical one): a parrot. "Parley" is pirate-speak for a
+       truce/talk, and a parrot is the original talker — perfect for a
+       transcription app. Stylised flat parrot head with a little speech bubble.
+       NOTE: this is the roughest concept by hand — refine the curves in a vector
+       tool (Icon Composer / Figma). The bubbles & waves SVGs are production-clean. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#1FB3C6"/><stop offset="1" stop-color="#0C6378"/>
+    </linearGradient>
+    <linearGradient id="head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4F86F7"/><stop offset="1" stop-color="#2956D6"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.5" cy="0.12" r="0.95">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.20"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="228" fill="url(#sheen)"/>
+
+  <!-- Crest feathers -->
+  <ellipse cx="362" cy="300" rx="40" ry="112" transform="rotate(-30 362 300)" fill="#FF5A4D"/>
+  <ellipse cx="432" cy="276" rx="42" ry="124" transform="rotate(-6 432 276)" fill="#FF9E2C"/>
+  <ellipse cx="502" cy="298" rx="40" ry="112" transform="rotate(18 502 298)" fill="#FFD23C"/>
+
+  <!-- Wing hint -->
+  <path d="M286 566 q-46 128 64 206 q-6 -128 -64 -206 z" fill="#234FC4"/>
+
+  <!-- Head -->
+  <circle cx="446" cy="524" r="202" fill="url(#head)"/>
+
+  <!-- White face patch -->
+  <ellipse cx="548" cy="508" rx="110" ry="140" fill="#ffffff"/>
+
+  <!-- Beak (hooked) -->
+  <path d="M596 446 c98 -8 172 34 172 98 c0 46 -46 72 -100 60 c36 -18 46 -54 30 -88 c-22 -42 -64 -62 -102 -56 z" fill="#FF9E2C"/>
+  <path d="M600 560 c42 24 96 26 132 8 c-18 42 -66 60 -108 50 c-26 -6 -36 -36 -24 -58 z" fill="#FFB94D"/>
+
+  <!-- Eye -->
+  <circle cx="556" cy="470" r="34" fill="#15223A"/>
+  <circle cx="568" cy="458" r="11" fill="#ffffff"/>
+
+  <!-- Speech bubble (it's talking → transcribing) -->
+  <path d="M722 352 q-6 52 -48 72 q46 -8 74 -44 z" fill="#ffffff"/>
+  <rect x="700" y="232" width="180" height="122" rx="44" fill="#ffffff"/>
+  <g>
+    <circle cx="748" cy="293" r="16" fill="#2C7BF2"/>
+    <circle cx="790" cy="293" r="16" fill="#1FB457"/>
+    <circle cx="832" cy="293" r="16" fill="#FF9E2C"/>
+  </g>
+</svg>

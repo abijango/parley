@@ -1,0 +1,62 @@
+# XcodeGen project definition.
+# Regenerate the .xcodeproj after editing this file:  xcodegen generate
+#
+# TODO(app-name): "Macsribe" is a PLACEHOLDER. When the final name is chosen, sweep:
+#   - this file (name, PRODUCT_NAME, bundle id, paths)
+#   - Macsribe/App/Info.plist usage strings + CFBundleDisplayName
+#   - the source directory name `Macsribe/`
+#   - AppInfo.name in Macsribe/App/AppInfo.swift
+# A repo-wide `grep -rn "TODO(app-name)"` finds every spot.
+
+name: Macsribe
+options:
+  bundleIdPrefix: com.naufalmir
+  deploymentTarget:
+    macOS: "14.4"          # Core Audio process taps require 14.4+
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit.git
+    from: "0.13.0"          # resolves to latest 0.18.x (stable 0.x API line)
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui.git
+    from: "2.4.0"           # SwiftUI GitHub-flavored markdown renderer
+
+targets:
+  Macsribe:                 # TODO(app-name)
+    type: application
+    platform: macOS
+    deploymentTarget: "14.4"
+    sources:
+      - path: Macsribe
+    dependencies:
+      - package: WhisperKit
+      - package: MarkdownUI
+    info:
+      path: Macsribe/App/Info.plist
+      properties:
+        CFBundleDisplayName: Macsribe        # TODO(app-name)
+        LSUIElement: false                   # regular Dock app with a main window (+ menu-bar companion)
+        LSMinimumSystemVersion: "14.4"
+        NSMicrophoneUsageDescription: "Records your microphone so meetings can be transcribed locally."
+        NSAudioCaptureUsageDescription: "Captures system and app audio so the other side of meetings can be transcribed locally."
+        NSHumanReadableCopyright: ""
+    entitlements:
+      path: Macsribe/App/Macsribe.entitlements
+      properties:
+        com.apple.security.app-sandbox: false        # non-sandboxed: process taps + spawning `claude` + writing to the vault
+        com.apple.security.device.audio-input: true  # microphone (required with Hardened Runtime)
+    settings:
+      base:
+        PRODUCT_NAME: Macsribe                              # TODO(app-name)
+        PRODUCT_BUNDLE_IDENTIFIER: com.naufalmir.macsribe   # TODO(app-name)
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        COMBINE_HIDPI_IMAGES: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"

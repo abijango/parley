@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Concept A: "Parley" = two sides meeting. Two speech bubbles (Me=blue,
+       Remote=green, matching the app's transcript colors) overlap. Whimsical
+       via friendly rounded forms + typing dots. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6470F2"/><stop offset="1" stop-color="#6A23CE"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62A8FF"/><stop offset="1" stop-color="#2C7BF2"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5FE38C"/><stop offset="1" stop-color="#1FB457"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.5" cy="0.12" r="0.95">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="228" fill="url(#sheen)"/>
+
+  <!-- Blue bubble (Me) -->
+  <path d="M291 556 q-14 96 -96 132 q86 -20 150 -82 z" fill="url(#blue)"/>
+  <rect x="196" y="298" width="392" height="290" rx="92" fill="url(#blue)"/>
+  <g fill="#ffffff" fill-opacity="0.92">
+    <circle cx="288" cy="443" r="26"/><circle cx="360" cy="443" r="26"/><circle cx="432" cy="443" r="26"/>
+  </g>
+
+  <!-- Green bubble (Remote), overlapping, with a white separation edge -->
+  <path d="M733 596 q14 96 96 132 q-86 -20 -150 -82 z" fill="url(#green)" stroke="#ffffff" stroke-opacity="0.92" stroke-width="14" stroke-linejoin="round"/>
+  <rect x="436" y="338" width="392" height="290" rx="92" fill="url(#green)" stroke="#ffffff" stroke-opacity="0.92" stroke-width="14"/>
+  <g fill="#ffffff" fill-opacity="0.92">
+    <circle cx="592" cy="483" r="26"/><circle cx="664" cy="483" r="26"/><circle cx="736" cy="483" r="26"/>
+  </g>
+</svg>
