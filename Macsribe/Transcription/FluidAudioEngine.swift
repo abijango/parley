@@ -273,7 +273,13 @@ final class FluidAudioEngine: TranscriptionEngine {
     nonisolated private static func makeDiarizer(clusterThreshold: Float) async throws -> DiarizerManager {
         let models = try await DiarizerModels.downloadIfNeeded()
         var config = DiarizerConfig()
-        config.clusteringThreshold = clusterThreshold   // library default 0.7 over-merges; we default 0.6
+        config.clusteringThreshold = clusterThreshold
+        // Finer turn segmentation so rapid back-and-forth (short ~1 s turns with brief
+        // gaps) splits into separate speaker turns instead of collapsing into one. The
+        // library defaults (minSpeechDuration 1.0, minSilenceGap 0.5) merge fast dialogue
+        // into a single segment, which then maps entirely to one speaker downstream.
+        config.minSpeechDuration = 0.5
+        config.minSilenceGap = 0.25
         let diar = DiarizerManager(config: config)
         diar.initialize(models: models)
         return diar

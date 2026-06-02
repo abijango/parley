@@ -394,7 +394,7 @@ struct SettingsView: View {
                     Text(String(format: "%.2f", settings.diarizationThreshold))
                         .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
                 }
-                Text("Lower = more sensitive (splits similar voices into separate speakers); higher = merges. If distinct speakers are labelled as one, lower it. Applies to the next recording.")
+                Text("How readily two voice samples are treated as the same person. Too high merges distinct speakers into one; too low fragments a single person's natural variation into several \"speakers\". ~0.6–0.7 suits most calls — only nudge it if you see one of those failure modes. Applies to the next recording.")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
