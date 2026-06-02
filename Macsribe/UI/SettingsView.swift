@@ -227,6 +227,7 @@ struct SettingsView: View {
     }
 
     private var transcriptionTab: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 10) {
             Text("Engine").font(.headline)
             Picker("", selection: Binding(
@@ -327,14 +328,15 @@ struct SettingsView: View {
                 }
                 .disabled(recording.isRecording)
             }
-            Spacer()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { models.refreshDownloadedModels() }
         // Reload the model when the compute mode changes (forces a rebuild with
         // the new compute units; GPU drops the ANE specialization wait).
         .onChange(of: settings.computeModeRaw) {
             guard !recording.isRecording else { return }
             Task { await models.prepare(settings.model) }
+        }
         }
     }
 
