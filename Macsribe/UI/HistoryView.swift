@@ -37,9 +37,13 @@ struct HistoryView: View {
     @State private var attendeeDraft = ""
 
     var body: some View {
-        HSplitView {
+        // A plain HStack (not a nested HSplitView) so this view doesn't add a second
+        // splitter inside the window's NavigationSplitView detail — that nesting broke
+        // the layout on narrow displays. Fixed-width list, detail fills the rest.
+        HStack(spacing: 0) {
             list
-                .frame(minWidth: 240, idealWidth: 300, maxWidth: 380)
+                .frame(width: 300)
+            Divider()
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

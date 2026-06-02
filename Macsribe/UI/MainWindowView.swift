@@ -7,6 +7,12 @@ struct MainWindowView: View {
     @EnvironmentObject private var recording: RecordingController
     @State private var selection: SidebarSection? = .record
     @State private var showingRecovery = false
+    // Keep the sidebar pinned inline. On narrow built-in displays the default
+    // `.automatic` behavior collapses/overlays the sidebar — and because the detail
+    // hosts another split view (History), that left the layout broken (blank band,
+    // title bleeding over the list). Forcing `.all` + `.balanced` renders all columns
+    // inline at any width.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
         case record = "Record", history = "History"
@@ -20,12 +26,12 @@ struct MainWindowView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             List(SidebarSection.allCases, selection: $selection) { section in
                 Label(section.rawValue, systemImage: section.symbol)
                     .tag(section)
             }
-            .navigationSplitViewColumnWidth(min: 140, ideal: 160, max: 220)
+            .navigationSplitViewColumnWidth(min: 140, ideal: 160, max: 200)
             .listStyle(.sidebar)
         } detail: {
             switch selection ?? .record {
@@ -35,6 +41,7 @@ struct MainWindowView: View {
                 HistoryView()
             }
         }
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 720, minHeight: 560)
         .environmentObject(recording.store)
         // Crash recovery: offer any interrupted sessions on launch; auto-dismiss
