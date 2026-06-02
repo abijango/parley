@@ -424,24 +424,23 @@ final class FluidAudioEngine: TranscriptionEngine {
         return VoiceprintStore.normalized(VoiceprintStore.mean(embs))
     }
 
-    /// Per-speaker summaries for the at-stop review panel.
+    /// Per-speaker summaries for the review panel. The snippet text AND the
+    /// play-sample come from the SAME (longest) transcript segment, so the audio
+    /// you hear matches the line you see.
     func speakerSummaries() -> [CallSpeakerSummary] {
-        var talk: [String: TimeInterval] = [:]
-        var longest: [String: (start: TimeInterval, end: TimeInterval)] = [:]
-        for d in diarSegments {
-            let dur = max(0, d.end - d.start)
-            talk[d.speakerId, default: 0] += dur
-            let cur = longest[d.speakerId]
-            if cur == nil || dur > (cur!.end - cur!.start) { longest[d.speakerId] = (d.start, d.end) }
+        var byId: [String: [Segment]] = [:]
+        for s in finalTimeline() where s.speakerId != nil {
+            byId[s.speakerId!, default: []].append(s)
         }
-        let all = finalTimeline()
-        return talk.keys.sorted().map { id in
-            let seg = longest[id] ?? (0, 0)
-            let first = all.first(where: { $0.speakerId == id })?.text ?? ""
+        return byId.keys.sorted().map { id in
+            let segs = byId[id] ?? []
+            let talk = segs.reduce(0.0) { $0 + max(0, $1.end - $1.start) }
+            let rep = segs.max(by: { ($0.end - $0.start) < ($1.end - $1.start) })
             return CallSpeakerSummary(
-                id: id, resolvedName: resolvedNames[id], talkSeconds: talk[id] ?? 0,
-                sampleStart: seg.start, sampleEnd: min(seg.end, seg.start + 6),
-                firstLine: String(first.prefix(80)))
+                id: id, resolvedName: resolvedNames[id], talkSeconds: talk,
+                sampleStart: rep?.start ?? 0,
+                sampleEnd: rep.map { min($0.end, $0.start + 8) } ?? 0,
+                firstLine: String((rep?.text ?? "").prefix(100)))
         }
     }
 }

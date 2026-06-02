@@ -62,6 +62,7 @@ struct RecordDetailView: View {
     @State private var apps: [CapturableApp] = []
     @State private var mode: WindowMode = .live
     @State private var pendingPerson: PendingPerson?
+    @State private var showSpeakerReview = false
 
     enum WindowMode: String, CaseIterable, Identifiable {
         case live = "Live", preview = "Preview"
@@ -93,9 +94,11 @@ struct RecordDetailView: View {
             if recording.lastTranscriptURL != nil { mode = .preview }
         }
         // At-stop "Assign speakers" review (FluidAudio).
-        .sheet(item: Binding(get: { recording.pendingSpeakerReview },
-                             set: { recording.pendingSpeakerReview = $0 })) { review in
-            AssignSpeakersView(review: review)
+        // Speaker review is opt-in (a footer button), not an auto-popup after every call.
+        .sheet(isPresented: $showSpeakerReview) {
+            if let review = recording.pendingSpeakerReview {
+                AssignSpeakersView(review: review)
+            }
         }
         .sheet(item: $pendingPerson) { pending in
             NewPersonSheet(
@@ -414,6 +417,14 @@ struct RecordDetailView: View {
                 Text("\(recording.segments.count) segments").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            if let review = recording.pendingSpeakerReview, !review.speakers.isEmpty {
+                Button {
+                    showSpeakerReview = true
+                } label: {
+                    Label("Assign speakers (\(review.speakers.count))", systemImage: "person.2.wave.2")
+                }
+                .font(.caption)
+            }
             if let url = recording.lastTranscriptURL {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([url])

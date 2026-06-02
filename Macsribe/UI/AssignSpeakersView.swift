@@ -7,6 +7,7 @@ import SwiftUI
 struct AssignSpeakersView: View {
     @EnvironmentObject private var recording: RecordingController
     @EnvironmentObject private var vault: VaultDirectory
+    @Environment(\.dismiss) private var dismiss
     let review: RecordingController.SpeakerReview
 
     @State private var player = SamplePlayer()
@@ -37,7 +38,7 @@ struct AssignSpeakersView: View {
             Divider()
             HStack {
                 Spacer()
-                Button("Done") { player.stop(); recording.finishSpeakerReview() }
+                Button("Done") { player.stop(); recording.finishSpeakerReview(); dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
             .padding()
