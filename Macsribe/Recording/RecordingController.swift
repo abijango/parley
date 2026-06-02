@@ -65,6 +65,11 @@ final class RecordingController: ObservableObject {
     }
     @Published private(set) var offlinePass: OfflinePass = .idle
 
+    /// Bumped whenever a saved transcript's body is rewritten (offline pass, speaker
+    /// review, add-attendee). The History/preview pane watches this to re-read the
+    /// file — the URL is unchanged on a rewrite, so it wouldn't reload otherwise.
+    @Published private(set) var transcriptRevision = 0
+
     let models = ModelManager()
     let fluidModels = FluidModelManager()
     let voiceprints = VoiceprintStore()
@@ -651,6 +656,7 @@ final class RecordingController: ObservableObject {
         }
         vault.addPeople([name])
         store.refresh()
+        transcriptRevision += 1
         AppLog.log("Added attendee \(name) to \(url.lastPathComponent)", category: "history")
     }
 
@@ -692,6 +698,7 @@ final class RecordingController: ObservableObject {
         try? body.write(to: url, atomically: true, encoding: .utf8)
         vault.addPeople(TranscriptWriter.splitAttendees(attendees))
         store.refresh()
+        transcriptRevision += 1
         AppLog.log("Rewrote transcript (\(reason)): \(url.lastPathComponent)", category: "record")
     }
 

@@ -185,7 +185,7 @@ struct HistoryView: View {
                     )
                 }
                 Divider()
-                TranscriptPreviewView(url: item.url)
+                TranscriptPreviewView(url: item.url, reloadToken: recording.transcriptRevision)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {

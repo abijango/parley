@@ -6,6 +6,9 @@ import MarkdownUI
 /// the URL changes and degrades gracefully if the file was moved/processed.
 struct TranscriptPreviewView: View {
     let url: URL?
+    /// Bump to force a re-read when the file at `url` is rewritten in place (the URL
+    /// is unchanged, so `onChange(of: url)` alone wouldn't catch it).
+    var reloadToken: Int = 0
 
     @State private var content: String?
     @State private var loadError: String?
@@ -26,6 +29,7 @@ struct TranscriptPreviewView: View {
         }
         .onAppear(perform: load)
         .onChange(of: url) { load() }
+        .onChange(of: reloadToken) { load() }
     }
 
     private var placeholder: some View {

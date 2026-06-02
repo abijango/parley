@@ -185,7 +185,7 @@ struct RecordDetailView: View {
                     }
                 )
                 Divider()
-                TranscriptPreviewView(url: recording.lastTranscriptURL)
+                TranscriptPreviewView(url: recording.lastTranscriptURL, reloadToken: recording.transcriptRevision)
             }
         }
     }
