@@ -23,6 +23,9 @@ packages:
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui.git
     from: "2.4.0"           # SwiftUI GitHub-flavored markdown renderer
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio.git
+    from: "0.14.8"          # native Parakeet ASR + diarization + speaker embeddings (Apache-2.0)
 
 targets:
   Macsribe:                 # TODO(app-name)
@@ -34,6 +37,7 @@ targets:
     dependencies:
       - package: WhisperKit
       - package: MarkdownUI
+      - package: FluidAudio
     info:
       path: Macsribe/App/Info.plist
       properties:

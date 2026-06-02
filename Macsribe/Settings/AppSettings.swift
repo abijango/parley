@@ -88,6 +88,20 @@ enum TranscriptionEngineKind: String, CaseIterable, Identifiable {
     }
 }
 
+/// Parakeet ASR variant used by the FluidAudio engine. Default is v3.
+enum FluidParakeetVersion: String, CaseIterable, Identifiable {
+    case v3   // Parakeet TDT 0.6b v3 — multilingual (default)
+    case v2   // Parakeet TDT 0.6b v2 — English-only
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .v3: return "v3 (multilingual)"
+        case .v2: return "v2 (English)"
+        }
+    }
+}
+
 /// App-wide settings persisted via UserDefaults (`@AppStorage`).
 /// TODO(app-name): the AppStorage keys are namespaced with a literal prefix below.
 @MainActor
@@ -115,6 +129,7 @@ final class AppSettings: ObservableObject {
         static let idleUnloadEnabled = "macsribe.idleUnloadEnabled"
         static let idleUnloadMinutes = "macsribe.idleUnloadMinutes"
         static let transcriptionEngine = "macsribe.transcriptionEngine"
+        static let parakeetVersion = "macsribe.parakeetVersion"
     }
 
     // MARK: Memory
@@ -167,6 +182,7 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.model) var modelRaw: String = WhisperModel.small.rawValue
     @AppStorage(Key.computeMode) var computeModeRaw: String = ComputeMode.gpu.rawValue
     @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.whisperKit.rawValue
+    @AppStorage(Key.parakeetVersion) var parakeetVersionRaw: String = FluidParakeetVersion.v3.rawValue
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt
@@ -191,6 +207,12 @@ final class AppSettings: ObservableObject {
     var transcriptionEngine: TranscriptionEngineKind {
         get { TranscriptionEngineKind(rawValue: transcriptionEngineRaw) ?? .whisperKit }
         set { transcriptionEngineRaw = newValue.rawValue }
+    }
+
+    /// Parakeet ASR variant for the FluidAudio engine.
+    var parakeetVersion: FluidParakeetVersion {
+        get { FluidParakeetVersion(rawValue: parakeetVersionRaw) ?? .v3 }
+        set { parakeetVersionRaw = newValue.rawValue }
     }
 
     /// Root folders (vault-relative) to scan for filing destinations.

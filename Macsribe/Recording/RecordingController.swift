@@ -101,10 +101,7 @@ final class RecordingController: ObservableObject {
         case .whisperKit:
             engine = WhisperKitEngine(models: models, settings: settings)
         case .fluidAudio:
-            // The native FluidAudio engine lands in the next increment; until then
-            // fall back to WhisperKit so a selection is never silently broken.
-            AppLog.log("FluidAudio engine not yet wired — falling back to WhisperKit", category: "record")
-            engine = WhisperKitEngine(models: models, settings: settings)
+            engine = FluidAudioEngine(settings: settings)
         }
         engine.onSegmentsChanged = { [weak self] merged in
             guard let self else { return }

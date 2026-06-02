@@ -240,6 +240,19 @@ struct SettingsView: View {
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if settings.transcriptionEngine == .fluidAudio {
+                Picker("Parakeet model", selection: Binding(
+                    get: { settings.parakeetVersion }, set: { settings.parakeetVersion = $0 }
+                )) {
+                    ForEach(FluidParakeetVersion.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).fixedSize()
+                .disabled(recording.isRecording)
+                Text("v3 is multilingual (default); v2 is English-only. The Whisper model below applies to the WhisperKit engine.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Divider()
             Text("Active model").font(.headline)
             Text("Bigger models are more accurate but slower and larger. The active model is used for new recordings.")
