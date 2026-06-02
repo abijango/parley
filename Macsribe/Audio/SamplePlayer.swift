@@ -2,36 +2,60 @@ import Foundation
 import AVFoundation
 
 /// Plays a short slice of a recording's archived audio so the user can recognise a
-/// speaker before naming them. Plays the mic and system `.caf` tracks together
-/// (≈ what was diarized) from a start time for a bounded duration.
+/// speaker before naming them. Uses an `AVAudioEngine` with one player node per
+/// track (mic + system), scheduling an exact frame range — robust for arbitrary
+/// PCM `.caf` formats, and it simply skips a track that's empty or has no audio at
+/// the requested time.
 @MainActor
 final class SamplePlayer {
-    private var players: [AVAudioPlayer] = []
+    private let engine = AVAudioEngine()
+    private var nodes: [AVAudioPlayerNode] = []
     private var stopTimer: Timer?
+    private var running = false
 
-    /// Play `files` simultaneously from `start` seconds for `(end - start)` seconds.
+    /// Play `files` together from `start` seconds for `(end - start)` seconds.
     func play(files: [URL], start: TimeInterval, end: TimeInterval) {
         stop()
         let duration = max(0.5, end - start)
+        var scheduled = 0
         for url in files {
-            guard FileManager.default.fileExists(atPath: url.path),
-                  let player = try? AVAudioPlayer(contentsOf: url) else { continue }
-            player.prepareToPlay()
-            player.currentTime = min(max(0, start), max(0, player.duration - 0.05))
-            player.play()
-            players.append(player)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            guard let file = try? AVAudioFile(forReading: url) else {
+                AppLog.log("SamplePlayer: cannot open \(url.lastPathComponent)", category: "record"); continue
+            }
+            let sampleRate = file.processingFormat.sampleRate
+            let startFrame = AVAudioFramePosition(max(0, start) * sampleRate)
+            guard startFrame < file.length else { continue }   // past end / empty track
+            let frames = AVAudioFrameCount(min(Double(file.length - startFrame), duration * sampleRate))
+            guard frames > 0 else { continue }
+
+            let node = AVAudioPlayerNode()
+            engine.attach(node)
+            engine.connect(node, to: engine.mainMixerNode, format: file.processingFormat)
+            node.scheduleSegment(file, startingFrame: startFrame, frameCount: frames, at: nil)
+            nodes.append(node)
+            scheduled += 1
         }
-        guard !players.isEmpty else { return }
-        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
+        guard scheduled > 0 else {
+            AppLog.log("SamplePlayer: no audio to play at \(Int(start))s", category: "record"); return
+        }
+        do {
+            try engine.start()
+            running = true
+            nodes.forEach { $0.play() }
+        } catch {
+            AppLog.log("SamplePlayer: engine failed to start: \(error.localizedDescription)", category: "record")
+            stop(); return
+        }
+        stopTimer = Timer.scheduledTimer(withTimeInterval: duration + 0.2, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.stop() }
         }
     }
 
     func stop() {
         stopTimer?.invalidate(); stopTimer = nil
-        for p in players { p.stop() }
-        players.removeAll()
+        for node in nodes { node.stop(); engine.detach(node) }
+        nodes.removeAll()
+        if running { engine.stop(); running = false }
     }
-
-    var isPlaying: Bool { players.contains { $0.isPlaying } }
 }

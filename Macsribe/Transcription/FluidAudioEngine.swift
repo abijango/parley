@@ -18,9 +18,12 @@ struct CallSpeakerSummary: Identifiable, Equatable {
 /// everything from that one buffer: Parakeet ASR via `SlidingWindowAsrManager`
 /// (multilingual v3) plus pyannote/WeSpeaker diarization via `DiarizerManager`.
 ///
-/// Phase 3: each transcript segment is attributed to a diarized speaker ("Speaker N")
-/// by maximum timestamp overlap. Mapping a speaker to a known person (voiceprints)
-/// is Phase 4–5; `track` stays `.remote` as a neutral placeholder for the source.
+/// Display segments are DERIVED from ASR "units" (each with per-token timings) and
+/// the diarization timeline: every token is attributed to the diarized speaker whose
+/// turn overlaps it, and consecutive same-speaker tokens are grouped into a segment.
+/// This re-splits a chunk per speaker — and re-splits retroactively as diarization
+/// catches up — so rapid back-and-forth within one ASR chunk no longer collapses
+/// onto a single speaker. Phases 4–5 layer voiceprint identification on top.
 @MainActor
 final class FluidAudioEngine: TranscriptionEngine {
     private let settings: AppSettings
@@ -34,11 +37,17 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// The same mixed audio fed to ASR, buffered for the diarizer (drained in chunks).
     private let diarRing = AudioRingBuffer(capacity: 16_000 * 60)
 
-    // Timeline state (main actor).
+    // Raw ASR output, kept with token timings so display segments can be derived.
+    private struct Tok { let text: String; let start: TimeInterval; let end: TimeInterval }
+    private struct ASRUnit { let id: UUID; let tokens: [Tok]; let text: String; let confirmed: Bool }
     private var seeded: [Segment] = []
-    private var confirmed: [Segment] = []
-    private var volatileTail: Segment?
+    private var confirmedUnits: [ASRUnit] = []
+    private var volatileUnit: ASRUnit?
+    /// Stable ids for derived sub-segments (keyed by unit + speaker + start) so
+    /// re-splitting doesn't churn SwiftUI identities or the recovery journal.
+    private var runIds: [String: UUID] = [:]
     private var streamStart: Date?
+
     /// Diarized speaker turns on the session timeline (speakerId + start/end seconds).
     private var diarSegments: [(speakerId: String, start: TimeInterval, end: TimeInterval)] = []
     /// Quality-gated per-speaker embeddings + speech duration, for identification + enrollment.
@@ -69,11 +78,57 @@ final class FluidAudioEngine: TranscriptionEngine {
         self.identificationThreshold = identificationThreshold
     }
 
-    func confirmedTimeline() -> [Segment] { (seeded + confirmed).sorted { $0.start < $1.start } }
-    func finalTimeline() -> [Segment] {
-        (seeded + confirmed + (volatileTail.map { [$0] } ?? [])).sorted { $0.start < $1.start }
-    }
+    // MARK: - Derived timeline
+
+    func confirmedTimeline() -> [Segment] { build(units: confirmedUnits) }
+    func finalTimeline() -> [Segment] { build(units: confirmedUnits + (volatileUnit.map { [$0] } ?? [])) }
     func seed(_ segments: [Segment]) { seeded = segments; publish() }
+
+    /// Derive display segments: seeded segments + each ASR unit split into runs of
+    /// consecutive same-speaker tokens.
+    private func build(units: [ASRUnit]) -> [Segment] {
+        var out = seeded
+        for unit in units { out.append(contentsOf: segments(for: unit)) }
+        return out.sorted { $0.start < $1.start }
+    }
+
+    private func segments(for unit: ASRUnit) -> [Segment] {
+        guard !unit.tokens.isEmpty else { return [] }
+        // Group consecutive tokens by their overlapping diarized speaker.
+        var runs: [(speaker: String?, toks: [Tok])] = []
+        for t in unit.tokens {
+            let spk = bestSpeaker(start: t.start, end: t.end)
+            if var last = runs.last, last.speaker == spk {
+                last.toks.append(t); runs[runs.count - 1] = last
+            } else {
+                runs.append((spk, [t]))
+            }
+        }
+        let singleRun = runs.count == 1
+        return runs.compactMap { run -> Segment? in
+            guard let first = run.toks.first, let last = run.toks.last else { return nil }
+            // Keep the exact ASR text when the whole unit is one speaker; otherwise
+            // reconstruct this run from its tokens.
+            let text = singleRun ? unit.text : Self.reconstruct(run.toks.map(\.text))
+            guard !text.isEmpty else { return nil }
+            let key = "\(unit.id.uuidString)#\(run.speaker ?? "_")@\(Int(first.start * 100))"
+            let id = runIds[key] ?? {
+                let u = UUID(); runIds[key] = u; return u
+            }()
+            return Segment(id: id, track: .remote, start: first.start, end: last.end,
+                           text: text, confirmed: unit.confirmed,
+                           speakerId: run.speaker, speakerName: run.speaker.flatMap { resolvedNames[$0] })
+        }
+    }
+
+    /// Rebuild readable text from SentencePiece subword tokens (▁ marks word starts).
+    private static func reconstruct(_ tokens: [String]) -> String {
+        tokens.joined()
+            .replacingOccurrences(of: "\u{2581}", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Lifecycle
 
     func start(micRing: AudioRingBuffer, systemRing: AudioRingBuffer, startElapsed: TimeInterval) {
         let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
@@ -108,7 +163,6 @@ final class FluidAudioEngine: TranscriptionEngine {
                                          startElapsed: TimeInterval, clusterThreshold: Float) {
         streamStart = Date()
 
-        // Map the sliding-window confirmed/volatile updates onto our Segment model.
         updatesTask = Task { [weak self] in
             guard let self else { return }
             let stream = await self.asr.transcriptionUpdates
@@ -119,8 +173,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         }
 
         // Mix both capture rings into one mono stream; feed the recognizer AND
-        // buffer the same samples for the diarizer. Anchored to whichever ring has
-        // more pending data; the shorter ring is treated as silence for the gap.
+        // buffer the same samples for the diarizer.
         let asr = self.asr
         let diarRing = self.diarRing
         mixerTask = Task.detached {
@@ -132,7 +185,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                     await asr.streamAudio(buffer)
                     mixed.withUnsafeBufferPointer { diarRing.write($0) }
                     fedSamples += mixed.count
-                    if fedSamples - lastLogged >= 16_000 * 5 {   // ~every 5s of audio
+                    if fedSamples - lastLogged >= 16_000 * 5 {
                         lastLogged = fedSamples
                         AppLog.log("FluidAudio fed ~\(fedSamples / 16_000)s of audio to ASR", category: "record")
                     }
@@ -186,7 +239,7 @@ final class FluidAudioEngine: TranscriptionEngine {
     }
 
     /// Merge newly-diarized turns, accumulate quality-gated per-speaker embeddings,
-    /// auto-identify against saved voiceprints, and re-attribute known segments.
+    /// auto-identify against saved voiceprints, then re-derive segments.
     private func ingestDiarization(_ segs: [(speakerId: String, start: TimeInterval, end: TimeInterval, embedding: [Float], quality: Float)]) {
         for s in segs {
             diarSegments.append((s.speakerId, s.start, s.end))
@@ -196,8 +249,6 @@ final class FluidAudioEngine: TranscriptionEngine {
             }
         }
         autoIdentify()
-        confirmed = confirmed.map(assigningSpeaker)
-        if let v = volatileTail { volatileTail = assigningSpeaker(v) }
         publish()
     }
 
@@ -216,13 +267,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         }
     }
 
-    /// Return a copy of `seg` with its diarized `speakerId` (max-overlap turn) and the
-    /// resolved `speakerName` if that speaker has been identified/named.
-    private func assigningSpeaker(_ seg: Segment) -> Segment {
-        guard let id = bestSpeaker(start: seg.start, end: seg.end) else { return seg }
-        var s = seg; s.speakerId = id; s.speakerName = resolvedNames[id]; return s
-    }
-
+    /// The diarized speaker whose turn overlaps `[start, end]` most (nil if none yet).
     private func bestSpeaker(start: TimeInterval, end: TimeInterval) -> String? {
         var best: (id: String, overlap: TimeInterval)?
         for d in diarSegments {
@@ -230,54 +275,6 @@ final class FluidAudioEngine: TranscriptionEngine {
             if overlap > 0, overlap > (best?.overlap ?? 0) { best = (d.speakerId, overlap) }
         }
         return best?.id
-    }
-
-    // MARK: - Speaker naming (Phase 5)
-
-    /// Distinct diarized speaker ids seen so far (stable, sorted) — for the review panel.
-    func callSpeakerIds() -> [String] {
-        var seen = Set<String>()
-        for d in diarSegments { seen.insert(d.speakerId) }
-        return seen.sorted()
-    }
-
-    func resolvedName(for id: String) -> String? { resolvedNames[id] }
-    func gatedSeconds(for id: String) -> TimeInterval { speakerGatedSeconds[id] ?? 0 }
-
-    /// Manually assign a name to a speaker: relabel their lines and return the
-    /// speaker's centroid embedding for the caller to enroll (nil if no quality-gated
-    /// audio was captured for them yet).
-    @discardableResult
-    func setSpeakerName(_ speakerId: String, as name: String) -> [Float]? {
-        resolvedNames[speakerId] = name
-        confirmed = confirmed.map(assigningSpeaker)
-        if let v = volatileTail { volatileTail = assigningSpeaker(v) }
-        publish()
-        let embs = speakerEmbeddings[speakerId] ?? []
-        guard !embs.isEmpty else { return nil }
-        return VoiceprintStore.normalized(VoiceprintStore.mean(embs))
-    }
-
-    /// Per-speaker summaries for the at-stop review panel: total talk time, the
-    /// longest segment (capped) for play-sample, and a first-line snippet.
-    func speakerSummaries() -> [CallSpeakerSummary] {
-        var talk: [String: TimeInterval] = [:]
-        var longest: [String: (start: TimeInterval, end: TimeInterval)] = [:]
-        for d in diarSegments {
-            let dur = max(0, d.end - d.start)
-            talk[d.speakerId, default: 0] += dur
-            let cur = longest[d.speakerId]
-            if cur == nil || dur > (cur!.end - cur!.start) { longest[d.speakerId] = (d.start, d.end) }
-        }
-        let all = finalTimeline()
-        return talk.keys.sorted().map { id in
-            let seg = longest[id] ?? (0, 0)
-            let first = all.first(where: { $0.speakerId == id })?.text ?? ""
-            return CallSpeakerSummary(
-                id: id, resolvedName: resolvedNames[id], talkSeconds: talk[id] ?? 0,
-                sampleStart: seg.start, sampleEnd: min(seg.end, seg.start + 6),
-                firstLine: String(first.prefix(80)))
-        }
     }
 
     /// Drain both rings and sum sample-wise into one mono buffer.
@@ -306,20 +303,19 @@ final class FluidAudioEngine: TranscriptionEngine {
     private func apply(_ update: SlidingWindowTranscriptionUpdate, startElapsed: TimeInterval) {
         let text = update.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        let start = update.tokenTimings.first.map { startElapsed + $0.startTime } ?? elapsedNow(startElapsed)
-        let end = update.tokenTimings.last.map { startElapsed + $0.endTime } ?? start
-        // Attribute to a diarized speaker now if one already overlaps; otherwise it
-        // stays unlabeled until diarization catches up (ingestDiarization re-attributes).
-        let seg = Segment(track: .remote, start: start, end: end, text: text,
-                          confirmed: update.isConfirmed, speakerId: bestSpeaker(start: start, end: end))
-        // Log metadata only — never transcript content (it lands in a persistent
-        // log file; meeting speech is sensitive).
+        var tokens = update.tokenTimings.map {
+            Tok(text: $0.token, start: startElapsed + $0.startTime, end: startElapsed + $0.endTime)
+        }
+        if tokens.isEmpty {   // no token timings — one token spanning the whole text
+            let t = elapsedNow(startElapsed)
+            tokens = [Tok(text: text, start: t, end: t)]
+        }
+        let unit = ASRUnit(id: UUID(), tokens: tokens, text: text, confirmed: update.isConfirmed)
         AppLog.log("FluidAudio update (\(update.isConfirmed ? "confirmed" : "volatile")): \(text.count) chars", category: "record")
         if update.isConfirmed {
-            confirmed.append(seg)
-            volatileTail = nil
+            confirmedUnits.append(unit); volatileUnit = nil
         } else {
-            volatileTail = seg
+            volatileUnit = unit
         }
         publish()
     }
@@ -328,7 +324,48 @@ final class FluidAudioEngine: TranscriptionEngine {
         startElapsed + Date().timeIntervalSince(streamStart ?? Date())
     }
 
-    private func publish() {
-        onSegmentsChanged?(finalTimeline())
+    private func publish() { onSegmentsChanged?(finalTimeline()) }
+
+    // MARK: - Speaker naming (Phase 5)
+
+    func callSpeakerIds() -> [String] {
+        var seen = Set<String>()
+        for d in diarSegments { seen.insert(d.speakerId) }
+        return seen.sorted()
+    }
+    func resolvedName(for id: String) -> String? { resolvedNames[id] }
+    func gatedSeconds(for id: String) -> TimeInterval { speakerGatedSeconds[id] ?? 0 }
+
+    /// Manually assign a name to a speaker: relabel their lines (via re-derive) and
+    /// return the speaker's centroid embedding for the caller to enroll (nil if no
+    /// quality-gated audio was captured for them yet).
+    @discardableResult
+    func setSpeakerName(_ speakerId: String, as name: String) -> [Float]? {
+        resolvedNames[speakerId] = name
+        publish()
+        let embs = speakerEmbeddings[speakerId] ?? []
+        guard !embs.isEmpty else { return nil }
+        return VoiceprintStore.normalized(VoiceprintStore.mean(embs))
+    }
+
+    /// Per-speaker summaries for the at-stop review panel.
+    func speakerSummaries() -> [CallSpeakerSummary] {
+        var talk: [String: TimeInterval] = [:]
+        var longest: [String: (start: TimeInterval, end: TimeInterval)] = [:]
+        for d in diarSegments {
+            let dur = max(0, d.end - d.start)
+            talk[d.speakerId, default: 0] += dur
+            let cur = longest[d.speakerId]
+            if cur == nil || dur > (cur!.end - cur!.start) { longest[d.speakerId] = (d.start, d.end) }
+        }
+        let all = finalTimeline()
+        return talk.keys.sorted().map { id in
+            let seg = longest[id] ?? (0, 0)
+            let first = all.first(where: { $0.speakerId == id })?.text ?? ""
+            return CallSpeakerSummary(
+                id: id, resolvedName: resolvedNames[id], talkSeconds: talk[id] ?? 0,
+                sampleStart: seg.start, sampleEnd: min(seg.end, seg.start + 6),
+                firstLine: String(first.prefix(80)))
+        }
     }
 }
