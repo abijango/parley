@@ -52,6 +52,10 @@ final class RecordingController: ObservableObject {
     /// Manual notes jotted during a recording; merged into the saved transcript.
     @Published var manualNotes: String = ""
 
+    /// After a FluidAudio recording stops, the discovered speakers offered for naming
+    /// in the "Assign speakers" sheet (nil when there's nothing to review).
+    @Published var pendingSpeakerReview: SpeakerReview?
+
     let models = ModelManager()
     let fluidModels = FluidModelManager()
     let voiceprints = VoiceprintStore()
@@ -522,6 +526,45 @@ final class RecordingController: ObservableObject {
         finalizeManifest()   // mark the session cleanly finished (not a crash)
         state = .idle
         scheduleIdleUnload()   // free the model's RAM if we sit idle after this
+
+        // Offer the at-stop "Assign speakers" review (FluidAudio only) when the
+        // session has diarized speakers. The engine outlives stop, so its speaker
+        // data + embeddings are still available for naming/enrollment.
+        if settings.transcriptionEngine == .fluidAudio, let fluid = engine as? FluidAudioEngine {
+            let speakers = fluid.speakerSummaries()
+            if !speakers.isEmpty {
+                pendingSpeakerReview = SpeakerReview(
+                    speakers: speakers,
+                    micCaf: sessionDirectory?.appendingPathComponent("mic.caf"),
+                    systemCaf: sessionDirectory?.appendingPathComponent("system.caf"))
+            }
+        }
+    }
+
+    // MARK: At-stop speaker review (FluidAudio)
+
+    /// Discovered speakers offered for naming after a FluidAudio recording stops.
+    struct SpeakerReview: Identifiable {
+        let id = UUID()
+        var speakers: [CallSpeakerSummary]
+        let micCaf: URL?
+        let systemCaf: URL?
+    }
+
+    /// Finish the review: clear the sheet and rewrite the just-written transcript
+    /// with the (possibly newly-named) speakers + updated attendees.
+    func finishSpeakerReview() {
+        pendingSpeakerReview = nil
+        guard let url = lastTranscriptURL, var meta = TranscriptWriter.parseFrontmatter(url) else { return }
+        meta.attendees = TranscriptWriter.splitAttendees(attendees)
+        let segs = engine?.finalTimeline() ?? segments
+        let body = TranscriptWriter.makeBody(
+            title: meta.title, date: meta.date, attendees: attendees, destination: meta.filing,
+            segments: segs, manualNotes: manualNotes.isEmpty ? nil : manualNotes, meta: meta)
+        try? body.write(to: url, atomically: true, encoding: .utf8)
+        vault.addPeople(TranscriptWriter.splitAttendees(attendees))
+        store.refresh()
+        AppLog.log("Rewrote transcript with reviewed speakers: \(url.lastPathComponent)", category: "record")
     }
 
     // MARK: Idle model unload

@@ -2,6 +2,16 @@ import Foundation
 import AVFoundation
 import FluidAudio
 
+/// Per-speaker summary for the at-stop "Assign speakers" review panel.
+struct CallSpeakerSummary: Identifiable, Equatable {
+    let id: String                 // diarization speakerId
+    var resolvedName: String?      // mapped person, if named/identified
+    let talkSeconds: TimeInterval
+    let sampleStart: TimeInterval  // best (longest) segment, for play-sample
+    let sampleEnd: TimeInterval
+    let firstLine: String          // a snippet for context
+}
+
 /// Self-contained native transcription engine powered entirely by FluidAudio.
 ///
 /// Mixes the mic + system capture rings into a single 16 kHz mono stream and runs
@@ -246,6 +256,28 @@ final class FluidAudioEngine: TranscriptionEngine {
         let embs = speakerEmbeddings[speakerId] ?? []
         guard !embs.isEmpty else { return nil }
         return VoiceprintStore.normalized(VoiceprintStore.mean(embs))
+    }
+
+    /// Per-speaker summaries for the at-stop review panel: total talk time, the
+    /// longest segment (capped) for play-sample, and a first-line snippet.
+    func speakerSummaries() -> [CallSpeakerSummary] {
+        var talk: [String: TimeInterval] = [:]
+        var longest: [String: (start: TimeInterval, end: TimeInterval)] = [:]
+        for d in diarSegments {
+            let dur = max(0, d.end - d.start)
+            talk[d.speakerId, default: 0] += dur
+            let cur = longest[d.speakerId]
+            if cur == nil || dur > (cur!.end - cur!.start) { longest[d.speakerId] = (d.start, d.end) }
+        }
+        let all = finalTimeline()
+        return talk.keys.sorted().map { id in
+            let seg = longest[id] ?? (0, 0)
+            let first = all.first(where: { $0.speakerId == id })?.text ?? ""
+            return CallSpeakerSummary(
+                id: id, resolvedName: resolvedNames[id], talkSeconds: talk[id] ?? 0,
+                sampleStart: seg.start, sampleEnd: min(seg.end, seg.start + 6),
+                firstLine: String(first.prefix(80)))
+        }
     }
 
     /// Drain both rings and sum sample-wise into one mono buffer.

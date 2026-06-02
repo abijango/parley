@@ -92,6 +92,11 @@ struct RecordDetailView: View {
         .onChange(of: recording.lastTranscriptURL) {
             if recording.lastTranscriptURL != nil { mode = .preview }
         }
+        // At-stop "Assign speakers" review (FluidAudio).
+        .sheet(item: Binding(get: { recording.pendingSpeakerReview },
+                             set: { recording.pendingSpeakerReview = $0 })) { review in
+            AssignSpeakersView(review: review)
+        }
         .sheet(item: $pendingPerson) { pending in
             NewPersonSheet(
                 initialName: pending.name,
