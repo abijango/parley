@@ -18,6 +18,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             transcriptionTab
                 .tabItem { Label("Transcription", systemImage: "waveform") }
+            SpeakersSettingsView(store: recording.voiceprints)
+                .tabItem { Label("Speakers", systemImage: "person.2.wave.2") }
             notesTab
                 .tabItem { Label("Notes", systemImage: "doc.text") }
             detectionTab

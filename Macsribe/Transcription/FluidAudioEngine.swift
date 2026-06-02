@@ -60,6 +60,7 @@ final class FluidAudioEngine: TranscriptionEngine {
     private var resolvedNames: [String: String] = [:]
     private let minSegmentQuality: Float = 0.4
     private let minSecondsToAutoIdentify: TimeInterval = 5
+    private let minSecondsToEnroll: TimeInterval = 3
 
     // Background work.
     private var loadTask: Task<Void, Never>?
@@ -419,9 +420,27 @@ final class FluidAudioEngine: TranscriptionEngine {
     func setSpeakerName(_ speakerId: String, as name: String) -> [Float]? {
         resolvedNames[speakerId] = name
         publish()
+        // Only enroll a voiceprint from enough clean, quality-gated speech — don't
+        // pollute the store with a centroid built from a tiny/low-quality clip.
         let embs = speakerEmbeddings[speakerId] ?? []
-        guard !embs.isEmpty else { return nil }
+        guard !embs.isEmpty, (speakerGatedSeconds[speakerId] ?? 0) >= minSecondsToEnroll else { return nil }
         return VoiceprintStore.normalized(VoiceprintStore.mean(embs))
+    }
+
+    /// Extract a short (<=4s) audio clip of a speaker's longest segment from the
+    /// archived mixed recording — retained with the voiceprint for re-enrollment.
+    func repAudioSample(for speakerId: String) async -> [Float]? {
+        guard let url = mixedAudioURL else { return nil }
+        let segs = finalTimeline().filter { $0.speakerId == speakerId }
+        guard let rep = segs.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else { return nil }
+        let start = max(0, rep.start)
+        let end = min(rep.end, start + 4)
+        return await Task.detached {
+            guard let all = try? AudioConverter().resampleAudioFile(url) else { return nil }
+            let s = Int(start * 16_000), e = min(all.count, Int(end * 16_000))
+            guard s >= 0, s < e else { return nil }
+            return Array(all[s..<e])
+        }.value
     }
 
     /// Per-speaker summaries for the review panel. The snippet text AND the

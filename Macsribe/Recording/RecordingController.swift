@@ -131,13 +131,19 @@ final class RecordingController: ObservableObject {
         guard !name.isEmpty, let fluid = engine as? FluidAudioEngine else { return }
         let centroid = fluid.setSpeakerName(speakerId, as: name)
         if let centroid {
+            let vpId: UUID
             if let existing = voiceprints.voiceprints.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-                voiceprints.addSample(to: existing.id, embedding: centroid)
+                voiceprints.addSample(to: existing.id, embedding: centroid); vpId = existing.id
             } else {
-                voiceprints.enroll(name: name, embedding: centroid)
+                vpId = voiceprints.enroll(name: name, embedding: centroid).id
+            }
+            // Retain a short enrollment clip for re-enrollment (off-main, best-effort).
+            Task { [weak self] in
+                guard let self, let audio = await fluid.repAudioSample(for: speakerId) else { return }
+                self.voiceprints.attachAudioSample(to: vpId, samples: audio)
             }
         } else {
-            AppLog.log("Named speaker \(speakerId) as \(name) but no quality-gated audio yet — not enrolled", category: "record")
+            AppLog.log("Named speaker \(speakerId) as \(name) but not enough clean audio — labeled, not enrolled", category: "record")
         }
         addAttendeeIfAbsent(name)
     }

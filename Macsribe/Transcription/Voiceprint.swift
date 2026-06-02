@@ -22,8 +22,10 @@ struct Voiceprint: Codable, Identifiable, Equatable {
     let embeddingModel: String
     let embeddingDim: Int
     let schemaVersion: Int
-    /// Optional retained enrollment audio snippet paths (for re-enrollment on model upgrade).
-    var sampleAudioPaths: [String]
+    /// A short retained enrollment clip (raw 16 kHz mono Float32 bytes), kept so the
+    /// voiceprint can be regenerated if the embedding model changes on upgrade. It
+    /// lives inside the encrypted store. Optional for backward-compatible decoding.
+    var audioSample: Data?
 
     static let currentSchemaVersion = 1
 }

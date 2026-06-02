@@ -48,15 +48,14 @@ final class VoiceprintStore: ObservableObject {
     // MARK: - Mutations (persist immediately)
 
     @discardableResult
-    func enroll(name: String, embedding: [Float], audioPath: String? = nil) -> Voiceprint {
+    func enroll(name: String, embedding: [Float]) -> Voiceprint {
         let e = Self.normalized(embedding)
         let now = Date()
         let vp = Voiceprint(
             id: UUID(), name: name, embeddings: [e], centroid: e, sampleCount: 1,
             createdAt: now, updatedAt: now,
             embeddingModel: Self.embeddingModel, embeddingDim: e.count,
-            schemaVersion: Voiceprint.currentSchemaVersion,
-            sampleAudioPaths: audioPath.map { [$0] } ?? [])
+            schemaVersion: Voiceprint.currentSchemaVersion, audioSample: nil)
         voiceprints.append(vp)
         save()
         return vp
@@ -64,15 +63,21 @@ final class VoiceprintStore: ObservableObject {
 
     /// Append an embedding to an existing identity, recompute its centroid, and
     /// refine the voiceprint (accuracy improves as more confident samples land).
-    func addSample(to id: UUID, embedding: [Float], audioPath: String? = nil) {
+    func addSample(to id: UUID, embedding: [Float]) {
         guard let idx = voiceprints.firstIndex(where: { $0.id == id }) else { return }
         var vp = voiceprints[idx]
         vp.embeddings.append(Self.normalized(embedding))
         vp.centroid = Self.normalized(Self.mean(vp.embeddings))
         vp.sampleCount = vp.embeddings.count
         vp.updatedAt = Date()
-        if let audioPath { vp.sampleAudioPaths.append(audioPath) }
         voiceprints[idx] = vp
+        save()
+    }
+
+    /// Retain a short enrollment audio clip (for re-enrollment on model upgrade).
+    func attachAudioSample(to id: UUID, samples: [Float]) {
+        guard !samples.isEmpty, let idx = voiceprints.firstIndex(where: { $0.id == id }) else { return }
+        voiceprints[idx].audioSample = samples.withUnsafeBytes { Data($0) }
         save()
     }
 
@@ -86,6 +91,40 @@ final class VoiceprintStore: ObservableObject {
     func delete(_ id: UUID) {
         voiceprints.removeAll { $0.id == id }
         save()
+    }
+
+    // MARK: - Export / import (backup + sharing)
+
+    /// Serialise the whole store to JSON. With a non-empty `passphrase`, the JSON is
+    /// passphrase-wrapped (AES-GCM); otherwise it's plain JSON (portable, inspectable).
+    func exportData(passphrase: String?) throws -> Data {
+        let json = try JSONEncoder().encode(voiceprints)
+        if let passphrase, !passphrase.isEmpty { return try VoiceprintCrypto.encrypt(json, passphrase: passphrase) }
+        return json
+    }
+
+    /// Import voiceprints from exported data, merging by id (imported overwrites a
+    /// matching id; new ones are added). Auto-detects plain JSON vs passphrase-wrapped.
+    @discardableResult
+    func importData(_ data: Data, passphrase: String?) throws -> Int {
+        let json: Data
+        if let prints = try? JSONDecoder().decode([Voiceprint].self, from: data) {
+            return merge(prints)   // plain JSON
+        } else if let passphrase, !passphrase.isEmpty {
+            json = try VoiceprintCrypto.decrypt(data, passphrase: passphrase)
+        } else {
+            throw VoiceprintCrypto.CryptoError.malformed   // encrypted but no passphrase given
+        }
+        return merge(try JSONDecoder().decode([Voiceprint].self, from: json))
+    }
+
+    private func merge(_ incoming: [Voiceprint]) -> Int {
+        for vp in incoming {
+            if let idx = voiceprints.firstIndex(where: { $0.id == vp.id }) { voiceprints[idx] = vp }
+            else { voiceprints.append(vp) }
+        }
+        save()
+        return incoming.count
     }
 
     // MARK: - Persistence
