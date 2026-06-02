@@ -294,53 +294,83 @@ final class FluidAudioEngine: TranscriptionEngine {
         return diar
     }
 
-    /// Force the diarization down to exactly `target` speakers when it over-split:
-    /// agglomeratively merge the closest speaker centroids (by cosine similarity)
-    /// until `target` remain, then relabel every segment. Only merges — if the
-    /// diarizer found `target` or fewer speakers, the segments are returned as-is
-    /// (we can't fabricate a speaker that wasn't separated).
-    nonisolated private static func collapseToTargetSpeakers(_ segs: [Seg], target: Int) -> [Seg] {
+    /// Re-cluster ALL segment embeddings into EXACTLY `target` speakers with k-means
+    /// (cosine). Unlike merging the diarizer's clusters, this re-partitions from
+    /// scratch, so a quiet speaker's segments can be pulled out of the dominant
+    /// speaker's cluster. Deterministic farthest-point seeding. Segments without an
+    /// embedding inherit the temporally-nearest labelled segment's cluster.
+    nonisolated private static func clusterToTargetSpeakers(_ segs: [Seg], target: Int) -> [Seg] {
         guard target >= 1 else { return segs }
-        // Group segments by speaker; build a centroid per speaker from its embeddings.
-        var order: [String] = []
-        var bySpeaker: [String: [Seg]] = [:]
-        for s in segs {
-            if bySpeaker[s.id] == nil { order.append(s.id) }
-            bySpeaker[s.id, default: []].append(s)
-        }
-        var centroids: [String: [Float]] = [:]
-        for id in order {
-            let embs = (bySpeaker[id] ?? []).map(\.emb).filter { !$0.isEmpty }
-            if !embs.isEmpty { centroids[id] = normalize(meanVector(embs)) }
-        }
-        let clusterableIds = order.filter { centroids[$0] != nil }
-        guard clusterableIds.count > target else { return segs }
+        let labelledIdx = segs.indices.filter { !segs[$0].emb.isEmpty }
+        guard labelledIdx.count > target else { return segs }
+        let embs = labelledIdx.map { normalize(segs[$0].emb) }
 
-        var clusters: [[String]] = clusterableIds.map { [$0] }
-        func centroidOf(_ cluster: [String]) -> [Float] {
-            normalize(meanVector(cluster.compactMap { centroids[$0] }))
-        }
-        while clusters.count > target {
-            var bestI = 0, bestJ = 1, bestSim = -Float.greatestFiniteMagnitude
-            for i in 0..<clusters.count {
-                let ci = centroidOf(clusters[i])
-                for j in (i + 1)..<clusters.count {
-                    let sim = dotProduct(ci, centroidOf(clusters[j]))
-                    if sim > bestSim { bestSim = sim; bestI = i; bestJ = j }
-                }
+        // Farthest-point init: longest segment first, then the point least similar to
+        // any chosen seed — spreads seeds across distinct voices.
+        var seeds: [Int] = []
+        if let firstLocal = labelledIdx.indices.max(by: {
+            (segs[labelledIdx[$0]].end - segs[labelledIdx[$0]].start)
+                < (segs[labelledIdx[$1]].end - segs[labelledIdx[$1]].start)
+        }) { seeds.append(firstLocal) }
+        while seeds.count < target {
+            var pick = 0, pickSim = Float.greatestFiniteMagnitude
+            for i in embs.indices where !seeds.contains(i) {
+                let maxSim = seeds.map { dotProduct(embs[$0], embs[i]) }.max() ?? -1
+                if maxSim < pickSim { pickSim = maxSim; pick = i }
             }
-            clusters[bestI].append(contentsOf: clusters[bestJ])
-            clusters.remove(at: bestJ)
+            seeds.append(pick)
         }
-        // Map every old speaker id to its cluster's canonical id (smallest id in it).
-        var remap: [String: String] = [:]
-        for cluster in clusters {
-            guard let canonical = cluster.min() else { continue }
-            for id in cluster { remap[id] = canonical }
+        var centroids = seeds.map { embs[$0] }
+        var assign = [Int](repeating: 0, count: embs.count)
+        for _ in 0..<15 {
+            var changed = false
+            for i in embs.indices {
+                var best = 0, bestSim = -Float.greatestFiniteMagnitude
+                for c in 0..<target {
+                    let s = dotProduct(centroids[c], embs[i])
+                    if s > bestSim { bestSim = s; best = c }
+                }
+                if assign[i] != best { assign[i] = best; changed = true }
+            }
+            for c in 0..<target {
+                let members = embs.indices.filter { assign[$0] == c }.map { embs[$0] }
+                if !members.isEmpty { centroids[c] = normalize(meanVector(members)) }
+            }
+            if !changed { break }
         }
-        let merged = segs.map { Seg(id: remap[$0.id] ?? $0.id, start: $0.start, end: $0.end, emb: $0.emb, q: $0.q) }
-        AppLog.log("Collapsed diarization \(clusterableIds.count) → \(target) speaker(s)", category: "record")
-        return merged
+        var clusterFor: [Int: Int] = [:]
+        for (j, origIdx) in labelledIdx.enumerated() { clusterFor[origIdx] = assign[j] }
+        func nearestCluster(_ idx: Int) -> Int {
+            let t = (segs[idx].start + segs[idx].end) / 2
+            var best = 0, bestDt = Double.greatestFiniteMagnitude
+            for li in labelledIdx {
+                let dt = abs((segs[li].start + segs[li].end) / 2 - t)
+                if dt < bestDt { bestDt = dt; best = clusterFor[li] ?? 0 }
+            }
+            return best
+        }
+        return segs.indices.map { idx in
+            let c = clusterFor[idx] ?? nearestCluster(idx)
+            return Seg(id: "\(c + 1)", start: segs[idx].start, end: segs[idx].end, emb: segs[idx].emb, q: segs[idx].q)
+        }
+    }
+
+    /// Pairwise cosine similarity of each speaker's mean embedding, e.g. "1~2=0.88".
+    /// High (~0.8+) means the "speakers" are nearly the same voice (over-split / not
+    /// separable); low (~0.3–0.5) means they're distinct.
+    nonisolated private static func clusterSimilarityLog(_ segs: [Seg]) -> String {
+        var byId: [String: [[Float]]] = [:]
+        for s in segs where !s.emb.isEmpty { byId[s.id, default: []].append(s.emb) }
+        let ids = byId.keys.sorted()
+        guard ids.count >= 2 else { return "n/a" }
+        let cents = ids.map { normalize(meanVector(byId[$0]!)) }
+        var parts: [String] = []
+        for i in 0..<ids.count {
+            for j in (i + 1)..<ids.count {
+                parts.append("\(ids[i])~\(ids[j])=\(String(format: "%.2f", dotProduct(cents[i], cents[j])))")
+            }
+        }
+        return parts.joined(separator: " ")
     }
 
     /// Per-speaker talk-time summary for diagnostics, e.g. "2 speaker(s): 0=28s 1=104s".
@@ -467,12 +497,14 @@ final class FluidAudioEngine: TranscriptionEngine {
                     Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
                         end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
                 }
-                AppLog.log("finalize: raw diar \(Self.speakerBreakdown(mapped))", category: "record")
-                // "Expected speakers": if the diarizer over-split, merge the closest
-                // speaker centroids down to the user-specified count.
+                AppLog.log("finalize: raw diar \(Self.speakerBreakdown(mapped)) | sims \(Self.clusterSimilarityLog(mapped))", category: "record")
+                // "Expected speakers": re-cluster ALL segment embeddings into exactly N
+                // groups with k-means — re-partitions from scratch so a quiet speaker
+                // isn't stuck inside the dominant speaker's cluster (merging can't fix
+                // that). The similarity log tells us if the voices are even separable.
                 if targetSpeakers > 0 {
-                    mapped = Self.collapseToTargetSpeakers(mapped, target: targetSpeakers)
-                    AppLog.log("finalize: after collapse→\(targetSpeakers): \(Self.speakerBreakdown(mapped))", category: "record")
+                    mapped = Self.clusterToTargetSpeakers(mapped, target: targetSpeakers)
+                    AppLog.log("finalize: after k-means→\(targetSpeakers): \(Self.speakerBreakdown(mapped)) | sims \(Self.clusterSimilarityLog(mapped))", category: "record")
                 }
                 segs = mapped
             } else {
