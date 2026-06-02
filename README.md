@@ -29,6 +29,48 @@ Both transcription pipelines share **one** WhisperKit model behind a serializing
 separate audio buffers, not separate models. Segment times are anchored to one shared
 clock so the two tracks don't drift apart over a long meeting.
 
+## Transcription engines
+
+Macsribe has **two interchangeable transcription engines** behind one
+`TranscriptionEngine` protocol. Choose in **Settings → Transcription → Engine**; the
+choice applies to the *next* recording (no mid-session switch).
+
+| Engine | ASR | Speaker labels | Latency |
+|--------|-----|----------------|---------|
+| **WhisperKit** | OpenAI Whisper (small / medium / large-v3 / turbo) | "Me" vs "Remote" from the two capture tracks | ~1 s (re-transcribes the buffer) |
+| **FluidAudio** *(default)* | Parakeet TDT 0.6b **v3** (multilingual) | Per-speaker diarization + voiceprint ID *(in progress)* | ~11 s (sliding-window chunks) |
+
+- **WhisperKit** keeps the two-track design above ("Me"/"Remote", no diarization ML) — transcription only, behaviour unchanged.
+- **FluidAudio** is a self-contained native stack ([FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio), Apache-2.0, **pinned to `0.14.8`**). It keeps both taps but **mixes mic + system into one 16 kHz mono stream** (the far side of a call isn't audible on the mic alone) and runs everything from that single buffer:
+  - **Transcription** — Parakeet TDT 0.6b v3, multilingual, via `SlidingWindowAsrManager` using the `.streaming` preset (~11 s chunks). The first text therefore appears after ~11 s — higher latency than WhisperKit, but it preserves the v3 model. (The low-latency end-of-utterance manager needs different, non-v3 models, so it's not used.)
+  - **Diarization + speaker identification** — pyannote segmentation + WeSpeaker **256-d** embeddings. *Landing in Phases 3–6.*
+
+Models download on first use to `~/Library/Application Support/FluidAudio/Models/`
+(`parakeet-tdt-0.6b-v3/`, `speaker-diarization/`, …). Settings shows a **Download / Active**
+control for the FluidAudio model.
+
+### Implementation status
+
+| Phase | Scope | State |
+|-------|-------|-------|
+| 0–1 | Recon + ASR/diarization smoke test (`Tools/FluidSmoke`) | ✅ done |
+| 2 | `TranscriptionEngine` protocol, `WhisperKitEngine`, live FluidAudio transcription, settings | ✅ done |
+| 3 | Live diarization + per-segment speaker labels in the FluidAudio engine | 🚧 in progress |
+| 4 | `VoiceprintStore` — 256-d embeddings, cosine matching, configurable `identificationThreshold` | ⬜ planned |
+| 5 | Enrollment / labeling UX + known-speaker preload (`initializeKnownSpeakers`) | ⬜ planned |
+| 6 | Encrypted export / import / backup (Keychain + CryptoKit) | ⬜ planned |
+| 7 | Offline accuracy re-pass over buffered audio | ⬜ optional |
+
+> **Speaker identification is biometric data.** When Phases 4–6 land, each voiceprint is
+> stored with its embedding-model id, dimension (**256**), and a schema version, and is
+> encrypted at rest (symmetric key in the Keychain). Embeddings are **not portable across
+> models** — if FluidAudio's embedding model changes on upgrade, saved voiceprints are
+> invalidated and must be re-enrolled (short enrollment audio snippets are retained so
+> vectors can be regenerated without starting over). Two distinct thresholds exist and
+> must not be conflated: FluidAudio's in-session `clusteringThreshold` (groups voices
+> within one recording) vs. our cross-session `identificationThreshold` (matches a voice
+> to a saved person).
+
 ## Requirements
 
 - macOS 14.4+ (Core Audio process taps), Apple Silicon recommended
@@ -73,7 +115,7 @@ appears when the first tap is created.
 ## Settings
 
 - **General** — Obsidian vault path, default capture mode
-- **Transcription** — Whisper model (small default; medium / large-v3 download on first use to `~/Library/Application Support/Macsribe/models`)
+- **Transcription** — pick the **engine** (WhisperKit / FluidAudio — see [Transcription engines](#transcription-engines)); for WhisperKit, the Whisper model (small default; medium / large-v3 download on first use to `~/Library/Application Support/Macsribe/models`); for FluidAudio, the Parakeet v3 download / status
 - **Notes** — toggle auto-run Claude, `claude` binary path, model, and the prompt template (`{{file}}`, `{{customer}}`, `{{attendees}}` are substituted)
 
 ## Verifying it works (manual — needs a GUI session)
