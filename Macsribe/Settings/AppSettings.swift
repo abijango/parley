@@ -131,6 +131,7 @@ final class AppSettings: ObservableObject {
         static let transcriptionEngine = "macsribe.transcriptionEngine"
         static let parakeetVersion = "macsribe.parakeetVersion"
         static let diarizationThreshold = "macsribe.diarizationThreshold"
+        static let identificationThreshold = "macsribe.identificationThreshold"
     }
 
     // MARK: Memory
@@ -188,6 +189,10 @@ final class AppSettings: ObservableObject {
     /// more sensitive; higher = merges similar voices). Default 0.6 — the library's
     /// 0.7 over-merges distinct speakers in practice.
     @AppStorage(Key.diarizationThreshold) var diarizationThreshold: Double = 0.6
+    /// Cross-session speaker identification threshold: minimum cosine similarity to a
+    /// saved voiceprint's centroid to call it a match. Distinct from
+    /// `diarizationThreshold` (in-session clustering). Higher = fewer false matches.
+    @AppStorage(Key.identificationThreshold) var identificationThreshold: Double = 0.6
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt

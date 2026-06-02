@@ -54,6 +54,7 @@ final class RecordingController: ObservableObject {
 
     let models = ModelManager()
     let fluidModels = FluidModelManager()
+    let voiceprints = VoiceprintStore()
     let vault = VaultDirectory()
     let notes = NotesGenerator()
     let store = TranscriptStore()

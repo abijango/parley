@@ -17,6 +17,11 @@ enum AppPaths {
         supportDirectory.appendingPathComponent("Recordings", isDirectory: true)
     }
 
+    /// Persistent speaker voiceprints (biometric data — kept outside the vault).
+    static var speakersDirectory: URL {
+        supportDirectory.appendingPathComponent("Speakers", isDirectory: true)
+    }
+
     static func ensureDirectory(_ url: URL) {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }

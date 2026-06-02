@@ -98,6 +98,38 @@ do {
             line(row)
         }
     }
+
+    // Phase 4 acceptance demo: mirror VoiceprintStore — enroll one speaker from its
+    // QUALITY-GATED segments (centroid of L2-normalized embeddings), then verify a
+    // held-out clip of that speaker MATCHES above threshold while the other is REJECTED.
+    // (Gating mirrors brief constraint #2: low-quality clips pollute a voiceprint —
+    // the 0.21-quality tail in this clip doesn't even match its own speaker.)
+    let idThreshold: Float = 0.6
+    let minQuality: Float = 0.4
+    var bySpeaker: [String: [(emb: [Float], q: Float)]] = [:]
+    for seg in segs { bySpeaker[seg.speakerId, default: []].append((seg.embedding, seg.qualityScore)) }
+    func l2(_ v: [Float]) -> [Float] { let n = v.reduce(Float(0)) { $0 + $1*$1 }.squareRoot(); return n > 0 ? v.map { $0/n } : v }
+    func centroid(_ embs: [[Float]]) -> [Float] {
+        var acc = [Float](repeating: 0, count: embs[0].count)
+        for v in embs { for i in v.indices { acc[i] += v[i] } }
+        return l2(acc.map { $0 / Float(embs.count) })
+    }
+    if let enrolled = bySpeaker.first(where: { $0.value.filter { $0.q >= minQuality }.count >= 2 }) {
+        let good = enrolled.value.filter { $0.q >= minQuality }.sorted { $0.q > $1.q }
+        let heldOut = good[0].emb                       // best-quality clip, held out
+        let c = centroid(good.dropFirst().map(\.emb))   // enroll on the rest
+        line("\n[ID demo] enrolled speaker \(enrolled.key) from \(good.count - 1) quality-gated segment(s) (q≥\(minQuality)); threshold \(idThreshold)")
+        let selfScore = cosine(c, heldOut)
+        line(String(format: "  held-out SAME speaker %@: cosine %.2f → %@",
+                    enrolled.key, selfScore, selfScore >= idThreshold ? "MATCH ✅" : "miss ❌"))
+        for (spk, vals) in bySpeaker where spk != enrolled.key {
+            let s = vals.filter { $0.q >= minQuality }.map { cosine(c, $0.emb) }.max() ?? (vals.map { cosine(c, $0.emb) }.max() ?? .nan)
+            line(String(format: "  other speaker %@: best cosine %.2f → %@",
+                        spk, s, s >= idThreshold ? "FALSE MATCH ❌" : "rejected ✅"))
+        }
+    } else {
+        line("\n[ID demo] skipped — no speaker has ≥2 quality-gated segments")
+    }
 } catch {
     FileHandle.standardError.write(Data("  DIARIZATION FAILED: \(error)\n".utf8))
     exit(3)
