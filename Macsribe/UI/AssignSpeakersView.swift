@@ -130,7 +130,8 @@ struct AssignSpeakersView: View {
     }
 
     private func playSample(_ s: CallSpeakerSummary) {
-        let files = [review.micCaf, review.systemCaf].compactMap { $0 }
+        let files = [review.mixedCaf].compactMap { $0 }
+        AppLog.log("Play sample for \(displayName(s)): \(String(format: "%.1f–%.1fs", s.sampleStart, s.sampleEnd)) from \(files.first?.lastPathComponent ?? "no file")", category: "record")
         player.play(files: files, start: s.sampleStart, end: s.sampleEnd)
     }
 }

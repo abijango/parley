@@ -356,6 +356,8 @@ final class RecordingController: ObservableObject {
         // Hand the capture rings to the active engine, anchored to the shared
         // timeline (0 for a fresh start, or the prior duration when resuming). The
         // engine loads its model in the background and holds audio until ready.
+        // FluidAudio archives its mixed mono stream for the final diarization + play-sample.
+        (engine as? FluidAudioEngine)?.mixedAudioURL = sessionDir.appendingPathComponent("mixed.caf")
         engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
 
         startMeterTimer()
@@ -459,8 +461,22 @@ final class RecordingController: ObservableObject {
 
         // Tear down the engine off the main actor; finalize() below reads the
         // already-populated timeline synchronously, so it needn't wait on this.
+        // For FluidAudio, then run one authoritative whole-recording diarization
+        // pass and offer the speaker-review sheet with the cleaned-up speakers.
         let engine = self.engine
-        Task { await engine?.stop() }
+        Task { [weak self] in
+            await engine?.stop()
+            if let fluid = engine as? FluidAudioEngine {
+                await fluid.finalizeDiarization()
+                guard let self else { return }
+                let speakers = fluid.speakerSummaries()
+                if !speakers.isEmpty {
+                    self.pendingSpeakerReview = SpeakerReview(
+                        speakers: speakers,
+                        mixedCaf: self.sessionDirectory?.appendingPathComponent("mixed.caf"))
+                }
+            }
+        }
         clock = nil
 
         finalize()
@@ -526,19 +542,8 @@ final class RecordingController: ObservableObject {
         finalizeManifest()   // mark the session cleanly finished (not a crash)
         state = .idle
         scheduleIdleUnload()   // free the model's RAM if we sit idle after this
-
-        // Offer the at-stop "Assign speakers" review (FluidAudio only) when the
-        // session has diarized speakers. The engine outlives stop, so its speaker
-        // data + embeddings are still available for naming/enrollment.
-        if settings.transcriptionEngine == .fluidAudio, let fluid = engine as? FluidAudioEngine {
-            let speakers = fluid.speakerSummaries()
-            if !speakers.isEmpty {
-                pendingSpeakerReview = SpeakerReview(
-                    speakers: speakers,
-                    micCaf: sessionDirectory?.appendingPathComponent("mic.caf"),
-                    systemCaf: sessionDirectory?.appendingPathComponent("system.caf"))
-            }
-        }
+        // The "Assign speakers" review is presented from stop() after the final
+        // whole-recording diarization pass completes.
     }
 
     // MARK: At-stop speaker review (FluidAudio)
@@ -547,8 +552,7 @@ final class RecordingController: ObservableObject {
     struct SpeakerReview: Identifiable {
         let id = UUID()
         var speakers: [CallSpeakerSummary]
-        let micCaf: URL?
-        let systemCaf: URL?
+        let mixedCaf: URL?
     }
 
     /// Finish the review: clear the sheet and rewrite the just-written transcript

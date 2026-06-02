@@ -30,6 +30,9 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Saved voiceprints for cross-session auto-identification (nil = no matching).
     private let voiceprints: VoiceprintStore?
     private let identificationThreshold: Double
+    /// Where to archive the mixed mono stream (for the final whole-buffer diarization
+    /// and play-sample). Set before `start()`.
+    var mixedAudioURL: URL?
     // `.streaming` (11s chunks, low latency) — `.default` uses 15s chunks and
     // won't emit anything until ~15s of audio, which reads as "no transcript".
     private let asr = SlidingWindowAsrManager(config: .streaming)
@@ -176,7 +179,9 @@ final class FluidAudioEngine: TranscriptionEngine {
         // buffer the same samples for the diarizer.
         let asr = self.asr
         let diarRing = self.diarRing
+        let mixedURL = self.mixedAudioURL
         mixerTask = Task.detached {
+            var mixedFile: AVAudioFile? = mixedURL.flatMap { try? AVAudioFile(forWriting: $0, settings: Self.format.settings) }
             var fedSamples = 0
             var lastLogged = 0
             while !Task.isCancelled {
@@ -184,6 +189,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                    let buffer = Self.makeBuffer(mixed) {
                     await asr.streamAudio(buffer)
                     mixed.withUnsafeBufferPointer { diarRing.write($0) }
+                    try? mixedFile?.write(from: buffer)   // archive the mixed stream
                     fedSamples += mixed.count
                     if fedSamples - lastLogged >= 16_000 * 5 {
                         lastLogged = fedSamples
@@ -192,6 +198,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
+            mixedFile = nil   // flush + close the archive
         }
 
         // Diarize in ~10s chunks on a long-lived DiarizerManager so in-session
@@ -265,6 +272,39 @@ final class FluidAudioEngine: TranscriptionEngine {
                 onSpeakerIdentified?(m.voiceprint.name)
             }
         }
+    }
+
+    /// At stop: re-diarize the WHOLE mixed recording in one pass — a consistent
+    /// global speaker set (unlike the incremental chunks, which drift / over-split
+    /// on hard audio) — and replace the live labels. This is the authoritative
+    /// labeling used for the final transcript and the review panel.
+    func finalizeDiarization() async {
+        guard let url = mixedAudioURL, FileManager.default.fileExists(atPath: url.path) else { return }
+        let threshold = Float(settings.diarizationThreshold)
+        struct Seg: Sendable { let id: String; let start: TimeInterval; let end: TimeInterval; let emb: [Float]; let q: Float }
+        let segs: [Seg]? = await Task.detached {
+            guard let samples = try? AudioConverter().resampleAudioFile(url), !samples.isEmpty,
+                  let diar = try? await Self.makeDiarizer(clusterThreshold: threshold),
+                  let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000)
+            else { return nil }
+            return result.segments.map {
+                Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
+                    end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
+            }
+        }.value
+        guard let segs, !segs.isEmpty else { return }
+        diarSegments = segs.map { ($0.id, $0.start, $0.end) }
+        var emb: [String: [[Float]]] = [:]
+        var secs: [String: TimeInterval] = [:]
+        for s in segs where s.q >= minSegmentQuality && !s.emb.isEmpty {
+            emb[s.id, default: []].append(s.emb)
+            secs[s.id, default: 0] += max(0, s.end - s.start)
+        }
+        speakerEmbeddings = emb
+        speakerGatedSeconds = secs
+        autoIdentify()   // re-applies known names by voice (ids may differ from the live pass)
+        publish()
+        AppLog.log("FluidAudio final diarization: \(Set(segs.map(\.id)).count) speaker(s)", category: "record")
     }
 
     /// The diarized speaker whose turn overlaps `[start, end]` most (nil if none yet).
