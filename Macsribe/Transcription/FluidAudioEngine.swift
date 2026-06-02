@@ -53,13 +53,15 @@ final class FluidAudioEngine: TranscriptionEngine {
 
     func start(micRing: AudioRingBuffer, systemRing: AudioRingBuffer, startElapsed: TimeInterval) {
         let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
+        let clusterThreshold = Float(settings.diarizationThreshold)
         loadTask = Task { [weak self] in
             do {
                 let models = try await AsrModels.downloadAndLoad(version: version)
                 try await self?.asr.loadModels(models)
                 try await self?.asr.startStreaming()
                 AppLog.log("FluidAudio engine ready — Parakeet \(version) sliding-window streaming", category: "record")
-                self?.beginConsumingAndMixing(micRing: micRing, systemRing: systemRing, startElapsed: startElapsed)
+                self?.beginConsumingAndMixing(micRing: micRing, systemRing: systemRing,
+                                              startElapsed: startElapsed, clusterThreshold: clusterThreshold)
             } catch {
                 AppLog.log("FluidAudio engine failed to start: \(error.localizedDescription); capturing audio only (archive preserved)", category: "record")
             }
@@ -78,7 +80,8 @@ final class FluidAudioEngine: TranscriptionEngine {
 
     // MARK: - Consume updates + feed mixed audio
 
-    private func beginConsumingAndMixing(micRing: AudioRingBuffer, systemRing: AudioRingBuffer, startElapsed: TimeInterval) {
+    private func beginConsumingAndMixing(micRing: AudioRingBuffer, systemRing: AudioRingBuffer,
+                                         startElapsed: TimeInterval, clusterThreshold: Float) {
         streamStart = Date()
 
         // Map the sliding-window confirmed/volatile updates onto our Segment model.
@@ -117,7 +120,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         // Diarize in ~10s chunks on a long-lived DiarizerManager so in-session
         // speaker ids stay consistent; rebase each chunk's times by its start offset.
         diarTask = Task.detached { [weak self] in
-            guard let diar = try? await Self.makeDiarizer() else {
+            guard let diar = try? await Self.makeDiarizer(clusterThreshold: clusterThreshold) else {
                 AppLog.log("FluidAudio diarizer failed to initialize — transcript will have no speaker labels", category: "record")
                 return
             }
@@ -147,9 +150,11 @@ final class FluidAudioEngine: TranscriptionEngine {
     }
 
     /// Load diarization models and build a session-long manager (owned by the diarTask).
-    nonisolated private static func makeDiarizer() async throws -> DiarizerManager {
+    nonisolated private static func makeDiarizer(clusterThreshold: Float) async throws -> DiarizerManager {
         let models = try await DiarizerModels.downloadIfNeeded()
-        let diar = DiarizerManager(config: DiarizerConfig())   // clusteringThreshold 0.7 default; tunable
+        var config = DiarizerConfig()
+        config.clusteringThreshold = clusterThreshold   // library default 0.7 over-merges; we default 0.6
+        let diar = DiarizerManager(config: config)
         diar.initialize(models: models)
         return diar
     }

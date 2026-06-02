@@ -130,6 +130,7 @@ final class AppSettings: ObservableObject {
         static let idleUnloadMinutes = "macsribe.idleUnloadMinutes"
         static let transcriptionEngine = "macsribe.transcriptionEngine"
         static let parakeetVersion = "macsribe.parakeetVersion"
+        static let diarizationThreshold = "macsribe.diarizationThreshold"
     }
 
     // MARK: Memory
@@ -183,6 +184,10 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.computeMode) var computeModeRaw: String = ComputeMode.gpu.rawValue
     @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.fluidAudio.rawValue
     @AppStorage(Key.parakeetVersion) var parakeetVersionRaw: String = FluidParakeetVersion.v3.rawValue
+    /// FluidAudio in-session diarization clustering threshold (lower = more speakers /
+    /// more sensitive; higher = merges similar voices). Default 0.6 — the library's
+    /// 0.7 over-merges distinct speakers in practice.
+    @AppStorage(Key.diarizationThreshold) var diarizationThreshold: Double = 0.6
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt

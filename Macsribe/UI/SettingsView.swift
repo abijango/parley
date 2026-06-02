@@ -319,6 +319,19 @@ struct SettingsView: View {
                 }
             } else {
                 FluidModelSection(models: recording.fluidModels, isRecording: recording.isRecording)
+
+                Divider()
+                Text("Speaker separation").font(.headline)
+                HStack(spacing: 10) {
+                    Slider(value: $settings.diarizationThreshold, in: 0.40...0.80, step: 0.05)
+                        .frame(maxWidth: 260)
+                        .disabled(recording.isRecording)
+                    Text(String(format: "%.2f", settings.diarizationThreshold))
+                        .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
+                }
+                Text("Lower = more sensitive (splits similar voices into separate speakers); higher = merges. If distinct speakers are labelled as one, lower it. Applies to the next recording.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
