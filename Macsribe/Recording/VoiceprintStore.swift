@@ -86,6 +86,36 @@ final class VoiceprintStore: ObservableObject {
         save()
     }
 
+    /// Voiceprints whose embeddings were made by a model other than the current one
+    /// (a FluidAudio upgrade can change the embedding model, invalidating old vectors).
+    /// These should be re-enrolled from their retained clips.
+    var staleVoiceprints: [Voiceprint] {
+        voiceprints.filter { $0.embeddingModel != Self.embeddingModel || $0.embeddingDim != Self.embeddingDim }
+    }
+
+    /// Replace a voiceprint's vectors with freshly-computed embeddings (e.g. from its
+    /// retained clip after a model upgrade), re-stamping the current model/dim/schema.
+    /// Identity (id, name, createdAt) and the retained clip are preserved.
+    func reEnroll(_ id: UUID, embeddings: [[Float]]) {
+        guard let idx = voiceprints.firstIndex(where: { $0.id == id }), !embeddings.isEmpty else { return }
+        let normed = embeddings.map { Self.normalized($0) }
+        let old = voiceprints[idx]
+        voiceprints[idx] = Voiceprint(
+            id: old.id, name: old.name, embeddings: normed,
+            centroid: Self.normalized(Self.mean(normed)), sampleCount: normed.count,
+            createdAt: old.createdAt, updatedAt: Date(),
+            embeddingModel: Self.embeddingModel, embeddingDim: normed.first?.count ?? Self.embeddingDim,
+            schemaVersion: Voiceprint.currentSchemaVersion, audioSample: old.audioSample)
+        save()
+        AppLog.log("Re-enrolled voiceprint \(old.name): \(normed.count) embedding(s), model \(Self.embeddingModel)", category: "record")
+    }
+
+    /// Raw retained clip samples for a voiceprint (decoded from the stored Data).
+    func clipSamples(_ id: UUID) -> [Float]? {
+        guard let vp = voiceprints.first(where: { $0.id == id }), let data = vp.audioSample else { return nil }
+        return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    }
+
     func rename(_ id: UUID, to name: String) {
         guard let idx = voiceprints.firstIndex(where: { $0.id == id }) else { return }
         voiceprints[idx].name = name

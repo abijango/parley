@@ -38,12 +38,12 @@ choice applies to the *next* recording (no mid-session switch).
 | Engine | ASR | Speaker labels | Latency |
 |--------|-----|----------------|---------|
 | **WhisperKit** | OpenAI Whisper (small / medium / large-v3 / turbo) | "Me" vs "Remote" from the two capture tracks | ~1 s (re-transcribes the buffer) |
-| **FluidAudio** *(default)* | Parakeet TDT 0.6b **v3** (multilingual) | Per-speaker diarization + voiceprint ID *(in progress)* | ~11 s (sliding-window chunks) |
+| **FluidAudio** *(default)* | Parakeet TDT 0.6b **v3** (multilingual) | Per-speaker diarization + cross-session voiceprint ID | ~11 s live; corrected at stop |
 
 - **WhisperKit** keeps the two-track design above ("Me"/"Remote", no diarization ML) — transcription only, behaviour unchanged.
 - **FluidAudio** is a self-contained native stack ([FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio), Apache-2.0, **pinned to `0.14.8`**). It keeps both taps but **mixes mic + system into one 16 kHz mono stream** (the far side of a call isn't audible on the mic alone) and runs everything from that single buffer:
-  - **Transcription** — Parakeet TDT 0.6b v3, multilingual, via `SlidingWindowAsrManager` using the `.streaming` preset (~11 s chunks). The first text therefore appears after ~11 s — higher latency than WhisperKit, but it preserves the v3 model. (The low-latency end-of-utterance manager needs different, non-v3 models, so it's not used.)
-  - **Diarization + speaker identification** — pyannote segmentation + WeSpeaker **256-d** embeddings. *Landing in Phases 3–6.*
+  - **Transcription** — Parakeet TDT 0.6b v3, multilingual, via `SlidingWindowAsrManager` using the `.streaming` preset (~11 s chunks). The first text therefore appears after ~11 s — higher latency than WhisperKit, but it preserves the v3 model. (The low-latency end-of-utterance manager needs different, non-v3 models, so it's not used.) `v2` is English-only; `v3` (default) is multilingual.
+  - **Diarization + speaker identification** — pyannote segmentation + WeSpeaker **256-d** embeddings (`embeddingModel` `wespeaker_v2`). Live labels come from ~10 s diarization chunks; at stop, one **offline pass** re-diarizes the whole recording for a consistent speaker set, optionally re-transcribes it with the full-context batch Parakeet model, and rewrites the saved transcript. Confident matches against saved voiceprints are auto-named and added to attendees.
 
 Models download on first use to `~/Library/Application Support/FluidAudio/Models/`
 (`parakeet-tdt-0.6b-v3/`, `speaker-diarization/`, …). Settings shows a **Download / Active**
@@ -55,21 +55,24 @@ control for the FluidAudio model.
 |-------|-------|-------|
 | 0–1 | Recon + ASR/diarization smoke test (`Tools/FluidSmoke`) | ✅ done |
 | 2 | `TranscriptionEngine` protocol, `WhisperKitEngine`, live FluidAudio transcription, settings | ✅ done |
-| 3 | Live diarization + per-segment speaker labels in the FluidAudio engine | 🚧 in progress |
-| 4 | `VoiceprintStore` — 256-d embeddings, cosine matching, configurable `identificationThreshold` | ⬜ planned |
-| 5 | Enrollment / labeling UX + known-speaker preload (`initializeKnownSpeakers`) | ⬜ planned |
-| 6 | Encrypted export / import / backup (Keychain + CryptoKit) | ⬜ planned |
-| 7 | Offline accuracy re-pass over buffered audio | ⬜ optional |
+| 3 | Live diarization + per-segment speaker labels in the FluidAudio engine | ✅ done |
+| 4 | `VoiceprintStore` — 256-d embeddings, cosine matching, configurable `identificationThreshold` | ✅ done |
+| 5 | Enrollment / labeling UX (inline + at-stop review), auto-identify + auto-add to attendees, retained playable clips | ✅ done |
+| 6 | Encrypted export / import / backup (Keychain + CryptoKit), Speakers management tab | ✅ done |
+| 7 | Offline re-pass at stop: whole-recording diarization + optional batch-ASR re-transcribe | ✅ done |
 
-> **Speaker identification is biometric data.** When Phases 4–6 land, each voiceprint is
-> stored with its embedding-model id, dimension (**256**), and a schema version, and is
-> encrypted at rest (symmetric key in the Keychain). Embeddings are **not portable across
-> models** — if FluidAudio's embedding model changes on upgrade, saved voiceprints are
-> invalidated and must be re-enrolled (short enrollment audio snippets are retained so
-> vectors can be regenerated without starting over). Two distinct thresholds exist and
-> must not be conflated: FluidAudio's in-session `clusteringThreshold` (groups voices
-> within one recording) vs. our cross-session `identificationThreshold` (matches a voice
-> to a saved person).
+> **Speaker identification is biometric data.** Each voiceprint is stored with its
+> embedding-model id (`wespeaker_v2`), dimension (**256**), and a schema version, and is
+> **encrypted at rest** (AES-GCM, symmetric key in the Keychain; plaintext stores are
+> migrated on load). Embeddings are **not portable across models** — if FluidAudio's
+> embedding model changes on upgrade, saved voiceprints stop matching. Short enrollment
+> audio clips are retained alongside each voiceprint, and **Settings → Speakers →
+> Re-enrollment** regenerates the vectors from those clips (flagging outdated ones) so
+> identities survive a model upgrade without re-recording. Two distinct thresholds exist
+> and must not be conflated: FluidAudio's in-session `clusteringThreshold` /
+> `diarizationThreshold` (groups voices within one recording, default **0.6**) vs. our
+> cross-session `identificationThreshold` (matches a voice to a saved person, default
+> **0.6**). Both are adjustable in **Settings → Transcription**.
 
 ## Requirements
 

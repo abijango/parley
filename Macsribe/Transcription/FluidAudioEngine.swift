@@ -279,6 +279,19 @@ final class FluidAudioEngine: TranscriptionEngine {
         return diar
     }
 
+    /// Compute fresh embeddings from a retained enrollment clip (raw 16 kHz mono
+    /// Float samples) using the CURRENT diarization embedding model. Used to
+    /// re-enroll a voiceprint after a model upgrade — regenerating the vectors from
+    /// the kept audio instead of re-recording. Returns the clip's segment embeddings
+    /// (a single speaker), or nil if none could be derived.
+    nonisolated static func embeddings(forClip samples: [Float], clusterThreshold: Float) async -> [[Float]]? {
+        guard samples.count >= 16_000 else { return nil }   // < 1 s is too short to embed
+        guard let diar = try? await makeDiarizer(clusterThreshold: clusterThreshold),
+              let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000) else { return nil }
+        let embs = result.segments.filter { !$0.embedding.isEmpty }.map { $0.embedding }
+        return embs.isEmpty ? nil : embs
+    }
+
     /// Merge newly-diarized turns, accumulate quality-gated per-speaker embeddings,
     /// auto-identify against saved voiceprints, then re-derive segments.
     private func ingestDiarization(_ segs: [(speakerId: String, start: TimeInterval, end: TimeInterval, embedding: [Float], quality: Float)]) {
@@ -341,34 +354,53 @@ final class FluidAudioEngine: TranscriptionEngine {
         }
         let mic = micArchiveURL, sys = systemArchiveURL
         let threshold = Float(settings.diarizationThreshold)
-        struct Seg: Sendable { let id: String; let start: TimeInterval; let end: TimeInterval; let emb: [Float]; let q: Float }
-        let segs: [Seg]? = await Task.detached {
+        let doAsr = settings.offlineAsrRepass
+        let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
+        // One detached pass: build the clean mix, resample once, then run the
+        // diarizer AND (optionally) the batch ASR over the same samples.
+        let pass: OfflinePassResult = await Task.detached {
             // Build a CLEAN mixed file from the archived tracks (the live per-tick
             // mixer is glitchy — fine for streaming ASR, bad for diarization + playback).
             let built = Self.buildCleanMix(mic: mic, system: sys, output: url)
             guard let samples = try? AudioConverter().resampleAudioFile(url), !samples.isEmpty else {
-                AppLog.log("finalizeDiarization: couldn't read clean mix (built=\(built))", category: "record"); return nil
+                AppLog.log("finalizeDiarization: couldn't read clean mix (built=\(built))", category: "record")
+                return OfflinePassResult(segs: nil, tokens: nil)
             }
-            guard let diar = try? await Self.makeDiarizer(clusterThreshold: threshold) else {
-                AppLog.log("finalizeDiarization: diarizer init failed", category: "record"); return nil
+            // Diarization (independent of ASR — one failing doesn't block the other).
+            var segs: [Seg]?
+            if let diar = try? await Self.makeDiarizer(clusterThreshold: threshold),
+               let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000) {
+                segs = result.segments.map {
+                    Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
+                        end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
+                }
+            } else {
+                AppLog.log("finalizeDiarization: diarization unavailable (init or run failed)", category: "record")
             }
-            guard let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000) else {
-                AppLog.log("finalizeDiarization: diarization failed", category: "record"); return nil
-            }
-            return result.segments.map {
-                Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
-                    end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
-            }
+            // Higher-accuracy offline transcript (full-context batch Parakeet).
+            let tokens = doAsr ? await Self.offlineTranscribe(samples: samples, version: version) : nil
+            return OfflinePassResult(segs: segs, tokens: tokens)
         }.value
-        // The offline pass can come back empty on quiet/hard audio. Fall back to the
+
+        // Apply the offline transcript first (replaces the streaming units), so the
+        // re-derived segments pick up the fresh diarization labels below.
+        var repassed = false
+        if let tokens = pass.tokens, !tokens.isEmpty {
+            applyOfflineUnits(tokens)
+            repassed = true
+        }
+
+        // The diarizer can come back empty on quiet/hard audio. Fall back to the
         // live (chunked) labels — but STILL retain voice clips now that mixed.caf
         // exists (clips can't be captured mid-call, before the clean mix is built).
-        guard let segs, !segs.isEmpty else {
+        guard let segs = pass.segs, !segs.isEmpty else {
             AppLog.log("finalizeDiarization: no final segments — keeping live labels", category: "record")
+            publish()
             await backfillClips()
             let n = callSpeakerIds().count
-            return FinalizeSummary(speakerCount: n, relabeled: false,
-                                   note: "Offline pass: kept live labels · \(n) speaker\(n == 1 ? "" : "s")")
+            let suffix = repassed ? " · transcript re-passed" : ""
+            return FinalizeSummary(speakerCount: n, relabeled: repassed,
+                                   note: "Offline pass: kept live labels · \(n) speaker\(n == 1 ? "" : "s")\(suffix)")
         }
         diarSegments = segs.map { ($0.id, $0.start, $0.end) }
         var emb: [String: [[Float]]] = [:]
@@ -384,9 +416,64 @@ final class FluidAudioEngine: TranscriptionEngine {
         await backfillClips()
         let n = Set(segs.map(\.id)).count
         let elapsed = Date().timeIntervalSince(startedAt)
-        AppLog.log("FluidAudio final diarization: \(n) speaker(s) in \(String(format: "%.1fs", elapsed))", category: "record")
+        let repassNote = repassed ? " · transcript re-passed" : ""
+        AppLog.log("FluidAudio final diarization: \(n) speaker(s)\(repassed ? " + offline ASR re-pass" : "") in \(String(format: "%.1fs", elapsed))", category: "record")
         return FinalizeSummary(speakerCount: n, relabeled: true,
-                               note: "Offline Speaker Detection complete · \(n) speaker\(n == 1 ? "" : "s") · \(String(format: "%.1fs", elapsed))")
+                               note: "Offline Speaker Detection complete · \(n) speaker\(n == 1 ? "" : "s")\(repassNote) · \(String(format: "%.1fs", elapsed))")
+    }
+
+    private struct Seg: Sendable { let id: String; let start: TimeInterval; let end: TimeInterval; let emb: [Float]; let q: Float }
+    private struct TokTiming: Sendable { let text: String; let start: TimeInterval; let end: TimeInterval }
+    private struct OfflinePassResult: Sendable { let segs: [Seg]?; let tokens: [TokTiming]? }
+
+    /// Batch (full-context) Parakeet transcription of the whole recording — more
+    /// accurate than the 11 s sliding-window stream. Returns token-level timings, or
+    /// nil on failure (the caller keeps the streaming transcript). Runs off-main.
+    nonisolated private static func offlineTranscribe(samples: [Float], version: AsrModelVersion) async -> [TokTiming]? {
+        do {
+            let models = try await AsrModels.downloadAndLoad(version: version)
+            let mgr = AsrManager(config: .default)
+            try await mgr.loadModels(models)
+            var state = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
+            let result = try await mgr.transcribe(samples, decoderState: &state)
+            await mgr.cleanup()
+            if let timings = result.tokenTimings, !timings.isEmpty {
+                return timings.map { TokTiming(text: $0.token, start: $0.startTime, end: $0.endTime) }
+            }
+            // No token timings — fall back to one span covering the whole clip.
+            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return [TokTiming(text: text, start: 0, end: TimeInterval(samples.count) / 16_000)]
+        } catch {
+            AppLog.log("finalizeDiarization: offline ASR re-pass failed: \(error.localizedDescription)", category: "record")
+            return nil
+        }
+    }
+
+    /// Replace the streaming ASR units with the offline transcript. Tokens are split
+    /// into units on pauses (>0.8 s) so the final transcript breaks into readable
+    /// utterances; `segments(for:)` then splits each unit by diarized speaker.
+    private func applyOfflineUnits(_ tokens: [TokTiming]) {
+        var units: [ASRUnit] = []
+        var cur: [Tok] = []
+        var lastEnd: TimeInterval?
+        func flush() {
+            defer { cur = [] }
+            guard !cur.isEmpty else { return }
+            let text = Self.reconstruct(cur.map(\.text))
+            guard !text.isEmpty else { return }
+            units.append(ASRUnit(id: UUID(), tokens: cur, text: text, confirmed: true))
+        }
+        for t in tokens {
+            if let le = lastEnd, t.start - le > 0.8 { flush() }
+            cur.append(Tok(text: t.text, start: t.start, end: t.end))
+            lastEnd = t.end
+        }
+        flush()
+        guard !units.isEmpty else { return }
+        confirmedUnits = units
+        volatileUnit = nil
+        runIds.removeAll()   // fresh, stable ids for the final transcript
     }
 
     /// After stop (mixed.caf now exists), retain a short voice clip for every

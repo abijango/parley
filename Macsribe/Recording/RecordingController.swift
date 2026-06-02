@@ -492,6 +492,10 @@ final class RecordingController: ObservableObject {
                 let summary = await fluid.finalizeDiarization()
                 guard let self else { return }
                 self.offlinePass = .done(summary.note)
+                // Persist the offline result (corrected labels + higher-accuracy
+                // transcript) to the saved file — finalize() wrote the streaming
+                // version synchronously before this pass completed.
+                self.rewriteLastTranscript(reason: "offline pass")
                 let speakers = fluid.speakerSummaries()
                 if !speakers.isEmpty {
                     self.pendingSpeakerReview = SpeakerReview(
@@ -582,16 +586,25 @@ final class RecordingController: ObservableObject {
     /// with the (possibly newly-named) speakers + updated attendees.
     func finishSpeakerReview() {
         pendingSpeakerReview = nil
+        rewriteLastTranscript(reason: "reviewed speakers")
+    }
+
+    /// Rewrite the saved transcript from the engine's current (post-offline-pass)
+    /// timeline + attendees. Used both after the speaker review and automatically
+    /// once the offline diarization + ASR re-pass finishes (so the saved file gets
+    /// the corrected labels / higher-accuracy transcript even without a review).
+    func rewriteLastTranscript(reason: String) {
         guard let url = lastTranscriptURL, var meta = TranscriptWriter.parseFrontmatter(url) else { return }
         meta.attendees = TranscriptWriter.splitAttendees(attendees)
         let segs = engine?.finalTimeline() ?? segments
+        guard !segs.isEmpty else { return }
         let body = TranscriptWriter.makeBody(
             title: meta.title, date: meta.date, attendees: attendees, destination: meta.filing,
             segments: segs, manualNotes: manualNotes.isEmpty ? nil : manualNotes, meta: meta)
         try? body.write(to: url, atomically: true, encoding: .utf8)
         vault.addPeople(TranscriptWriter.splitAttendees(attendees))
         store.refresh()
-        AppLog.log("Rewrote transcript with reviewed speakers: \(url.lastPathComponent)", category: "record")
+        AppLog.log("Rewrote transcript (\(reason)): \(url.lastPathComponent)", category: "record")
     }
 
     // MARK: Idle model unload

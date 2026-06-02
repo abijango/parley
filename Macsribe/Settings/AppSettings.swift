@@ -132,6 +132,7 @@ final class AppSettings: ObservableObject {
         static let parakeetVersion = "macsribe.parakeetVersion"
         static let diarizationThreshold = "macsribe.diarizationThreshold"
         static let identificationThreshold = "macsribe.identificationThreshold"
+        static let offlineAsrRepass = "macsribe.offlineAsrRepass"
     }
 
     // MARK: Memory
@@ -193,6 +194,10 @@ final class AppSettings: ObservableObject {
     /// saved voiceprint's centroid to call it a match. Distinct from
     /// `diarizationThreshold` (in-session clustering). Higher = fewer false matches.
     @AppStorage(Key.identificationThreshold) var identificationThreshold: Double = 0.6
+    /// FluidAudio only: after stop, re-transcribe the whole recording with the
+    /// batch Parakeet pass (higher accuracy than the streaming chunks) and rewrite
+    /// the saved transcript. Off = keep the live streaming transcript.
+    @AppStorage(Key.offlineAsrRepass) var offlineAsrRepass: Bool = true
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt

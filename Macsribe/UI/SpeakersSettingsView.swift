@@ -5,6 +5,8 @@ import AppKit
 /// export / import for backup or transfer (plain JSON, or passphrase-encrypted).
 struct SpeakersSettingsView: View {
     @ObservedObject var store: VoiceprintStore
+    /// In-session clustering threshold, reused to embed retained clips on re-enrollment.
+    var diarizationThreshold: Double = 0.6
 
     @State private var exportPassphrase = ""
     @State private var importPassphrase = ""
@@ -12,6 +14,7 @@ struct SpeakersSettingsView: View {
     @State private var renameText = ""
     @State private var status: String?
     @State private var player = SamplePlayer()
+    @State private var reenrolling = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -34,6 +37,11 @@ struct SpeakersSettingsView: View {
                 }
                 .frame(maxHeight: 220)
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            if !store.voiceprints.isEmpty {
+                Divider()
+                reEnrollSection
             }
 
             Divider()
@@ -70,6 +78,56 @@ struct SpeakersSettingsView: View {
                 }
             }
             .padding().frame(width: 300)
+        }
+    }
+
+    /// Regenerate voiceprint vectors from retained clips — the recovery path when a
+    /// FluidAudio upgrade changes the embedding model (constraint #1).
+    private var reEnrollSection: some View {
+        let clipBacked = store.voiceprints.filter { $0.audioSample != nil }.count
+        let stale = store.staleVoiceprints.count
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Re-enrollment").font(.headline)
+            Text("If a FluidAudio update changes the embedding model, saved voiceprints stop matching. Regenerate their vectors from the retained clips — no re-recording needed.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if stale > 0 {
+                Label("\(stale) voiceprint\(stale == 1 ? "" : "s") use an outdated model and won't match until re-enrolled.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            HStack(spacing: 8) {
+                if reenrolling { ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center) }
+                Button(stale > 0 ? "Re-enroll outdated (\(stale))" : "Regenerate from clips (\(clipBacked))") {
+                    reEnrollFromClips(staleOnly: stale > 0)
+                }
+                .disabled(reenrolling || clipBacked == 0)
+                if clipBacked == 0 {
+                    Text("No retained clips yet.").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func reEnrollFromClips(staleOnly: Bool) {
+        let targets = (staleOnly ? store.staleVoiceprints : store.voiceprints)
+            .filter { $0.audioSample != nil }
+        guard !targets.isEmpty else { status = "No saved clips to re-enroll from."; return }
+        reenrolling = true
+        status = "Re-enrolling \(targets.count) speaker(s) from saved clips…"
+        let threshold = Float(diarizationThreshold)
+        Task {
+            var done = 0, failed = 0
+            for vp in targets {
+                guard let samples = store.clipSamples(vp.id),
+                      let embs = await FluidAudioEngine.embeddings(forClip: samples, clusterThreshold: threshold) else {
+                    failed += 1; continue
+                }
+                store.reEnroll(vp.id, embeddings: embs); done += 1
+            }
+            reenrolling = false
+            status = "Re-enrolled \(done) speaker(s)"
+                + (failed > 0 ? "; \(failed) skipped (clip too short or low quality)." : ".")
         }
     }
 

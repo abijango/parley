@@ -22,7 +22,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             transcriptionTab
                 .tabItem { Label("Transcription", systemImage: "waveform") }
-            SpeakersSettingsView(store: recording.voiceprints)
+            SpeakersSettingsView(store: recording.voiceprints,
+                                 diarizationThreshold: settings.diarizationThreshold)
                 .tabItem { Label("Speakers", systemImage: "person.2.wave.2") }
             notesTab
                 .tabItem { Label("Notes", systemImage: "doc.text") }
@@ -394,6 +395,13 @@ struct SettingsView: View {
                         .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
                 }
                 Text("Lower = more sensitive (splits similar voices into separate speakers); higher = merges. If distinct speakers are labelled as one, lower it. Applies to the next recording.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                Text("Final transcript").font(.headline)
+                Toggle("Re-transcribe the whole recording after stopping", isOn: $settings.offlineAsrRepass)
+                Text("A full-context batch pass over the recorded audio — more accurate than the live streaming chunks. Runs once at stop (adds a few seconds) and rewrites the saved transcript. Turn off to keep the live transcript as-is.")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
