@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import UserNotifications
 
 /// Drives the single (Claude, raw-prompt) meeting-summary flow asynchronously:
 /// generate in the background → stage the result → user reviews in History → commit to the
@@ -23,6 +24,8 @@ final class SummaryService: ObservableObject {
 
     init(store: TranscriptStore) {
         self.store = store
+        // Ask once so we can ping the user when a background summary is ready to review.
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     func state(for item: TranscriptItem) -> JobState? { jobs[item.id] }
@@ -83,6 +86,7 @@ final class SummaryService: ObservableObject {
                         AppPaths.ensureDirectory(staged.deletingLastPathComponent())
                         try text.write(to: staged, atomically: true, encoding: .utf8)
                         self.jobs[item.id] = nil
+                        Self.notifyReady(title: item.meta.title)
                         AppLog.log("Summary: ready for review — \(staged.lastPathComponent)", category: "summary")
                     } catch {
                         self.jobs[item.id] = .failed("Couldn't write the summary: \(error.localizedDescription)")
@@ -121,6 +125,17 @@ final class SummaryService: ObservableObject {
 
     private enum RunResult { case success(String); case failure(String) }
 
+    /// Local notification when a summary lands, since runs take a minute or two and the user
+    /// may be in another tab/app.
+    private static func notifyReady(title: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Summary ready to review"
+        content.body = title.isEmpty ? "A meeting summary is ready in History → Review." : title
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
+    }
+
     // MARK: Commit
 
     /// Files the staged summary into the vault at `destination`, marks the transcript processed,
@@ -156,9 +171,25 @@ final class SummaryService: ObservableObject {
             AppLog.log("Summary: commit write failed — \(error.localizedDescription)", category: "summary")
             return nil
         }
-        store.moveToProcessed(item, notePath: noteURL.path)
+        let moved = store.moveToProcessed(item, notePath: noteURL.path)
         try? FileManager.default.removeItem(at: staged)
         jobs[item.id] = nil
+
+        // The committed summary + the raw transcript make the session audio redundant —
+        // delete it (and its session folder) to reclaim disk, and clear the `audio` link.
+        if AppSettings.shared.deleteAudioAfterFiling, let audio = item.meta.audio, !audio.isEmpty {
+            let audioURL = URL(fileURLWithPath: audio)
+            let recordingsRoot = AppPaths.recordingsDirectory.standardizedFileURL.path + "/"
+            let sessionDir = audioURL.deletingLastPathComponent()
+            if sessionDir.standardizedFileURL.path.hasPrefix(recordingsRoot) {
+                try? FileManager.default.removeItem(at: sessionDir)   // mic/system/mixed.caf + manifest
+            } else {
+                try? FileManager.default.removeItem(at: audioURL)
+            }
+            TranscriptWriter.updateFrontmatter(at: moved) { $0.audio = nil }
+            AppLog.log("Summary: deleted session audio after filing (\(sessionDir.lastPathComponent))", category: "summary")
+        }
+
         openInObsidian(noteURL)
         AppLog.log("Summary: committed \(noteURL.lastPathComponent) → \(dest.isEmpty ? "(vault root)" : dest)", category: "summary")
         store.refresh()

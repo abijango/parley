@@ -33,8 +33,6 @@ struct SettingsView: View {
                 .tabItem { Label("Detection", systemImage: "dot.radiowaves.left.and.right") }
             storageTab
                 .tabItem { Label("Storage", systemImage: "internaldrive") }
-            SkillEditorView()
-                .tabItem { Label("Skill", systemImage: "wand.and.stars") }
             vaultTab
                 .tabItem { Label("Vault", systemImage: "folder") }
         }
@@ -54,6 +52,10 @@ struct SettingsView: View {
                 Divider()
                 Toggle("Auto-summarize after speakers are assigned", isOn: $settings.autoRunClaude)
                 Text("When off, summaries only run when you press Summarize on a transcript in History.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Delete the recording's audio after committing its summary", isOn: $settings.deleteAudioAfterFiling)
+                Text("Once a summary is filed you have the raw transcript + the note, so the audio is redundant. Frees significant disk.")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 

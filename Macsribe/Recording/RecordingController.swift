@@ -746,17 +746,46 @@ final class RecordingController: ObservableObject {
     /// the corrected labels / higher-accuracy transcript even without a review).
     func rewriteLastTranscript(reason: String) {
         guard let url = lastTranscriptURL, var meta = TranscriptWriter.parseFrontmatter(url) else { return }
+        // The record view's Title / Filing / Attendees fields stay editable after stopping —
+        // they are the source of truth, so pull the LIVE values (not the saved meta) so a
+        // title/destination set or changed post-recording actually reaches disk + History.
+        let liveTitle = meetingTitle.trimmingCharacters(in: .whitespaces)
+        if !liveTitle.isEmpty { meta.title = liveTitle }
+        let liveDest = destinationPath.trimmingCharacters(in: .whitespaces)
+        if !liveDest.isEmpty { meta.filing = liveDest }
         meta.attendees = TranscriptWriter.splitAttendees(attendees)
+
         let segs = engine?.finalTimeline() ?? segments
-        guard !segs.isEmpty else { return }
-        let body = TranscriptWriter.makeBody(
-            title: meta.title, date: meta.date, attendees: attendees, destination: meta.filing,
-            segments: segs, manualNotes: manualNotes.isEmpty ? nil : manualNotes, meta: meta)
-        try? body.write(to: url, atomically: true, encoding: .utf8)
+        if segs.isEmpty {
+            // No transcript body to regenerate (e.g. metadata-only edit) — just re-stamp.
+            TranscriptWriter.updateFrontmatter(at: url) { m in
+                m.title = meta.title; m.filing = meta.filing; m.attendees = meta.attendees
+            }
+        } else {
+            let body = TranscriptWriter.makeBody(
+                title: meta.title, date: meta.date, attendees: attendees, destination: meta.filing,
+                segments: segs, manualNotes: manualNotes.isEmpty ? nil : manualNotes, meta: meta)
+            try? body.write(to: url, atomically: true, encoding: .utf8)
+        }
         vault.addPeople(TranscriptWriter.splitAttendees(attendees))
+        if !liveDest.isEmpty { vault.ensureDestination(liveDest) }
         store.refresh()
         transcriptRevision += 1
         AppLog.log("Rewrote transcript (\(reason)): \(url.lastPathComponent)", category: "record")
+    }
+
+    private var metadataSyncTask: Task<Void, Never>?
+    /// Debounced re-stamp of the saved transcript from the live Title/Filing/Attendees
+    /// fields, for edits made after the recording has stopped (no-op while recording or
+    /// before anything is saved).
+    func scheduleMetadataSync() {
+        guard !isRecording, lastTranscriptURL != nil else { return }
+        metadataSyncTask?.cancel()
+        metadataSyncTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else { return }
+            self?.rewriteLastTranscript(reason: "edited metadata")
+        }
     }
 
     // MARK: Idle model unload

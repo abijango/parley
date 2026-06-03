@@ -5,9 +5,18 @@ import AppKit
 /// experience and the "History" browser, each shown in the detail pane.
 struct MainWindowView: View {
     @EnvironmentObject private var recording: RecordingController
+    @ObservedObject private var store = RecordingController.shared.store
+    @ObservedObject private var summaryService = RecordingController.shared.summaryService
     @State private var selection: SidebarSection? = .record
     @State private var showingRecovery = false
     @AppStorage("macsribe.sidebarCollapsed") private var sidebarCollapsed = false
+
+    /// Badge on the History nav item: summaries running + staged-and-waiting-for-review.
+    private var historyBadge: Int {
+        let ready = store.items.filter { $0.summaryReadyURL != nil }.count
+        let pending = summaryService.jobs.values.filter { if case .pending = $0 { return true } else { return false } }.count
+        return ready + pending
+    }
 
     enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
         case record = "Record", history = "History"
@@ -98,20 +107,34 @@ struct MainWindowView: View {
         return Button {
             selection = section
         } label: {
-            navRow(symbol: section.symbol, title: section.rawValue, isSelected: isSelected)
+            navRow(symbol: section.symbol, title: section.rawValue, isSelected: isSelected,
+                   badge: section == .history ? historyBadge : 0)
         }
         .buttonStyle(.plain)
         .foregroundStyle(isSelected ? Color.accentColor : .primary)
         .help(sidebarCollapsed ? section.rawValue : "")
     }
 
-    /// A sidebar row: icon-only when collapsed, icon + label when expanded.
-    @ViewBuilder private func navRow(symbol: String, title: String, isSelected: Bool) -> some View {
+    /// A sidebar row: icon-only when collapsed, icon + label when expanded. An optional
+    /// badge count (e.g. summaries in progress / ready to review) is shown on the trailing
+    /// edge, or as a dot when collapsed.
+    @ViewBuilder private func navRow(symbol: String, title: String, isSelected: Bool, badge: Int = 0) -> some View {
         Group {
             if sidebarCollapsed {
-                Image(systemName: symbol).frame(maxWidth: .infinity, alignment: .center)
+                Image(systemName: symbol)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .overlay(alignment: .topTrailing) {
+                        if badge > 0 {
+                            Circle().fill(Color.blue).frame(width: 7, height: 7).offset(x: 2, y: -1)
+                        }
+                    }
             } else {
-                Label(title, systemImage: symbol).frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 6) {
+                    Label(title, systemImage: symbol)
+                    Spacer()
+                    if badge > 0 { badgeView(badge) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .font(.body)
@@ -119,6 +142,14 @@ struct MainWindowView: View {
         .background(isSelected ? Color.accentColor.opacity(0.18) : .clear,
                     in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
+    }
+
+    private func badgeView(_ count: Int) -> some View {
+        Text("\(count)")
+            .font(.caption2).bold().monospacedDigit()
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(Color.blue, in: Capsule())
+            .foregroundStyle(.white)
     }
 }
 
@@ -435,12 +466,14 @@ struct RecordDetailView: View {
                 Text("Title").font(.caption).foregroundStyle(.secondary)
                 TextField("Meeting title", text: $recording.meetingTitle)
                     .textFieldStyle(.roundedBorder)
+                    .onChange(of: recording.meetingTitle) { recording.scheduleMetadataSync() }
             }
             GridRow {
                 Text("Filing").font(.caption).foregroundStyle(.secondary)
                 DestinationField(path: $recording.destinationPath,
                                  destinations: vault.destinations,
                                  firstRoot: settings.scanRoots.first ?? "Internal")
+                    .onChange(of: recording.destinationPath) { recording.scheduleMetadataSync() }
             }
             GridRow {
                 Text("Attendees").font(.caption).foregroundStyle(.secondary)
@@ -448,6 +481,7 @@ struct RecordDetailView: View {
                            completions: vault.people,
                            placeholder: "Attendees (type to filter, or add new)",
                            onCreateNew: { name in pendingPerson = PendingPerson(name: name) })
+                    .onChange(of: recording.attendees) { recording.scheduleMetadataSync() }
             }
             GridRow(alignment: .top) {
                 Text("Notes").font(.caption).foregroundStyle(.secondary)

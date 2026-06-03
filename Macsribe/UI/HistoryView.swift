@@ -87,6 +87,11 @@ struct HistoryView: View {
         recording.summaryService.summarize(item)
     }
 
+    private func isPending(_ item: TranscriptItem) -> Bool {
+        if case .pending = summaryService.state(for: item) { return true }
+        return false
+    }
+
     // MARK: List
 
     private var list: some View {
@@ -125,7 +130,10 @@ struct HistoryView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
-                if item.hasUnnamedSpeakers {
+                if isPending(item) {
+                    ProgressView().controlSize(.mini)
+                        .help("Summarizing in the background…")
+                } else if item.hasUnnamedSpeakers {
                     Image(systemName: "person.crop.circle.badge.exclamationmark")
                         .foregroundStyle(.orange).font(.caption)
                         .help("Speakers not assigned — needs review")
@@ -343,7 +351,7 @@ struct HistoryView: View {
             // Summarize → background Claude → staged for review. Hidden while a summary is
             // already staged (the review pane handles it) or currently running.
             if item.summaryReadyURL == nil {
-                let pending = summaryService.state(for: item).map { if case .pending = $0 { return true } else { return false } } ?? false
+                let pending = isPending(item)
                 let summarizeLabel = Label(item.isProcessed ? "Re-summarize" : "Summarize", systemImage: "sparkles")
                 if item.hasUnnamedSpeakers && audioAvailable(item) {
                     Button { pendingProcessItem = item } label: { summarizeLabel }

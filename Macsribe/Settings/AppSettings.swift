@@ -137,6 +137,7 @@ final class AppSettings: ObservableObject {
         static let minSpeechToIdentify = "macsribe.minSpeechToIdentify"
         static let liveTranscriptEnabled = "macsribe.liveTranscriptEnabled"
         static let summaryPromptTemplate = "macsribe.summaryPromptTemplate"
+        static let deleteAudioAfterFiling = "macsribe.deleteAudioAfterFiling"
     }
 
     // MARK: Memory
@@ -285,6 +286,10 @@ final class AppSettings: ObservableObject {
     /// skill). Tokens substituted at run time: `{{transcript}}`, `{{contacts}}`,
     /// `{{attendees}}`, `{{destination}}`. Editable in Settings → Summary.
     @AppStorage(Key.summaryPromptTemplate) var summaryPromptTemplate: String = AppSettings.defaultSummaryPrompt
+
+    /// After a summary is committed to the vault, delete the session audio (the raw
+    /// transcript + summary make it redundant). Default on; frees significant disk.
+    @AppStorage(Key.deleteAudioAfterFiling) var deleteAudioAfterFiling: Bool = true
 
     static let defaultSummaryPrompt = """
     You are a senior analyst writing a thorough, faithful record of a client meeting. Produce a \
