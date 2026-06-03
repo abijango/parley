@@ -66,6 +66,36 @@ enum ClaudeRunner {
         """
     }
 
+    /// Builds (does not start) a RAW `claude -p` process for the summary-comparison
+    /// path: the prompt is fully self-contained, so NO skill, NO tools, and NO vault
+    /// access (`--add-dir`/`--allowedTools` omitted). `--output-format text` returns the
+    /// Markdown directly on stdout. stdin is the null device to skip the CLI's 3s
+    /// "no stdin received" wait. Filing happens later via the Approve step, not here.
+    static func makeRawSummaryProcess(
+        binaryPath: String,
+        prompt: String,
+        model: String
+    ) throws -> (process: Process, stdout: Pipe, stderr: Pipe) {
+        guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
+            throw RunError.binaryNotFound(binaryPath)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = [
+            "-p", prompt,
+            "--model", model,
+            "--output-format", "text",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        process.standardInput = FileHandle.nullDevice
+        return (process, stdout, stderr)
+    }
+
     /// Builds (does not start) the configured `claude -p` process with attached
     /// stdout/stderr pipes. Throws `binaryNotFound` if the binary is missing.
     static func makeProcess(

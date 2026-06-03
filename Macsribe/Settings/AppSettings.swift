@@ -136,6 +136,7 @@ final class AppSettings: ObservableObject {
         static let offlineAsrRepass = "macsribe.offlineAsrRepass"
         static let minSpeechToIdentify = "macsribe.minSpeechToIdentify"
         static let liveTranscriptEnabled = "macsribe.liveTranscriptEnabled"
+        static let summaryPromptTemplate = "macsribe.summaryPromptTemplate"
     }
 
     // MARK: Memory
@@ -276,5 +277,40 @@ final class AppSettings: ObservableObject {
     File this note under: {{destination}}
     Additional attendees: {{attendees}}
     Run non-interactively: use the context above, do not ask for confirmation, write the note into the destination folder above.
+    """
+
+    /// Shared, self-contained summary prompt used by the comparison engines
+    /// (Claude raw / Apple / Qwen) — distinct from `claudePromptTemplate`, which drives
+    /// the agentic skill. Tokens substituted at run time: `{{transcript}}`, `{{contacts}}`,
+    /// `{{attendees}}`, `{{destination}}`. Editable in the Summary settings + compare view.
+    @AppStorage(Key.summaryPromptTemplate) var summaryPromptTemplate: String = AppSettings.defaultSummaryPrompt
+
+    static let defaultSummaryPrompt = """
+    You are a meeting-notes assistant. Turn the transcript below into a clean, well-structured \
+    Markdown meeting note.
+
+    Resolve first names and partial names against these known contacts, using their full name, \
+    title, and company where a confident match exists (otherwise keep the name as spoken — never invent details):
+    {{contacts}}
+
+    Additional attendees the user supplied for this meeting: {{attendees}}
+    Intended filing location (for context only — do not output a path): {{destination}}
+
+    Use EXACTLY these sections, in this order; omit a section only if it would be genuinely empty:
+    ## Attendees
+    ## Executive Summary
+    ## Key Topics
+    ## Decisions
+    ## Action Items
+    ## Questions & Open Issues
+    ## Next Steps
+
+    Rules:
+    - Output ONLY the Markdown note — no preamble, no code fences, no closing commentary.
+    - Action items: one bullet each as "**Owner** — task — due/when" when known.
+    - Be faithful to the transcript; do not fabricate decisions, owners, dates, or metrics.
+
+    TRANSCRIPT:
+    {{transcript}}
     """
 }
