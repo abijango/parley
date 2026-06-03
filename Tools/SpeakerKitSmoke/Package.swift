@@ -3,7 +3,7 @@ import PackageDescription
 
 // Throwaway spike (plan T0.1/T0.2): probe Argmax SpeakerKit's API — confirm the
 // diarization result exposes per-speaker centroid embeddings (dimension), measure
-// diarization time/RTFx and the model footprint, before integrating into Macsribe.
+// diarization time/RTFx and the model footprint, before integrating into Parley.
 let package = Package(
     name: "SpeakerKitSmoke",
     platforms: [.macOS(.v13)],

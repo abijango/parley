@@ -34,10 +34,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-PROJECT="Macsribe.xcodeproj"                  # TODO(app-name)
-SCHEME="Macsribe"                             # TODO(app-name)
+PROJECT="Parley.xcodeproj"                  # TODO(app-name)
+SCHEME="Parley"                             # TODO(app-name)
 PRODUCT_NAME="$(grep -m1 'PRODUCT_NAME:' project.yml | sed 's/.*PRODUCT_NAME:[[:space:]]*//;s/[[:space:]]*#.*//')"
-PRODUCT_NAME="${PRODUCT_NAME:-Macsribe}"
+PRODUCT_NAME="${PRODUCT_NAME:-Parley}"
 APP_NAME="${PRODUCT_NAME}.app"
 DERIVED="$REPO_ROOT/.build-xcode"
 BUILT_APP="$DERIVED/Build/Products/Release/$APP_NAME"

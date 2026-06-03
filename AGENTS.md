@@ -1,21 +1,22 @@
-# Macsribe — project instructions
+# Parley — project instructions
 
-Native macOS menu-bar meeting transcriber. `Macsribe` is a **placeholder name**
-(`grep -rn "TODO(app-name)"` finds every spot to sweep on rename).
+Native macOS menu-bar meeting transcriber named **Parley**. The app name is
+centralized in `AppInfo.name`; the remaining `TODO(app-name)` markers tag the
+identifiers derived from it (bundle id, keychain service, support dir, etc.).
 
 ## Building
 
-`Macsribe.xcodeproj` is **generated** by `xcodegen generate` from `project.yml` — it is
+`Parley.xcodeproj` is **generated** by `xcodegen generate` from `project.yml` — it is
 git-ignored. Make project-*setting* changes in `project.yml`, never in the Xcode UI (they
 get overwritten on the next regenerate).
 
 - **Quick dev build:** `xcodegen generate` then open in Xcode (⌘R), or
-  `xcodebuild build -project Macsribe.xcodeproj -scheme Macsribe -destination 'platform=macOS,arch=arm64'`.
+  `xcodebuild build -project Parley.xcodeproj -scheme Parley -destination 'platform=macOS,arch=arm64'`.
 - **Installed local release:** `Tools/localrelease.sh` (add `--open` to launch).
 
 ## `Tools/localrelease.sh` — use this for each rebuild the user runs locally
 
-Builds the `Macsribe` scheme in **Release** and installs it to `~/Applications/Macsribe.app`,
+Builds the `Parley` scheme in **Release** and installs it to `~/Applications/Parley.app`,
 replacing the previous copy. Prefer this over a raw `xcodebuild` whenever the user wants an
 installed build they run between sessions.
 

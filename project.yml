@@ -1,18 +1,15 @@
 # XcodeGen project definition.
 # Regenerate the .xcodeproj after editing this file:  xcodegen generate
 #
-# TODO(app-name): "Macsribe" is a PLACEHOLDER. When the final name is chosen, sweep:
-#   - this file (name, PRODUCT_NAME, bundle id, paths)
-#   - Macsribe/App/Info.plist usage strings + CFBundleDisplayName
-#   - the source directory name `Macsribe/`
-#   - AppInfo.name in Macsribe/App/AppInfo.swift
-# A repo-wide `grep -rn "TODO(app-name)"` finds every spot.
+# App name: Parley. The name drives PRODUCT_NAME, the bundle id, the `Parley/`
+# source dir, Info.plist's CFBundleDisplayName, and AppInfo.name. `TODO(app-name)`
+# markers across the repo tag the spots that follow the app name.
 
-name: Macsribe
+name: Parley
 options:
   bundleIdPrefix: com.naufalmir
   deploymentTarget:
-    macOS: "14.4"          # Core Audio process taps require 14.4+
+    macOS: "26.0"          # macOS 26+ (Tahoe) only — Liquid Glass; process taps (14.4+) subsumed
   createIntermediateGroups: true
   groupSortPosition: top
 
@@ -33,12 +30,12 @@ packages:
     from: "0.14.8"          # native Parakeet ASR + diarization + speaker embeddings (Apache-2.0)
 
 targets:
-  Macsribe:                 # TODO(app-name)
+  Parley:                 # TODO(app-name)
     type: application
     platform: macOS
-    deploymentTarget: "14.4"
+    deploymentTarget: "26.0"
     sources:
-      - path: Macsribe
+      - path: Parley
     dependencies:
       - package: ArgmaxOSS
         product: WhisperKit
@@ -47,28 +44,29 @@ targets:
       - package: MarkdownUI
       - package: FluidAudio
     info:
-      path: Macsribe/App/Info.plist
+      path: Parley/App/Info.plist
       properties:
-        CFBundleDisplayName: Macsribe        # TODO(app-name)
+        CFBundleDisplayName: Parley        # TODO(app-name)
         LSUIElement: false                   # regular Dock app with a main window (+ menu-bar companion)
-        LSMinimumSystemVersion: "14.4"
+        LSMinimumSystemVersion: "26.0"
         NSMicrophoneUsageDescription: "Records your microphone so meetings can be transcribed locally."
         NSAudioCaptureUsageDescription: "Captures system and app audio so the other side of meetings can be transcribed locally."
         NSHumanReadableCopyright: ""
     entitlements:
-      path: Macsribe/App/Macsribe.entitlements
+      path: Parley/App/Parley.entitlements
       properties:
         com.apple.security.app-sandbox: false        # non-sandboxed: process taps + spawning `claude` + writing to the vault
         com.apple.security.device.audio-input: true  # microphone (required with Hardened Runtime)
     settings:
       base:
-        PRODUCT_NAME: Macsribe                              # TODO(app-name)
-        PRODUCT_BUNDLE_IDENTIFIER: com.naufalmir.macsribe   # TODO(app-name)
+        PRODUCT_NAME: Parley                              # TODO(app-name)
+        PRODUCT_BUNDLE_IDENTIFIER: com.naufalmir.parley   # TODO(app-name)
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_STYLE: Automatic
         COMBINE_HIDPI_IMAGES: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon   # Parley/Assets.xcassets/AppIcon.appiconset
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"

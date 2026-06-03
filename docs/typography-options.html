@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Parley — Typography &amp; Layout Options</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;500;600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Literata:wght@400;500;600&family=Manrope:wght@400;500;600;700&family=Newsreader:wght@400;500;600&family=Source+Sans+3:wght@400;500;600&family=Source+Serif+4:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --scale: 1;
+    --accent: #0a84ff; --green: #2faa5d; --purple: #9a5cff;
+    --win: #e6e6e9; --content: #ffffff; --chrome: #ededf0; --sidebar: #e4e4e8;
+    --text: #1d1d1f; --secondary: #6b6b72; --tertiary: #9a9aa1;
+    --field: #ffffff; --field-border: #d4d4da; --divider: rgba(0,0,0,.10);
+    --track: #d9d9de; --window-shadow: 0 20px 60px rgba(0,0,0,.18), 0 2px 8px rgba(0,0,0,.10);
+    --glass: rgba(255,255,255,.62);
+    --fs-nav: calc(13px * var(--scale));
+    --fs-btn: calc(14px * var(--scale));
+    --fs-seg: calc(12px * var(--scale));
+    --fs-status: calc(12px * var(--scale));
+    --fs-model: calc(12px * var(--scale));
+    --fs-section: calc(15px * var(--scale));
+    --fs-label: calc(13px * var(--scale));
+    --fs-field: calc(13px * var(--scale));
+    --fs-reading: calc(15px * var(--scale));
+    --fs-ts: calc(12px * var(--scale));
+    --fs-spk: calc(12px * var(--scale));
+    --fs-foot: calc(12px * var(--scale));
+  }
+  body.dark {
+    --win: #1f1f22; --content: #1b1b1d; --chrome: #2a2a2d; --sidebar: #242427;
+    --text: #f3f3f5; --secondary: #a2a2a8; --tertiary: #76767c;
+    --field: #38383b; --field-border: #4a4a4e; --divider: rgba(255,255,255,.12);
+    --track: #38383b; --window-shadow: 0 20px 60px rgba(0,0,0,.5);
+    --glass: rgba(40,40,44,.6);
+  }
+  body.size-compact { --scale: .9; }
+  body.size-large   { --scale: 1.18; }
+
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background: var(--win); color: var(--text);
+    -webkit-font-smoothing: antialiased; padding: 0 0 80px;
+    transition: background .2s, color .2s;
+  }
+
+  header.page { padding: 40px 32px 18px; max-width: 920px; margin: 0 auto; }
+  header.page h1 { font-size: 26px; font-weight: 700; letter-spacing: -.02em; }
+  header.page p { color: var(--secondary); font-size: 14px; margin-top: 8px; max-width: 660px; line-height: 1.5; }
+
+  .controls {
+    position: sticky; top: 0; z-index: 10;
+    background: color-mix(in srgb, var(--win) 82%, transparent);
+    backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid var(--divider); padding: 12px 32px; margin-bottom: 26px;
+    display: flex; gap: 24px; align-items: center; flex-wrap: wrap;
+  }
+  .ctl-group { display: flex; gap: 6px; align-items: center; }
+  .ctl-group > label { font-size: 12px; color: var(--secondary); margin-right: 4px; font-weight: 500; }
+  .seg-ctl { display: inline-flex; background: var(--track); border-radius: 8px; padding: 2px; }
+  .seg-ctl button { border: 0; background: transparent; color: var(--text); font: inherit; font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 6px; cursor: pointer; }
+  .seg-ctl button.on { background: var(--accent); color: #fff; }
+  .controls select { font: inherit; font-size: 12px; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--divider); background: var(--field); color: var(--text); }
+
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 32px; }
+  .section-title { font-size: 13px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--tertiary); margin: 8px 0 22px; padding-bottom: 8px; border-bottom: 1px solid var(--divider); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .section-title .inline-ctl { font-size: 11px; letter-spacing: normal; text-transform: none; font-weight: 500; color: var(--secondary); display: flex; align-items: center; gap: 6px; }
+  .grid { display: flex; flex-direction: column; gap: 44px; }
+  .grid.layouts { margin-top: 8px; }
+  section.divider-gap { margin-top: 56px; }
+
+  .opt-head { margin-bottom: 14px; }
+  .opt-head .num { color: var(--tertiary); font-weight: 600; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+  .opt-head h2 { font-size: 19px; font-weight: 700; letter-spacing: -.01em; margin-top: 2px; }
+  .opt-head .tag { color: var(--secondary); font-size: 13.5px; margin-top: 3px; max-width: 680px; line-height: 1.45; }
+  .chips { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { font-size: 11.5px; font-weight: 500; color: var(--secondary); background: color-mix(in srgb, var(--text) 7%, transparent); border: 1px solid var(--divider); padding: 3px 9px; border-radius: 999px; }
+  .chip b { color: var(--text); font-weight: 600; }
+
+  /* ---- window mock ---- */
+  .window { border-radius: 13px; overflow: hidden; background: var(--content); box-shadow: var(--window-shadow); border: 1px solid var(--divider); }
+  .titlebar { height: 30px; background: var(--chrome); display: flex; align-items: center; padding: 0 12px; gap: 8px; border-bottom: 1px solid var(--divider); }
+  .light { width: 12px; height: 12px; border-radius: 50%; }
+  .light.r { background: #ff5f57; } .light.y { background: #febc2e; } .light.g { background: #28c840; }
+  .winbody { display: flex; min-height: 440px; }
+
+  .sidebar { width: 158px; background: var(--sidebar); border-right: 1px solid var(--divider); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; font-family: var(--ui); flex: none; }
+  .nav { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 7px; font-size: var(--fs-nav); color: var(--text); font-weight: 450; }
+  .nav.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; }
+  .nav svg { width: 16px; height: 16px; flex: none; }
+  .nav .count { margin-left: auto; background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px; }
+  .nav-spacer { flex: 1; }
+
+  .detail { flex: 1; display: flex; flex-direction: column; background: var(--content); min-width: 0; }
+  .controlbar { padding: 16px; background: var(--chrome); border-bottom: 1px solid var(--divider); font-family: var(--ui); }
+  .row1 { display: flex; align-items: center; gap: 12px; }
+  .record { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: #fff; border: 0; cursor: default; font-family: var(--ui); font-size: var(--fs-btn); font-weight: 500; padding: 9px 16px; border-radius: 9px; box-shadow: 0 1px 2px rgba(0,0,0,.15); white-space: nowrap; }
+  .record svg { width: 16px; height: 16px; }
+  .record.wide { width: 100%; justify-content: center; }
+  .record.sm { padding: 6px 12px; font-size: var(--fs-seg); }
+  .record.sm svg { width: 14px; height: 14px; }
+  .record.big { padding: 14px 28px; font-size: calc(16px * var(--scale)); border-radius: 12px; }
+  .grow { flex: 1; }
+  .segmented { display: inline-flex; background: var(--track); border-radius: 8px; padding: 2px; }
+  .seg { font-size: var(--fs-seg); font-weight: 500; padding: 5px 14px; border-radius: 6px; color: var(--text); white-space: nowrap; }
+  .seg.sel { background: var(--accent); color: #fff; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-status); color: var(--secondary); white-space: nowrap; }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tertiary); }
+  .audiorow { display: flex; align-items: center; margin-top: 14px; }
+  .audiorow .audio { font-size: calc(13px * var(--scale)); font-weight: 500; color: var(--text); }
+  .audiorow .audio .chev { color: var(--tertiary); margin-right: 4px; }
+  .model { font-size: var(--fs-model); color: var(--secondary); }
+  .audiorow .model { margin-left: auto; }
+
+  .meta { display: grid; grid-template-columns: 78px 1fr; gap: 8px 10px; margin-top: 14px; align-items: center; font-family: var(--ui); }
+  .meta .label { font-size: var(--fs-label); color: var(--secondary); }
+  .meta .field { font-size: var(--fs-field); color: var(--text); background: var(--field); border: 1px solid var(--field-border); border-radius: 6px; padding: 5px 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .transcript { padding: 18px 20px; display: flex; flex-direction: column; gap: 13px; background: var(--content); flex: 1; }
+  .line { display: flex; gap: 12px; align-items: baseline; }
+  .ts { font-family: var(--mono); font-size: var(--fs-ts); color: var(--tertiary); flex: none; }
+  .spk { font-family: var(--ui); font-size: var(--fs-spk); font-weight: 600; flex: none; width: 58px; }
+  .spk.me { color: var(--accent); } .spk.s { color: var(--green); } .spk.d { color: var(--purple); }
+  .txt { font-family: var(--reading); font-size: var(--fs-reading); line-height: 1.5; color: var(--text); }
+
+  .footer { display: flex; align-items: center; gap: 12px; padding: 9px 16px; background: var(--chrome); border-top: 1px solid var(--divider); font-family: var(--ui); }
+  .footer .words { font-size: var(--fs-foot); color: var(--secondary); }
+  .footer .ghost { font-family: var(--ui); font-size: var(--fs-foot); color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); border: 1px solid var(--divider); border-radius: 7px; padding: 5px 11px; }
+
+  /* ---- Layout: Inspector ---- */
+  .detail.l-inspector .work { display: flex; flex: 1; min-height: 0; }
+  .detail.l-inspector .transcript { flex: 1; border-right: 1px solid var(--divider); }
+  .inspector { width: 236px; flex: none; background: var(--chrome); padding: 16px; display: flex; flex-direction: column; gap: 13px; font-family: var(--ui); overflow: auto; }
+  .inspector .segmented { width: 100%; }
+  .inspector .seg { flex: 1; text-align: center; }
+  .inspector .insp-row { display: flex; align-items: center; gap: 8px; }
+  .inspector hr { border: 0; border-top: 1px solid var(--divider); margin: 2px 0; }
+  .insp-meta { display: flex; flex-direction: column; gap: 11px; }
+  .insp-meta .label { display: block; font-size: var(--fs-label); color: var(--secondary); margin-bottom: 5px; }
+  .insp-meta .field { display: block; font-size: var(--fs-field); color: var(--text); background: var(--field); border: 1px solid var(--field-border); border-radius: 6px; padding: 6px 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ---- Layout: Floating glass ---- */
+  .detail.l-glass { position: relative; }
+  .detail.l-glass .transcript { padding-top: 86px; }
+  .glass-bar { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: var(--glass); backdrop-filter: blur(26px) saturate(180%); -webkit-backdrop-filter: blur(26px) saturate(180%); border: 1px solid var(--divider); border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,.20); font-family: var(--ui); }
+  .glass-pill { position: absolute; top: 88px; right: 16px; max-width: 210px; display: flex; align-items: center; gap: 7px; padding: 7px 12px; background: var(--glass); backdrop-filter: blur(26px) saturate(180%); -webkit-backdrop-filter: blur(26px) saturate(180%); border: 1px solid var(--divider); border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.15); font-family: var(--ui); font-size: var(--fs-foot); color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .glass-pill b { color: var(--text); font-weight: 600; }
+
+  /* ---- Layout: Hero ---- */
+  .detail.l-hero { align-items: stretch; }
+  .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 36px; text-align: center; font-family: var(--ui); }
+  .hero h2 { font-size: calc(20px * var(--scale)); font-weight: 600; }
+  .hero p { color: var(--secondary); font-size: var(--fs-field); max-width: 320px; line-height: 1.45; margin-top: -6px; }
+  .hero .hero-meta { width: 100%; max-width: 360px; background: var(--chrome); border: 1px solid var(--divider); border-radius: 12px; padding: 6px 14px 14px; }
+  .hero .hero-meta .meta { margin-top: 8px; }
+
+  /* ---- Layout: Compact ---- */
+  .detail.l-compact .toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--chrome); border-bottom: 1px solid var(--divider); font-family: var(--ui); }
+  .metachips { display: flex; gap: 8px; padding: 9px 14px; border-bottom: 1px solid var(--divider); background: var(--content); flex-wrap: wrap; font-family: var(--ui); }
+  .metachips .mc { font-size: var(--fs-foot); color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); border: 1px solid var(--divider); border-radius: 999px; padding: 4px 11px; white-space: nowrap; }
+  .metachips .mc .k { color: var(--secondary); margin-right: 6px; }
+
+  footer.note { max-width: 920px; margin: 50px auto 0; padding: 0 32px; color: var(--tertiary); font-size: 12.5px; line-height: 1.6; }
+</style>
+</head>
+<body class="size-comfortable">
+
+<header class="page">
+  <h1>Parley — Typography &amp; Layout Options</h1>
+  <p>Mockups of the Record screen for choosing a direction — the app itself is unchanged. <b>Typography</b> and <b>Layout</b> are independent: pick a font trio from the first section and a structure from the second (the layout section has its own font picker). Toggle theme/size to judge readability. Fonts load from Google Fonts (needs internet).</p>
+</header>
+
+<div class="controls">
+  <div class="ctl-group">
+    <label>Theme</label>
+    <div class="seg-ctl" id="theme"><button data-theme="light" class="on">Light</button><button data-theme="dark">Dark</button></div>
+  </div>
+  <div class="ctl-group">
+    <label>Size</label>
+    <div class="seg-ctl" id="size"><button data-size="compact">Compact</button><button data-size="comfortable" class="on">Comfortable</button><button data-size="large">Large</button></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="section-title">Typography — font trios (UI · reading · mono)</div>
+  <div class="grid" id="typeGrid"></div>
+
+  <section class="divider-gap">
+    <div class="section-title">
+      Layout — screen structure
+      <span class="inline-ctl">Font for these mockups: <select id="layoutFont"></select></span>
+    </div>
+    <div class="grid layouts" id="layoutGrid"></div>
+  </section>
+</div>
+
+<footer class="note">
+  Tell me what you like by number — and feel free to mix: e.g. “Layout #3 (floating glass) with the Inter + Source Serif trio, Comfortable size.” I’ll translate the winner into the app (design tokens for type; view structure for layout).
+</footer>
+
+<script>
+const icons = {
+  record: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.6" fill="currentColor"/></svg>',
+  clock:  '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5V12l3 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  gear:   '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>'
+};
+const sans = s => `'${s}', system-ui, sans-serif`;
+const serif = s => `'${s}', Georgia, serif`;
+const mono = s => `'${s}', ui-monospace, monospace`;
+
+const OPTIONS = [
+  { name: 'Native (current app)', tag: 'Apple SF Pro + New York serif — the macOS-default baseline that ships today.', ui: 'system-ui, sans-serif', reading: 'ui-serif, "New York", Georgia, serif', monof: 'ui-monospace, "SF Mono", monospace', uiName: 'SF Pro', readName: 'New York', monoName: 'SF Mono', hw: 600 },
+  { name: 'Modern editorial', tag: 'Inter is a workhorse UI sans; Literata is a screen-tuned book serif. Crisp chrome, comfortable reading.', ui: sans('Inter'), reading: serif('Literata'), monof: mono('JetBrains Mono'), uiName: 'Inter', readName: 'Literata', monoName: 'JetBrains Mono', hw: 600 },
+  { name: 'Unified Plex', tag: 'One superfamily (IBM Plex Sans / Serif / Mono) — technical, cohesive, very even color.', ui: sans('IBM Plex Sans'), reading: serif('IBM Plex Serif'), monof: mono('IBM Plex Mono'), uiName: 'IBM Plex Sans', readName: 'IBM Plex Serif', monoName: 'IBM Plex Mono', hw: 600 },
+  { name: 'Warm & geometric', tag: 'Manrope is a friendly geometric sans; Newsreader is an elegant reading serif. Distinctive but soft.', ui: sans('Manrope'), reading: serif('Newsreader'), monof: mono('Space Mono'), uiName: 'Manrope', readName: 'Newsreader', monoName: 'Space Mono', hw: 700 },
+  { name: 'Adobe Source', tag: 'Source Sans 3 + Source Serif 4 — humanist, neutral, designed as a pair. Safe and highly legible.', ui: sans('Source Sans 3'), reading: serif('Source Serif 4'), monof: mono('IBM Plex Mono'), uiName: 'Source Sans 3', readName: 'Source Serif 4', monoName: 'IBM Plex Mono', hw: 600 },
+  { name: 'Max legibility', tag: 'Atkinson Hyperlegible (built for low-vision clarity) for UI, Newsreader for reading. Accessibility-first.', ui: sans('Atkinson Hyperlegible'), reading: serif('Newsreader'), monof: mono('JetBrains Mono'), uiName: 'Atkinson Hyperlegible', readName: 'Newsreader', monoName: 'JetBrains Mono', hw: 700 },
+];
+
+const LINES = [
+  ['00:03', 'Me', 'me', "Thanks everyone for joining. Let's kick off with the Q3 roadmap and where we landed after last week's review."],
+  ['00:11', 'Sarah', 's', "I shared the updated deck in the channel this morning — the migration timeline is on slide four."],
+  ['00:19', 'David', 'd', "We're targeting the end of August for the first customer cohort, assuming the data backfill finishes on time."],
+  ['00:28', 'Me', 'me', "Great. Let's flag any blockers early so we're not scrambling the week before the launch."],
+];
+const linesHTML = LINES.map(([ts, spk, cls, txt]) => `<div class="line"><span class="ts">${ts}</span><span class="spk ${cls}">${spk}</span><span class="txt">${txt}</span></div>`).join('');
+
+// Reusable pieces
+const P = {
+  titlebar: `<div class="titlebar"><span class="light r"></span><span class="light y"></span><span class="light g"></span></div>`,
+  sidebar: `<aside class="sidebar"><div class="nav sel">${icons.record}<span>Record</span></div><div class="nav">${icons.clock}<span>History</span><span class="count">2</span></div><div class="nav-spacer"></div><div class="nav">${icons.gear}<span>Settings</span></div></aside>`,
+  record: (cls = '', label = 'Start recording') => `<button class="record ${cls}">${icons.record}<span>${label}</span></button>`,
+  segmented: `<span class="segmented"><span class="seg sel">Live</span><span class="seg">Preview</span></span>`,
+  status: `<span class="status"><span class="dot"></span>Ready</span>`,
+  model: `<span class="model">Small (default)</span>`,
+  metaGrid: `<div class="meta"><span class="label">Title</span><span class="field">Q3 Roadmap sync</span><span class="label">Filing</span><span class="field">Internal / Customers / Vanguard</span><span class="label">Attendees</span><span class="field">Sarah Chen, David Okafor</span></div>`,
+  metaStack: `<div class="insp-meta"><div><span class="label">Title</span><span class="field">Q3 Roadmap sync</span></div><div><span class="label">Filing</span><span class="field">Internal / Customers / Vanguard</span></div><div><span class="label">Attendees</span><span class="field">Sarah Chen, David Okafor</span></div></div>`,
+  metaChips: `<div class="metachips"><span class="mc"><span class="k">Title</span>Q3 Roadmap sync</span><span class="mc"><span class="k">Filing</span>… / Vanguard</span><span class="mc"><span class="k">Attendees</span>Sarah, David</span></div>`,
+  transcript: `<div class="transcript">${linesHTML}</div>`,
+  footer: `<div class="footer"><span class="words">248 words</span><span class="grow"></span><span class="ghost">Reveal in Finder</span></div>`,
+};
+
+function win(detailInner) {
+  return `<div class="window">${P.titlebar}<div class="winbody">${P.sidebar}${detailInner}</div></div>`;
+}
+
+const LAYOUTS = [
+  { name: 'Classic (current)', tag: 'Setup stacked on top — record + Live/Preview + status, then audio, then the metadata grid — with the transcript below. What ships today.',
+    build: () => win(`<main class="detail"><div class="controlbar"><div class="row1">${P.record()}<span class="grow"></span>${P.status}</div><div class="audiorow"><span class="audio"><span class="chev">▸</span>Audio</span>${P.model}</div>${P.metaGrid}</div>${P.transcript}${P.footer}</main>`) },
+
+  { name: 'Inspector', tag: 'Transcript becomes the star (full height, left); all setup moves to a right inspector rail. Best when reading the live transcript matters most.',
+    build: () => win(`<main class="detail l-inspector"><div class="work">${P.transcript}<aside class="inspector">${P.record('wide')}<div class="insp-row">${P.status}<span class="grow"></span>${P.model}</div><hr>${P.metaStack}</aside></div>${P.footer}</main>`) },
+
+  { name: 'Floating glass (Tahoe)', tag: 'Transcript runs edge-to-edge as the base layer; a floating Liquid-Glass toolbar (record · Live/Preview · status) hovers at top, with a glass detail pill. The most "macOS 26" option.',
+    build: () => win(`<main class="detail l-glass">${P.transcript}<div class="glass-bar">${P.record()}${P.status}</div><div class="glass-pill"><b>Q3 Roadmap sync</b> · 2 people</div></main>`) },
+
+  { name: 'Hero start', tag: 'Reimagines the idle moment: a large centered record button + a focused details card. The "Listening…" / transcript view takes over once recording begins.',
+    build: () => win(`<main class="detail l-hero"><div class="hero">${P.record('big')}<div><h2>Ready to record</h2></div><p>Set the details below, then start — your live transcript appears here as people speak.</p><div class="hero-meta">${P.metaGrid}</div></div>${P.footer}</main>`) },
+
+  { name: 'Compact toolbar', tag: 'Everything condensed into a slim top toolbar + one row of metadata chips, maximizing transcript space. Dense and efficient for power users.',
+    build: () => win(`<main class="detail l-compact"><div class="toolbar">${P.record('sm')}<span class="grow"></span>${P.status}${P.model}</div>${P.metaChips}${P.transcript}${P.footer}</main>`) },
+];
+
+// Render typography section (per-window fonts)
+document.getElementById('typeGrid').innerHTML = OPTIONS.map((opt, i) => `
+  <section style="--ui:${opt.ui}; --reading:${opt.reading}; --mono:${opt.monof}; --head-weight:${opt.hw}">
+    <div class="opt-head">
+      <div class="num">Option ${i + 1}</div>
+      <h2>${opt.name}</h2>
+      <div class="tag">${opt.tag}</div>
+      <div class="chips"><span class="chip">UI · <b>${opt.uiName}</b></span><span class="chip">Reading · <b>${opt.readName}</b></span><span class="chip">Mono · <b>${opt.monoName}</b></span></div>
+    </div>
+    ${win(`<main class="detail"><div class="controlbar"><div class="row1">${P.record()}<span class="grow"></span>${P.status}</div><div class="audiorow"><span class="audio"><span class="chev">▸</span>Audio</span>${P.model}</div>${P.metaGrid}</div>${P.transcript}${P.footer}</main>`)}
+  </section>
+`).join('');
+
+// Render layout section (shared font, set on the grid container)
+document.getElementById('layoutGrid').innerHTML = LAYOUTS.map((lay, i) => `
+  <section>
+    <div class="opt-head"><div class="num">Layout ${i + 1}</div><h2>${lay.name}</h2><div class="tag">${lay.tag}</div></div>
+    ${lay.build()}
+  </section>
+`).join('');
+
+// Layout font picker
+const sel = document.getElementById('layoutFont');
+sel.innerHTML = OPTIONS.map((o, i) => `<option value="${i}">${o.uiName} + ${o.readName}</option>`).join('');
+function applyLayoutFont(i) {
+  const o = OPTIONS[i];
+  const g = document.getElementById('layoutGrid');
+  g.style.setProperty('--ui', o.ui); g.style.setProperty('--reading', o.reading);
+  g.style.setProperty('--mono', o.monof); g.style.setProperty('--head-weight', o.hw);
+}
+sel.value = '1'; applyLayoutFont(1);
+sel.addEventListener('change', e => applyLayoutFont(+e.target.value));
+
+// Global controls
+document.getElementById('theme').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.body.classList.toggle('dark', b.dataset.theme === 'dark');
+  [...e.currentTarget.children].forEach(x => x.classList.toggle('on', x === b));
+});
+document.getElementById('size').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.body.classList.remove('size-compact', 'size-comfortable', 'size-large');
+  document.body.classList.add('size-' + b.dataset.size);
+  [...e.currentTarget.children].forEach(x => x.classList.toggle('on', x === b));
+});
+</script>
+</body>
+</html>

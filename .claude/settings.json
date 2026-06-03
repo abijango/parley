@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(**/ViewModels/**)",
+      "Edit(**/Models/**)",
+      "Edit(**/Services/**)",
+      "Edit(**/Networking/**)",
+      "Edit(**/Persistence/**)",
+      "Edit(**/Stores/**)",
+      "Edit(**/*.xcdatamodeld/**)"
+    ]
+  }
+}

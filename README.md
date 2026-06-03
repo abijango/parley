@@ -1,5 +1,4 @@
-<!-- TODO(app-name): "Macsribe" is a placeholder name throughout. -->
-# Macsribe
+# Parley
 
 A native macOS menu-bar app that records your **microphone** and **system / per-app
 audio** as two separate tracks, transcribes them live with Whisper (on-device), and
@@ -31,7 +30,7 @@ clock so the two tracks don't drift apart over a long meeting.
 
 ## Transcription engines
 
-Macsribe has **two interchangeable transcription engines** behind one
+Parley has **two interchangeable transcription engines** behind one
 `TranscriptionEngine` protocol. Choose in **Settings → Transcription → Engine**; the
 choice applies to the *next* recording (no mid-session switch).
 
@@ -91,10 +90,10 @@ control for the FluidAudio model.
 ## Build & run
 
 ```bash
-xcodegen generate          # regenerate Macsribe.xcodeproj from project.yml
-open Macsribe.xcodeproj     # then run (⌘R)
+xcodegen generate          # regenerate Parley.xcodeproj from project.yml
+open Parley.xcodeproj     # then run (⌘R)
 # — or —
-xcodebuild build -project Macsribe.xcodeproj -scheme Macsribe \
+xcodebuild build -project Parley.xcodeproj -scheme Parley \
   -destination 'platform=macOS,arch=arm64'
 ```
 
@@ -109,13 +108,13 @@ Tools/localrelease.sh            # regenerate project, build Release, install to
 Tools/localrelease.sh --open     # …and launch it afterwards
 ```
 
-It runs `xcodegen generate`, builds the `Macsribe` scheme in **Release**, and `ditto`s the
-product into `~/Applications/Macsribe.app`, replacing the previous copy.
+It runs `xcodegen generate`, builds the `Parley` scheme in **Release**, and `ditto`s the
+product into `~/Applications/Parley.app`, replacing the previous copy.
 
 The important part is **signing**: the script mints (once) and reuses a self-signed
 code-signing certificate named **`<PRODUCT_NAME> Local Codesign`** and signs every build
 with it. A *stable* signing identity gives the app a constant **designated requirement**
-(`identifier "com.naufalmir.macsribe" and certificate leaf = …`), which is what macOS keys
+(`identifier "com.naufalmir.parley" and certificate leaf = …`), which is what macOS keys
 on for:
 
 - **TCC permissions** — mic, system-audio capture, Documents/Desktop folder access
@@ -139,13 +138,13 @@ step). Signing with the same cert avoids that churn.
 `open` hands a path to its default app — `.xcodeproj` / `.xcworkspace` open in Xcode:
 
 ```bash
-open Macsribe.xcodeproj                                   # this project (from the repo root)
-open /Users/naufalmir/work/personal/macsribe/Macsribe.xcodeproj   # by absolute path, from anywhere
+open Parley.xcodeproj                                   # this project (from the repo root)
+open /Users/naufalmir/work/personal/parley/Parley.xcodeproj   # by absolute path, from anywhere
 open -a Xcode                                             # just launch Xcode, no project
-open -a Xcode Macsribe/Recording/RecordingController.swift  # open a single file to edit
+open -a Xcode Parley/Recording/RecordingController.swift  # open a single file to edit
 ```
 
-> `Macsribe.xcodeproj` is **generated** by `xcodegen generate`. Open it to build/run with ⌘R,
+> `Parley.xcodeproj` is **generated** by `xcodegen generate`. Open it to build/run with ⌘R,
 > but make project-*setting* changes in `project.yml` — edits in the Xcode UI are overwritten
 > on the next `xcodegen generate`.
 
@@ -156,18 +155,18 @@ appears when the first tap is created.
 
 > Signing: ship **non-sandboxed** (Developer ID). Process taps, spawning `claude`, and
 > writing into `~/ObsidianVault` are all incompatible with the App Sandbox. Entitlements
-> live in `Macsribe/App/Macsribe.entitlements` (`app-sandbox: false`, `device.audio-input`).
+> live in `Parley/App/Parley.entitlements` (`app-sandbox: false`, `device.audio-input`).
 
 ## Settings
 
 - **General** — Obsidian vault path, default capture mode
-- **Transcription** — pick the **engine** (WhisperKit / FluidAudio — see [Transcription engines](#transcription-engines)); for WhisperKit, the Whisper model (small default; medium / large-v3 download on first use to `~/Library/Application Support/Macsribe/models`); for FluidAudio, the Parakeet v3 download / status
+- **Transcription** — pick the **engine** (WhisperKit / FluidAudio — see [Transcription engines](#transcription-engines)); for WhisperKit, the Whisper model (small default; medium / large-v3 download on first use to `~/Library/Application Support/Parley/models`); for FluidAudio, the Parakeet v3 download / status
 - **Notes** — toggle auto-run Claude, `claude` binary path, model, and the prompt template (`{{file}}`, `{{customer}}`, `{{attendees}}` are substituted)
 
 ## Verifying it works (manual — needs a GUI session)
 
 1. **Capture** — start a recording while playing audio + speaking; stop. Check
-   `~/Library/Application Support/Macsribe/Recordings/<session>/` has `mic.caf` + `system.caf`.
+   `~/Library/Application Support/Parley/Recordings/<session>/` has `mic.caf` + `system.caf`.
 2. **Live transcript** — confirm "Me" and "Remote" lines appear in the menu popover as you talk.
 3. **Vault write** — confirm a `YYYY-MM-DD-HHMM - <title>.md` lands in `Unsorted Transcripts/`,
    then run the existing skill manually to confirm format compatibility.
@@ -181,7 +180,7 @@ Done:
 - ✅ **Model unload on switch** — the recording-time model ref is cleared on stop and
   `ModelManager` releases the old model before loading a new one (no RAM stacking).
 - ✅ **Latency logging** — pipelines log to the `perf` category when a decode falls behind
-  real-time, plus each trim event (`~/Library/Logs/Macsribe/macsribe.log`).
+  real-time, plus each trim event (`~/Library/Logs/Parley/parley.log`).
 - ✅ Fine-grained model **download progress** in Settings (explicit byte progress).
 
 Remaining:
