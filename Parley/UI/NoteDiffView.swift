@@ -30,64 +30,64 @@ struct NoteDiffView: View {
     // MARK: Sections
 
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Theme.Spacing.medium) {
             Image(systemName: "arrow.triangle.2.circlepath")
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Review re-processed note").font(.headline)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+                Text("Review re-processed note").font(Theme.Typography.sheetTitle)
                 Text("Existing note (red) vs. new draft (green). Accept to overwrite, Discard to keep the current note.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
         }
-        .padding(16)
+        .padding(Theme.Spacing.large)
     }
 
     private var diffScroll: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows) { row in
-                    HStack(alignment: .top, spacing: 8) {
+                    HStack(alignment: .top, spacing: Theme.Spacing.small) {
                         Text(row.kind.sign)
-                            .font(.system(.caption, design: .monospaced))
+                            .font(Theme.Typography.mono)
                             .foregroundStyle(row.kind.color)
                             .frame(width: 14, alignment: .center)
                         Text(row.text.isEmpty ? " " : row.text)
-                            .font(.system(.caption, design: .monospaced))
+                            .font(Theme.Typography.mono)
                             .foregroundStyle(row.kind == .context ? .secondary : row.kind.color)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, Theme.Spacing.medium)
                     .padding(.vertical, 1)
                     .background(row.kind.background)
                 }
             }
-            .padding(.vertical, 6)
+            .padding(.vertical, Theme.Spacing.small)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var noChanges: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "equal.circle").font(.system(size: 30)).foregroundStyle(.secondary)
-            Text("The re-processed note is identical to the existing one.")
-                .font(.callout).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyStateView(
+            icon: "equal.circle",
+            title: "No changes",
+            detail: "The re-processed note is identical to the existing one.")
     }
 
     private var footer: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Theme.Spacing.medium) {
             Spacer()
             Button("Discard", role: .cancel) { onDiscard() }
+                .glassButton()
                 .keyboardShortcut(.cancelAction)
             Button("Accept") { onAccept() }
+                .glassProminentButton()
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
         }
-        .padding(16)
+        .padding(Theme.Spacing.large)
+        .chromeSurface()
     }
 
     // MARK: Diff model
@@ -96,11 +96,15 @@ struct NoteDiffView: View {
         enum Kind: Equatable {
             case context, added, removed
             var sign: String { self == .added ? "+" : self == .removed ? "−" : " " }
-            var color: Color { self == .added ? .green : self == .removed ? .red : .secondary }
+            var color: Color {
+                self == .added ? Theme.Severity.success.color
+                : self == .removed ? Theme.Severity.danger.color
+                : .secondary
+            }
             var background: Color {
                 switch self {
-                case .added: return Color.green.opacity(0.12)
-                case .removed: return Color.red.opacity(0.12)
+                case .added: return Theme.Severity.success.color.opacity(Theme.Opacity.tintSubtle)
+                case .removed: return Theme.Severity.danger.color.opacity(Theme.Opacity.tintSubtle)
                 case .context: return .clear
                 }
             }

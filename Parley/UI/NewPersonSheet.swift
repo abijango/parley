@@ -23,10 +23,12 @@ struct NewPersonSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("New contact").font(.headline)
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            Text("New contact").font(Theme.Typography.sheetTitle)
 
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+            Grid(alignment: .leading,
+                 horizontalSpacing: Theme.Spacing.medium,
+                 verticalSpacing: Theme.Spacing.small) {
                 GridRow {
                     Text("Name").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
                     TextField("Full name", text: $name)
@@ -47,18 +49,20 @@ struct NewPersonSheet: View {
             .textFieldStyle(.roundedBorder)
 
             Text("Saved to the rolodex" + (company.isEmpty ? "." : " under “\(company)”."))
-                .font(.caption2).foregroundStyle(.tertiary)
+                .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
 
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { onCancel() }
+                    .glassButton()
                     .keyboardShortcut(.cancelAction)
                 Button("Add") { onAdd(trimmed(name), trimmed(title), trimmed(company), trimmed(linkedin)) }
+                    .glassProminentButton()
                     .keyboardShortcut(.defaultAction)
                     .disabled(trimmed(name).isEmpty)
             }
         }
-        .padding(20)
+        .padding(Theme.Spacing.large)
         .frame(width: 380)
         .onAppear { titleFocused = true }   // name is prefilled; jump to Title
     }

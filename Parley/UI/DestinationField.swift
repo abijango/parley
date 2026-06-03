@@ -15,7 +15,7 @@ struct DestinationField: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
             TextField("Filing location — type to filter, or a new path", text: $text)
                 .textFieldStyle(.roundedBorder)
                 .focused($focused)
@@ -41,8 +41,10 @@ struct DestinationField: View {
                     Text(dest.display).frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-                .padding(.vertical, 3).padding(.horizontal, 6)
-                .background(highlighted == index ? Color.accentColor.opacity(0.2) : .clear)
+                .padding(.vertical, Theme.Spacing.xSmall).padding(.horizontal, Theme.Spacing.small)
+                .background(suggestionHighlight(index))
+                // Hover and ↑/↓ drive the same highlight — one selection model.
+                .onHover { if $0 { highlighted = index } }
             }
             if showCreate {
                 Divider()
@@ -54,12 +56,20 @@ struct DestinationField: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-                .padding(.vertical, 3).padding(.horizontal, 6)
-                .background(highlighted == matches.count ? Color.accentColor.opacity(0.2) : .clear)
+                .padding(.vertical, Theme.Spacing.xSmall).padding(.horizontal, Theme.Spacing.small)
+                .background(suggestionHighlight(matches.count))
+                .onHover { if $0 { highlighted = matches.count } }
             }
         }
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
+        .cardSurface(radius: Theme.Radius.small)
         .frame(maxHeight: 170)
+    }
+
+    private func suggestionHighlight(_ index: Int) -> some View {
+        Theme.Radius.rect(Theme.Radius.small)
+            .fill(highlighted == index
+                  ? Theme.Palette.accent.opacity(Theme.Opacity.selection)
+                  : Color.clear)
     }
 
     // MARK: Keyboard
