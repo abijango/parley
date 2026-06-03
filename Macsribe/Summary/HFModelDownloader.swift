@@ -40,12 +40,17 @@ final class HFModelDownloader: NSObject, URLSessionDownloadDelegate, @unchecked 
         guard !missing.isEmpty else { progress(1); return dir }
         if totalToFetch <= 0 { totalToFetch = 1 }   // avoid divide-by-zero if HEAD sizes were unknown
 
+        let basePrefix = dir.standardizedFileURL.path + "/"
         var prior: Int64 = 0
         for f in missing {
+            // Defence-in-depth: ensure the resolved destination stays inside `dir`.
+            let dest = dir.appendingPathComponent(f.name).standardizedFileURL
+            guard dest.path.hasPrefix(basePrefix) else {
+                throw DownloadError(message: "Refusing to write outside the model directory: \(f.name)")
+            }
             let tmp = try await downloadFile(f.url) { written in
                 progress(min(0.999, Double(prior + written) / Double(totalToFetch)))
             }
-            let dest = dir.appendingPathComponent(f.name)
             try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: dest)
             try FileManager.default.moveItem(at: tmp, to: dest)
@@ -67,8 +72,22 @@ final class HFModelDownloader: NSObject, URLSessionDownloadDelegate, @unchecked 
         struct Info: Decodable { struct Sibling: Decodable { let rfilename: String }; let siblings: [Sibling] }
         let info = try JSONDecoder().decode(Info.self, from: data)
         let skip: Set<String> = [".gitattributes"]
-        // Skip docs; keep config/tokenizer/weights/index.
-        return info.siblings.map(\.rfilename).filter { !skip.contains($0) && !$0.lowercased().hasSuffix(".md") }
+        // Skip docs; keep config/tokenizer/weights/index. Reject any path-traversal /
+        // absolute names — `rfilename` comes from an arbitrary (user-set) repo.
+        let names = info.siblings.map(\.rfilename).filter { !skip.contains($0) && !$0.lowercased().hasSuffix(".md") }
+        for name in names where !Self.isSafeRelativeName(name) {
+            throw DownloadError(message: "Refusing unsafe filename from Hub: \(name)")
+        }
+        return names
+    }
+
+    /// Rejects names that could escape the model directory.
+    static func isSafeRelativeName(_ name: String) -> Bool {
+        !name.isEmpty
+            && !name.hasPrefix("/")
+            && !name.contains("..")
+            && !name.contains("\\")
+            && !name.contains("\0")
     }
 
     private func remoteSize(_ url: URL) async throws -> Int64 {
