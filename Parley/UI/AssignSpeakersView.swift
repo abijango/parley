@@ -17,13 +17,13 @@ struct AssignSpeakersView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Assign speakers").font(.title3.weight(.semibold))
+            VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+                Text("Assign speakers").font(Theme.Typography.sheetTitle)
                 Text("Name each speaker to label the transcript and remember their voice for next time. Tap ▶ to hear a sample.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding()
+            .padding(Theme.Spacing.large)
 
             Divider()
             ScrollView {
@@ -39,9 +39,11 @@ struct AssignSpeakersView: View {
             HStack {
                 Spacer()
                 Button("Done") { player.stop(); recording.finishSpeakerReview(); dismiss() }
+                    .glassProminentButton()
                     .keyboardShortcut(.defaultAction)
             }
-            .padding()
+            .padding(Theme.Spacing.large)
+            .chromeSurface()
         }
         .frame(width: 520, height: 440)
         .onDisappear { player.stop() }
@@ -55,16 +57,18 @@ struct AssignSpeakersView: View {
     }
 
     private func row(for s: CallSpeakerSummary) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: Theme.Spacing.medium) {
             Button { playSample(s) } label: { Image(systemName: "play.circle").font(.title2) }
                 .buttonStyle(.plain)
                 .help("Play a sample of this speaker")
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(displayName(s)).font(.body.weight(.semibold))
-                Text("\(Int(s.talkSeconds))s speaking").font(.caption2).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+                Text(displayName(s)).font(Theme.Typography.controlLabel)
+                Text("\(Int(s.talkSeconds))s speaking")
+                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
                 if !s.firstLine.isEmpty {
-                    Text("“\(s.firstLine)”").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    Text("“\(s.firstLine)”")
+                        .font(Theme.Typography.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
             }
             Spacer()
@@ -73,14 +77,17 @@ struct AssignSpeakersView: View {
                 draft = names[s.id] ?? s.resolvedName ?? ""
                 namingId = s.id
             }
+            .glassButton()
             .popover(isPresented: Binding(get: { namingId == s.id }, set: { if !$0 { namingId = nil } })) {
                 namer(for: s)
             }
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.horizontal, Theme.Spacing.large)
+        .padding(.vertical, Theme.Spacing.small)
     }
 
+    // Mirrors the live-transcript naming popover (LiveTranscriptView) so the
+    // affordance reads identically wherever a speaker is named.
     private func namer(for s: CallSpeakerSummary) -> some View {
         let d = draft.trimmingCharacters(in: .whitespaces)
         let attendees = TranscriptWriter.splitAttendees(recording.attendees)
@@ -91,35 +98,39 @@ struct AssignSpeakersView: View {
                 && !attendeeSet.contains($0.lowercased())
         }.prefix(5).map { $0 }
 
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("Name this speaker").font(.headline)
+        return VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+            Text("Name this speaker").font(Theme.Typography.sheetTitle)
             if !attendees.isEmpty {
-                Text("In this call").font(.caption).foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 4) {
+                Text("In this call")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
                     ForEach(attendees, id: \.self) { n in
-                        Button(n) { assign(s.id, n) }.buttonStyle(.bordered)
+                        Button(n) { assign(s.id, n) }.glassButton()
                     }
                 }
                 Divider()
             }
-            Text("Other name").font(.caption).foregroundStyle(.secondary)
+            Text("Other name")
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
             TextField("Type a name", text: $draft)
                 .textFieldStyle(.roundedBorder).frame(width: 240)
                 .onSubmit { assign(s.id, draft) }
             if !matches.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
                     ForEach(matches, id: \.self) { p in
-                        Button(p) { draft = p }.buttonStyle(.plain).font(.callout)
+                        Button(p) { draft = p }
+                            .buttonStyle(.plain).font(Theme.Typography.secondary)
                     }
                 }
             }
             HStack {
                 Spacer()
                 Button("Save") { assign(s.id, draft) }
+                    .glassProminentButton()
                     .keyboardShortcut(.defaultAction).disabled(d.isEmpty)
             }
         }
-        .padding(12).frame(width: 264)
+        .padding(Theme.Spacing.medium).frame(width: 264)
     }
 
     private func assign(_ id: String, _ rawName: String) {

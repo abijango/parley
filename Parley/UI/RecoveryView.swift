@@ -9,20 +9,21 @@ struct RecoveryView: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "clock.arrow.circlepath").foregroundStyle(.orange)
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            HStack(spacing: Theme.Spacing.small) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundStyle(Theme.Severity.warning.color)
                 Text(recording.pendingRecoveries.count > 1
                      ? "Recover interrupted recordings"
                      : "Recover interrupted recording")
-                    .font(.title3.weight(.semibold))
+                    .font(Theme.Typography.sheetTitle)
             }
             Text("These were recording when the app last quit. The audio is intact — resume to keep going in the same note, or recover it as a transcript.")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(Theme.Typography.secondary).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(spacing: Theme.Spacing.medium) {
                     ForEach(recording.pendingRecoveries) { session in
                         row(session)
                     }
@@ -30,51 +31,55 @@ struct RecoveryView: View {
             }
 
             if recording.isRecovering {
-                HStack(spacing: 8) {
+                HStack(spacing: Theme.Spacing.small) {
                     ProgressView().controlSize(.small)
-                    Text("Re-transcribing audio…").font(.caption).foregroundStyle(.secondary)
+                    Text("Re-transcribing audio…")
+                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 }
             }
 
             HStack {
                 Spacer()
                 Button("Later") { onClose() }
+                    .glassButton()
                     .help("Decide later — these stay available until handled.")
             }
         }
-        .padding(20)
+        .padding(Theme.Spacing.large)
         .frame(width: 540, height: 440)
     }
 
     private func row(_ s: RecoverableSession) -> some View {
         let live = recording.isCallLive(s)
         let busy = recording.isRecording || recording.isRecovering
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: Theme.Spacing.small) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
                     Text(s.manifest.title.isEmpty ? "Untitled recording" : s.manifest.title)
                         .font(.headline)
                     Text("\(durationText(s.durationSeconds)) · \(dateText(s.manifest.startedAt))")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
                     if !s.manifest.filing.isEmpty {
-                        Text("Filing: \(s.manifest.filing)").font(.caption2).foregroundStyle(.tertiary)
+                        Text("Filing: \(s.manifest.filing)")
+                            .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
                     }
                 }
                 Spacer()
                 if live {
                     Label("Call still live", systemImage: "phone.connection.fill")
-                        .font(.caption2).foregroundStyle(.green)
+                        .font(Theme.Typography.captionSecondary)
+                        .foregroundStyle(Theme.Severity.success.color)
                 }
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.Spacing.small) {
                 Button {
                     Task { await recording.resume(s) }
                 } label: {
                     Label("Resume", systemImage: "record.circle")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(live ? .green : .accentColor)
+                .glassProminentButton()
+                .tint(live ? .green : Theme.Palette.accent)
                 .disabled(busy)
                 .help("Continue recording into this same note.")
 
@@ -95,12 +100,13 @@ struct RecoveryView: View {
                 } label: {
                     Label("Discard", systemImage: "trash")
                 }
+                .glassButton()
                 .disabled(recording.isRecovering)
                 .help("Delete this session and its audio.")
             }
         }
-        .padding(10)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+        .padding(Theme.Spacing.medium)
+        .cardSurface()
     }
 
     private func durationText(_ seconds: Double) -> String {
