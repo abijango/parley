@@ -22,7 +22,7 @@ struct TranscriptPreviewView: View {
                         .markdownTextStyle(\.code) { FontFamilyVariant(.monospaced) }
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(20)
+                        .padding(Theme.Spacing.large)
                 }
             } else {
                 placeholder
@@ -33,15 +33,18 @@ struct TranscriptPreviewView: View {
         .onChange(of: reloadToken) { load() }
     }
 
-    private var placeholder: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 34)).foregroundStyle(.secondary)
-            Text(loadError ?? "No transcript yet — finish a recording to preview it here.")
-                .font(.callout).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+    @ViewBuilder private var placeholder: some View {
+        if let loadError {
+            EmptyStateView(
+                icon: "doc.text.magnifyingglass",
+                title: "Note unavailable",
+                detail: loadError)
+        } else {
+            EmptyStateView(
+                icon: "doc.text.magnifyingglass",
+                title: "No transcript yet",
+                detail: "Finish a recording to preview it here.")
         }
-        .padding(32)
     }
 
     /// Drops a leading YAML frontmatter block (`---\n…\n---`) so it isn't rendered
