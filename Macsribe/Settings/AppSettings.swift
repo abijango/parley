@@ -138,6 +138,7 @@ final class AppSettings: ObservableObject {
         static let liveTranscriptEnabled = "macsribe.liveTranscriptEnabled"
         static let summaryPromptTemplate = "macsribe.summaryPromptTemplate"
         static let localSummaryModelId = "macsribe.localSummaryModelId"
+        static let summaryEnginesEnabled = "macsribe.summaryEnginesEnabled"
     }
 
     // MARK: Memory
@@ -290,6 +291,28 @@ final class AppSettings: ObservableObject {
     /// Must be an MLX *text* build. Confirmed-good defaults: `mlx-community/Qwen3-4B-4bit`,
     /// `mlx-community/Qwen2.5-3B-Instruct-4bit`. Downloaded on first use.
     @AppStorage(Key.localSummaryModelId) var localSummaryModelId: String = "mlx-community/Qwen3-4B-4bit"
+
+    /// Which engines participate in the summary comparison (so the user can compare any
+    /// subset, e.g. just Qwen vs Claude). Stored as comma-separated `SummaryEngineKind`
+    /// raw values; defaults to all three.
+    @AppStorage(Key.summaryEnginesEnabled) var summaryEnginesEnabledRaw: String = "claude,appleFoundation,qwenLocal"
+
+    var enabledSummaryEngines: Set<SummaryEngineKind> {
+        Set(summaryEnginesEnabledRaw.split(separator: ",").compactMap { SummaryEngineKind(rawValue: String($0)) })
+    }
+
+    func isSummaryEngineEnabled(_ kind: SummaryEngineKind) -> Bool {
+        enabledSummaryEngines.contains(kind)
+    }
+
+    /// Toggle an engine's participation, keeping at least one enabled.
+    func setSummaryEngine(_ kind: SummaryEngineKind, enabled: Bool) {
+        var set = enabledSummaryEngines
+        if enabled { set.insert(kind) } else { set.remove(kind) }
+        guard !set.isEmpty else { return }   // never disable the last one
+        summaryEnginesEnabledRaw = SummaryEngineKind.allCases
+            .filter { set.contains($0) }.map(\.rawValue).joined(separator: ",")
+    }
 
     static let defaultSummaryPrompt = """
     You are a meeting-notes assistant. Turn the transcript below into a clean, well-structured \

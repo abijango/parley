@@ -51,6 +51,16 @@ struct SummaryCompareView: View {
                 Text(item.meta.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
+            Menu {
+                ForEach(SummaryEngineKind.allCases) { kind in
+                    Toggle(kind.title, isOn: Binding(
+                        get: { settings.isSummaryEngineEnabled(kind) },
+                        set: { settings.setSummaryEngine(kind, enabled: $0) }))
+                }
+            } label: {
+                Label("Engines (\(comparison.kinds.count))", systemImage: "square.grid.2x2")
+            }
+            .help("Choose which models to compare")
             Button { showPrompt.toggle() } label: {
                 Label("Prompt", systemImage: showPrompt ? "chevron.up" : "slider.horizontal.3")
             }

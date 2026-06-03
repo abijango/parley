@@ -23,8 +23,11 @@ final class SummaryComparison: ObservableObject {
         var elapsed: TimeInterval?
     }
 
-    /// Engines shown, left-to-right.
-    let kinds: [SummaryEngineKind] = [.claude, .appleFoundation, .qwenLocal]
+    /// All engines, in display order (left-to-right).
+    let allKinds: [SummaryEngineKind] = [.claude, .appleFoundation, .qwenLocal]
+
+    /// Engines the user has enabled for the comparison (subset of `allKinds`).
+    var kinds: [SummaryEngineKind] { allKinds.filter { settings.isSummaryEngineEnabled($0) } }
 
     @Published private(set) var results: [Result]
     @Published private(set) var isRunning = false

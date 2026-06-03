@@ -27,6 +27,8 @@ struct SettingsView: View {
                 .tabItem { Label("Speakers", systemImage: "person.2.wave.2") }
             notesTab
                 .tabItem { Label("Notes", systemImage: "doc.text") }
+            summaryTab
+                .tabItem { Label("Summary", systemImage: "rectangle.split.3x1") }
             detectionTab
                 .tabItem { Label("Detection", systemImage: "dot.radiowaves.left.and.right") }
             storageTab
@@ -39,6 +41,63 @@ struct SettingsView: View {
         .frame(minWidth: 540, idealWidth: 600, maxWidth: .infinity,
                minHeight: 440, idealHeight: 500, maxHeight: .infinity)
         .padding()
+    }
+
+    private var summaryTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Summary comparison").font(.headline)
+                Text("Generate meeting notes with several models on the SAME prompt and compare them side-by-side from History → \"Compare summaries\". The Claude + skill auto-filing path is separate and unaffected.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                Text("Engines to compare").font(.subheadline.weight(.semibold))
+                ForEach(SummaryEngineKind.allCases) { kind in
+                    Toggle(isOn: Binding(
+                        get: { settings.isSummaryEngineEnabled(kind) },
+                        set: { settings.setSummaryEngine(kind, enabled: $0) })) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(kind.title)
+                            Text(kind.blurb).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Text("At least one stays enabled. Pick any subset — e.g. Qwen vs Claude, or Qwen vs Apple.")
+                    .font(.caption2).foregroundStyle(.secondary)
+
+                Divider()
+                Text("Shared prompt").font(.subheadline.weight(.semibold))
+                Text("Sent verbatim to every engine. Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextEditor(text: $settings.summaryPromptTemplate)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(height: 200)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                HStack {
+                    Spacer()
+                    Button("Reset to default") { settings.summaryPromptTemplate = AppSettings.defaultSummaryPrompt }
+                        .font(.caption)
+                }
+
+                Divider()
+                Text("Local model (Qwen / MLX, on the GPU)").font(.subheadline.weight(.semibold))
+                TextField("mlx-community/…", text: $settings.localSummaryModelId)
+                    .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
+                SummaryLocalModelStatus(summarizer: recording.summarizer)
+                Text("An MLX text model id from Hugging Face — downloaded on first use, runs fully offline. Good picks: mlx-community/Qwen3-4B-4bit, mlx-community/Qwen2.5-3B-Instruct-4bit. (The on-disk LM Studio GGUF isn't used — MLX needs its own format.)")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                Text("Apple model (Foundation Models, on the Neural Engine)").font(.subheadline.weight(.semibold))
+                Text("Apple's on-device model — no download, fully offline. Requires macOS 26 with Apple Intelligence enabled in System Settings → Apple Intelligence & Siri.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding()
+        }
     }
 
     private var detectionTab: some View {
@@ -686,6 +745,41 @@ private struct FluidModelSection: View {
                 Button("Retry") { models.download() }.disabled(isRecording)
                 Text(msg).font(.caption2).foregroundStyle(.red).lineLimit(2)
             }
+        }
+    }
+}
+
+/// Live status row for the local MLX summary model. Observes `SummarizerManager` directly
+/// (a nested ObservableObject won't republish through its parent).
+private struct SummaryLocalModelStatus: View {
+    @ObservedObject var summarizer: SummarizerManager
+
+    var body: some View {
+        HStack(spacing: 8) {
+            statusLabel
+            Spacer()
+            if summarizer.isReady {
+                Button("Unload") { summarizer.unload() }.font(.caption)
+            }
+        }
+    }
+
+    @ViewBuilder private var statusLabel: some View {
+        switch summarizer.status {
+        case .idle:
+            Text("Not loaded (loads on first comparison run).").font(.caption2).foregroundStyle(.secondary)
+        case .downloading(let p):
+            HStack(spacing: 6) {
+                ProgressView(value: p).frame(width: 90)
+                Text("Downloading \(Int(p * 100))%").font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+            }
+        case .loading:
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Loading…").font(.caption2).foregroundStyle(.secondary) }
+        case .ready(let id):
+            Label(id, systemImage: "checkmark.circle.fill")
+                .font(.caption).foregroundStyle(.green).lineLimit(1).truncationMode(.middle)
+        case .failed(let m):
+            Label(m, systemImage: "xmark.circle.fill").font(.caption2).foregroundStyle(.red).lineLimit(2)
         }
     }
 }
