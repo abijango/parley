@@ -155,6 +155,111 @@ final class TranscriptStore: ObservableObject {
         return url
     }
 
+    // MARK: File management (delete / rename / refile)
+
+    /// Resolves a meeting's linked artifacts (audio session, filed note, staged summary).
+    func links(for item: TranscriptItem) -> MeetingLinks {
+        MeetingFiles.links(transcript: item.url, meta: item.meta, staging: item.summaryReadyURL)
+    }
+
+    /// Trashes a meeting (recoverable, macOS Trash): always the transcript and any staged
+    /// summary, plus — when the flag is set and the link resolves — its recorded audio session
+    /// and filed note.
+    func delete(_ item: TranscriptItem, alsoAudio: Bool, alsoNote: Bool) {
+        trashArtifacts(of: item, alsoAudio: alsoAudio, alsoNote: alsoNote)
+        AppLog.log("History: trashed \"\(item.meta.title)\"", category: "history")
+        refresh()
+    }
+
+    /// Bulk trash — same per-item cascade as `delete`, one refresh at the end.
+    func deleteMany(_ items: [TranscriptItem], alsoAudio: Bool, alsoNote: Bool) {
+        guard !items.isEmpty else { return }
+        for item in items { trashArtifacts(of: item, alsoAudio: alsoAudio, alsoNote: alsoNote) }
+        AppLog.log("History: trashed \(items.count) meeting(s)", category: "history")
+        refresh()
+    }
+
+    private func trashArtifacts(of item: TranscriptItem, alsoAudio: Bool, alsoNote: Bool) {
+        let l = links(for: item)
+        if alsoAudio, let session = l.audioSession { MeetingFiles.trash(session) }
+        if alsoNote, let note = l.note { MeetingFiles.trash(note) }
+        if let staged = l.staging { MeetingFiles.trash(staged) }
+        MeetingFiles.trash(item.url)
+    }
+
+    /// Retitles a meeting: updates the `title:` frontmatter, renames the transcript file
+    /// (preserving its `YYYY-MM-DD-HHMM - ` stamp prefix and extension), and — when processed —
+    /// renames the filed note to match and relinks `note:`. Returns the transcript's new URL
+    /// (the `id` changes, so the caller should re-select it).
+    @discardableResult
+    func rename(_ item: TranscriptItem, to rawTitle: String) -> URL {
+        let newTitle = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newTitle.isEmpty, newTitle != item.meta.title else { return item.url }
+        let fm = FileManager.default
+
+        TranscriptWriter.updateFrontmatter(at: item.url) { $0.title = newTitle }
+
+        // Keep the "YYYY-MM-DD-HHMM - " prefix; swap only the title portion.
+        let ext = item.url.pathExtension
+        let stem = item.url.deletingPathExtension().lastPathComponent
+        let prefix = stem.range(of: " - ").map { String(stem[stem.startIndex..<$0.upperBound]) } ?? ""
+        let newName = prefix + TranscriptWriter.sanitize(newTitle) + (ext.isEmpty ? "" : ".\(ext)")
+        var transcriptURL = item.url
+        let dest = uniqueDestination(for: newName, in: item.url.deletingLastPathComponent())
+        if dest.standardizedFileURL != item.url.standardizedFileURL {
+            do { try fm.moveItem(at: item.url, to: dest); transcriptURL = dest }
+            catch { AppLog.log("rename transcript failed: \(error.localizedDescription)", category: "history") }
+        }
+
+        // Rename the filed note (leave its contents untouched to avoid reshaping the user's
+        // Obsidian frontmatter) and relink the transcript's `note:` path.
+        if let notePath = item.meta.note, !notePath.isEmpty {
+            let noteURL = URL(fileURLWithPath: notePath)
+            if fm.fileExists(atPath: noteURL.path) {
+                let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
+                let noteName = "\(df.string(from: item.meta.date)) - \(TranscriptWriter.sanitize(newTitle)).md"
+                let noteDest = uniqueDestination(for: noteName, in: noteURL.deletingLastPathComponent())
+                if noteDest.standardizedFileURL != noteURL.standardizedFileURL {
+                    do {
+                        try fm.moveItem(at: noteURL, to: noteDest)
+                        TranscriptWriter.updateFrontmatter(at: transcriptURL) { $0.note = noteDest.path }
+                    } catch { AppLog.log("rename note failed: \(error.localizedDescription)", category: "history") }
+                }
+            }
+        }
+        refresh()
+        return transcriptURL
+    }
+
+    /// Refiles a meeting: records the new `filing:` destination, and — when processed with a
+    /// filed note — moves that note into `<vault>/<destination>/` and relinks `note:`. The
+    /// transcript itself stays put (only the polished note is user-filed). Returns its URL.
+    @discardableResult
+    func refile(_ item: TranscriptItem, to destination: String) -> URL {
+        let dest = destination.trimmingCharacters(in: .whitespaces)
+        guard dest != item.meta.filing || item.meta.note != nil else { return item.url }
+        TranscriptWriter.updateFrontmatter(at: item.url) { $0.filing = dest }
+
+        if let notePath = item.meta.note, !notePath.isEmpty {
+            let fm = FileManager.default
+            let noteURL = URL(fileURLWithPath: notePath)
+            if fm.fileExists(atPath: noteURL.path) {
+                let vault = AppSettings.shared.vaultURL
+                let folder = dest.isEmpty ? vault : vault.appendingPathComponent(dest, isDirectory: true)
+                try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+                let noteDest = uniqueDestination(for: noteURL.lastPathComponent, in: folder)
+                if noteDest.standardizedFileURL != noteURL.standardizedFileURL {
+                    do {
+                        try fm.moveItem(at: noteURL, to: noteDest)
+                        TranscriptWriter.updateFrontmatter(at: item.url) { $0.note = noteDest.path }
+                    } catch { AppLog.log("refile note failed: \(error.localizedDescription)", category: "history") }
+                }
+            }
+        }
+        refresh()
+        return item.url
+    }
+
     // MARK: Scanning
 
     private func scan(_ folder: URL, processed: Bool) -> [TranscriptItem] {

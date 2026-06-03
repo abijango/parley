@@ -193,6 +193,21 @@ struct SettingsView: View {
                 Button("Delete older", role: .destructive) { confirmPurge() }
                 Spacer()
             }
+
+            let orphans = orphanedSessions
+            if !orphans.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "questionmark.folder").foregroundStyle(.orange)
+                    Text("\(orphans.count) orphaned · \(byteText(orphans.reduce(Int64(0)) { $0 + $1.sizeBytes }))")
+                        .font(.callout).foregroundStyle(.secondary).monospacedDigit()
+                    Text("audio with no transcript in History").font(.caption2).foregroundStyle(.tertiary)
+                    Spacer()
+                    Button("Delete orphaned", role: .destructive) {
+                        storageStatus = nil; pendingBulkDelete = orphans
+                    }
+                    .help("Raw audio whose transcript was deleted — you can no longer reach it from History.")
+                }
+            }
             if let storageStatus {
                 Text(storageStatus).font(.caption2).foregroundStyle(.secondary)
             }
@@ -213,18 +228,20 @@ struct SettingsView: View {
                 }
             }
         }
-        .onAppear { recordings.refresh() }
+        // Refresh transcripts too so orphaned-audio detection is accurate (a session looks
+        // orphaned only when no transcript references it).
+        .onAppear { recordings.refresh(); recording.store.refresh() }
         .confirmationDialog(
-            "Delete this recording's audio?",
+            "Move this recording's audio to the Trash?",
             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
             presenting: pendingDelete
         ) { folder in
-            Button("Delete \(byteText(folder.sizeBytes))", role: .destructive) {
+            Button("Move \(byteText(folder.sizeBytes)) to Trash", role: .destructive) {
                 recordings.delete(folder); pendingDelete = nil
             }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
         } message: { folder in
-            Text("“\(folder.title)” — the audio is removed permanently. Any transcript or note already in your vault is kept.")
+            Text("“\(folder.title)” — the audio is moved to the Trash (recoverable). Any transcript or note already in your vault is kept.")
         }
         .confirmationDialog(
             "Delete \(pendingBulkDelete?.count ?? 0) recording\((pendingBulkDelete?.count ?? 0) == 1 ? "" : "s")?",
@@ -232,17 +249,27 @@ struct SettingsView: View {
         ) {
             if let folders = pendingBulkDelete, !folders.isEmpty {
                 let bytes = folders.reduce(Int64(0)) { $0 + $1.sizeBytes }
-                Button("Delete \(folders.count) · \(byteText(bytes))", role: .destructive) {
+                Button("Move \(folders.count) · \(byteText(bytes)) to Trash", role: .destructive) {
                     recordings.delete(folders)
                     selectedSessions.removeAll()
-                    storageStatus = "Deleted \(folders.count) recording(s)."
+                    storageStatus = "Moved \(folders.count) recording(s) to the Trash."
                     pendingBulkDelete = nil
                 }
             }
             Button("Cancel", role: .cancel) { pendingBulkDelete = nil }
         } message: {
-            Text("Audio is removed permanently. Transcripts and notes in your vault are kept.")
+            Text("Audio is moved to the Trash (recoverable). Transcripts and notes in your vault are kept.")
         }
+    }
+
+    /// Sessions whose folder no transcript references — unreachable from History. Excludes the
+    /// live/interrupted session so an in-progress recording is never flagged as orphaned.
+    private var orphanedSessions: [RecordingFolder] {
+        let referenced = Set(recording.store.items.compactMap {
+            MeetingFiles.sessionDir(forAudioPath: $0.meta.audio)?.standardizedFileURL.path
+        })
+        return recordings.orphanedSessions(referencedSessionPaths: referenced)
+            .filter { $0.id != recording.currentSessionID && !$0.isActive }
     }
 
     private func confirmDeleteSelected() {

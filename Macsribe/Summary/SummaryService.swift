@@ -177,17 +177,16 @@ final class SummaryService: ObservableObject {
 
         // The committed summary + the raw transcript make the session audio redundant —
         // delete it (and its session folder) to reclaim disk, and clear the `audio` link.
+        // Permanent (not Trash): this is an automatic, opt-in disk reclaim, not a user-initiated
+        // delete they might want to undo. The session-dir guard is shared via MeetingFiles.
         if AppSettings.shared.deleteAudioAfterFiling, let audio = item.meta.audio, !audio.isEmpty {
-            let audioURL = URL(fileURLWithPath: audio)
-            let recordingsRoot = AppPaths.recordingsDirectory.standardizedFileURL.path + "/"
-            let sessionDir = audioURL.deletingLastPathComponent()
-            if sessionDir.standardizedFileURL.path.hasPrefix(recordingsRoot) {
+            if let sessionDir = MeetingFiles.sessionDir(forAudioPath: audio) {
                 try? FileManager.default.removeItem(at: sessionDir)   // mic/system/mixed.caf + manifest
             } else {
-                try? FileManager.default.removeItem(at: audioURL)
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: audio))
             }
             TranscriptWriter.updateFrontmatter(at: moved) { $0.audio = nil }
-            AppLog.log("Summary: deleted session audio after filing (\(sessionDir.lastPathComponent))", category: "summary")
+            AppLog.log("Summary: deleted session audio after filing", category: "summary")
         }
 
         openInObsidian(noteURL)

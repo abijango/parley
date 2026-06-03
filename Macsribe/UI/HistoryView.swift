@@ -11,8 +11,31 @@ struct HistoryView: View {
     @ObservedObject private var settings = AppSettings.shared
     /// Observed directly so live job state (pending/failed) republishes the view.
     @ObservedObject private var summaryService = RecordingController.shared.summaryService
-    @State private var selection: TranscriptItem.ID?
+    @State private var selection = Set<TranscriptItem.ID>()
     @State private var filter: HistoryFilter = .needsSpeakers
+    /// Search query, matched against title / attendees / filing (and bodies when enabled).
+    @State private var searchQuery = ""
+    @State private var searchInContents = false
+    // File-management sheet (one at a time, enum-driven to avoid stacking modifiers).
+    @State private var fileOp: FileOp?
+    @State private var renameDraft = ""
+    @State private var refileDraft = ""
+    @State private var deleteAudioToo = true
+    @State private var deleteNoteToo = true
+
+    /// The active file-management sheet and its target(s).
+    enum FileOp: Identifiable {
+        case rename(TranscriptItem)
+        case refile([TranscriptItem])
+        case delete([TranscriptItem])
+        var id: String {
+            switch self {
+            case .rename(let i): return "rename:\(i.id)"
+            case .refile(let items): return "refile:\(items.map(\.id).joined(separator: "|"))"
+            case .delete(let items): return "delete:\(items.map(\.id).joined(separator: "|"))"
+            }
+        }
+    }
 
     enum HistoryFilter: String, CaseIterable, Identifiable {
         case all = "All", review = "Review", needsSpeakers = "Unassigned", unprocessed = "Unprocessed", processed = "Processed"
@@ -20,13 +43,29 @@ struct HistoryView: View {
     }
 
     private var filteredItems: [TranscriptItem] {
+        let base: [TranscriptItem]
         switch filter {
-        case .all: return store.items
-        case .review: return store.items.filter { $0.summaryReadyURL != nil }
-        case .needsSpeakers: return store.items.filter { $0.hasUnnamedSpeakers }
-        case .unprocessed: return store.items.filter { !$0.isProcessed }
-        case .processed: return store.items.filter { $0.isProcessed }
+        case .all: base = store.items
+        case .review: base = store.items.filter { $0.summaryReadyURL != nil }
+        case .needsSpeakers: base = store.items.filter { $0.hasUnnamedSpeakers }
+        case .unprocessed: base = store.items.filter { !$0.isProcessed }
+        case .processed: base = store.items.filter { $0.isProcessed }
         }
+        let q = searchQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return base }
+        return base.filter { matchesSearch($0, query: q) }
+    }
+
+    /// Title / attendees / filing match (cheap, in-memory); body match only when content
+    /// search is toggled on (reads the file — fine for the small number of meeting notes).
+    private func matchesSearch(_ item: TranscriptItem, query q: String) -> Bool {
+        if item.meta.title.lowercased().contains(q) { return true }
+        if item.meta.filing.lowercased().contains(q) { return true }
+        if item.meta.attendees.contains(where: { $0.lowercased().contains(q) }) { return true }
+        if searchInContents, let text = try? String(contentsOf: item.url, encoding: .utf8) {
+            return text.range(of: q, options: .caseInsensitive) != nil
+        }
+        return false
     }
     /// Count of summaries staged and waiting for review (drives discoverability).
     private var reviewCount: Int { store.items.filter { $0.summaryReadyURL != nil }.count }
@@ -73,6 +112,13 @@ struct HistoryView: View {
         } message: { _ in
             Text("This transcript still has unnamed speakers (e.g. \"Speaker 1\"). The summary attributes actions and discussion to whoever's labelled, so it may misattribute. Detect/assign speakers first for a higher-quality note.")
         }
+        .sheet(item: $fileOp) { op in
+            switch op {
+            case .rename(let item): renameSheet(item)
+            case .refile(let items): refileSheet(items)
+            case .delete(let items): deleteSheet(items)
+            }
+        }
     }
 
     /// Seed the editable review destination from the selected item's filing.
@@ -96,6 +142,8 @@ struct HistoryView: View {
 
     private var list: some View {
         VStack(spacing: 0) {
+            searchBar
+            Divider()
             Picker("", selection: $filter) {
                 ForEach(HistoryFilter.allCases) { f in
                     Text(f == .review && reviewCount > 0 ? "Review (\(reviewCount))" : f.rawValue).tag(f)
@@ -108,18 +156,73 @@ struct HistoryView: View {
 
             if filteredItems.isEmpty {
                 VStack(spacing: 8) {
-                    Image(systemName: "clock.arrow.circlepath")
+                    Image(systemName: searchQuery.isEmpty ? "clock.arrow.circlepath" : "magnifyingglass")
                         .font(.system(size: 30)).foregroundStyle(.secondary)
-                    Text(filter == .all ? "No transcripts yet." : "No \(filter.rawValue.lowercased()) transcripts.")
+                    Text(emptyMessage)
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(filteredItems, selection: $selection) { item in
                     row(item).tag(item.id)
+                        .contextMenu { rowMenu(item) }
                 }
                 .listStyle(.inset)
+                .onDeleteCommand { if !selectedItems.isEmpty { beginDelete(selectedItems) } }
             }
+        }
+    }
+
+    private var emptyMessage: String {
+        if !searchQuery.isEmpty { return "No meetings match “\(searchQuery)”." }
+        return filter == .all ? "No transcripts yet." : "No \(filter.rawValue.lowercased()) transcripts."
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
+            TextField("Search meetings", text: $searchQuery)
+                .textFieldStyle(.plain)
+            if !searchQuery.isEmpty {
+                Button { searchQuery = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            Toggle(isOn: $searchInContents) {
+                Image(systemName: "doc.text.magnifyingglass")
+            }
+            .toggleStyle(.button).controlSize(.small)
+            .help("Also search inside transcript text (slower)")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+    }
+
+    /// Per-row context menu — operates on the right-clicked item (selecting it first if it
+    /// isn't part of the current selection).
+    @ViewBuilder private func rowMenu(_ item: TranscriptItem) -> some View {
+        let targets = selection.contains(item.id) && selection.count > 1 ? selectedItems : [item]
+        if targets.count == 1 {
+            Button("Rename…") { beginRename(item) }
+        }
+        Button("Refile…") { beginRefile(targets) }
+        Divider()
+        if let note = item.meta.note, !note.isEmpty {
+            Button("Open note in Obsidian") {
+                recording.notes.openInObsidian(URL(fileURLWithPath: note))
+            }
+        }
+        if let audio = item.meta.audio, !audio.isEmpty, FileManager.default.fileExists(atPath: audio) {
+            Button("Reveal audio in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: audio)])
+            }
+        }
+        Button("Reveal transcript in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting([item.url])
+        }
+        Divider()
+        Button(targets.count > 1 ? "Delete \(targets.count) meetings…" : "Delete…", role: .destructive) {
+            beginDelete(targets)
         }
     }
 
@@ -170,7 +273,9 @@ struct HistoryView: View {
     // MARK: Detail
 
     @ViewBuilder private var detail: some View {
-        if let item = selectedItem {
+        if selection.count > 1 {
+            bulkPanel
+        } else if let item = selectedItem {
             VStack(spacing: 0) {
                 detailHeader(item)
                 Divider()
@@ -191,6 +296,29 @@ struct HistoryView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// Shown when several meetings are selected — bulk delete / refile / summarize.
+    private var bulkPanel: some View {
+        let items = selectedItems
+        let bytes = items.reduce(Int64(0)) { $0 + store.links(for: $1).audioBytes }
+        return VStack(spacing: 16) {
+            Image(systemName: "checklist").font(.system(size: 34)).foregroundStyle(.secondary)
+            Text("\(items.count) meetings selected").font(.title3).bold()
+            if bytes > 0 {
+                Text("\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) of linked audio")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 12) {
+                Button { beginRefile(items) } label: { Label("Refile \(items.count)…", systemImage: "tray.and.arrow.down") }
+                Button { items.forEach { summarize($0) } } label: { Label("Summarize \(items.count)", systemImage: "sparkles") }
+                    .disabled(busy)
+                Button(role: .destructive) { beginDelete(items) } label: { Label("Delete \(items.count)…", systemImage: "trash") }
+            }
+            Text("Actions apply to all selected meetings.").font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 
     /// Live "summarizing…/failed" bar for a transcript without a staged summary yet.
@@ -256,9 +384,12 @@ struct HistoryView: View {
         }
     }
 
+    private var selectedItems: [TranscriptItem] {
+        store.items.filter { selection.contains($0.id) }
+    }
+    /// The single selected item, or nil when zero or many are selected.
     private var selectedItem: TranscriptItem? {
-        guard let selection else { return nil }
-        return store.items.first { $0.id == selection }
+        selection.count == 1 ? selectedItems.first : nil
     }
 
     private func detailHeader(_ item: TranscriptItem) -> some View {
@@ -270,7 +401,22 @@ struct HistoryView: View {
                 }
                 Spacer()
                 statusBadge(item)
+                Menu {
+                    Button("Rename…") { beginRename(item) }
+                    Button("Refile…") { beginRefile([item]) }
+                    Divider()
+                    Button("Reveal transcript in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+                    }
+                    Divider()
+                    Button("Delete…", role: .destructive) { beginDelete([item]) }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help("Rename, refile, or delete this meeting")
             }
+            filesStrip(item)
             if item.hasUnnamedSpeakers {
                 HStack(spacing: 6) {
                     Image(systemName: "person.crop.circle.badge.exclamationmark").foregroundStyle(.orange)
@@ -426,6 +572,155 @@ struct HistoryView: View {
             forAudioPath: item.meta.audio, transcript: item.url,
             attendees: item.meta.attendees.joined(separator: ", "),
             title: item.meta.title, filing: item.meta.filing)
+    }
+
+    // MARK: Files strip — the visible "meeting record"
+
+    /// Transcript + linked audio + filed note as compact chips, each with size and quick
+    /// reveal/open. Surfaces links the data model already carries (`meta.audio`/`meta.note`).
+    @ViewBuilder private func filesStrip(_ item: TranscriptItem) -> some View {
+        let l = store.links(for: item)
+        HStack(spacing: 8) {
+            fileChip(icon: "doc.text", label: "Transcript",
+                     detail: item.url.pathExtension.uppercased(), reveal: item.url)
+            if l.audioSession != nil {
+                fileChip(icon: "waveform", label: "Audio",
+                         detail: ByteCountFormatter.string(fromByteCount: l.audioBytes, countStyle: .file),
+                         reveal: item.meta.audio.map { URL(fileURLWithPath: $0) })
+            } else {
+                fileChip(icon: "waveform.slash", label: "Audio", detail: "none", reveal: nil)
+            }
+            if let note = l.note {
+                fileChip(icon: "tray.full", label: "Filed note", detail: nil, reveal: note,
+                         open: { recording.notes.openInObsidian(note) })
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder private func fileChip(icon: String, label: String, detail: String?,
+                                       reveal: URL?, open: (() -> Void)? = nil) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).foregroundStyle(.secondary)
+            Text(label)
+            if let detail { Text(detail).foregroundStyle(.secondary) }
+        }
+        .font(.caption)
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(.quaternary.opacity(0.4), in: Capsule())
+        .contentShape(Capsule())
+        .help(open != nil ? "Open in Obsidian" : (reveal != nil ? "Reveal in Finder" : ""))
+        .onTapGesture {
+            if let open { open() }
+            else if let reveal { NSWorkspace.shared.activateFileViewerSelecting([reveal]) }
+        }
+    }
+
+    // MARK: File-management actions (rename / refile / delete)
+
+    private func beginRename(_ item: TranscriptItem) {
+        renameDraft = item.meta.title
+        fileOp = .rename(item)
+    }
+
+    private func beginRefile(_ items: [TranscriptItem]) {
+        guard !items.isEmpty else { return }
+        refileDraft = items.first?.meta.filing ?? ""
+        fileOp = .refile(items)
+    }
+
+    private func beginDelete(_ items: [TranscriptItem]) {
+        guard !items.isEmpty else { return }
+        let links = items.map { store.links(for: $0) }
+        deleteAudioToo = links.contains { $0.audioSession != nil }
+        deleteNoteToo = links.contains { $0.note != nil }
+        fileOp = .delete(items)
+    }
+
+    private func renameSheet(_ item: TranscriptItem) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Rename meeting").font(.headline)
+            Text("Updates the title in the transcript and renames the file (its date prefix is kept). A filed note is renamed to match.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            TextField("Title", text: $renameDraft)
+                .textFieldStyle(.roundedBorder).frame(width: 340)
+                .onSubmit { commitRename(item) }
+            HStack {
+                Spacer()
+                Button("Cancel") { fileOp = nil }
+                Button("Rename") { commitRename(item) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(16).frame(width: 380)
+    }
+
+    private func commitRename(_ item: TranscriptItem) {
+        let newURL = store.rename(item, to: renameDraft)
+        selection = [newURL.path]
+        fileOp = nil
+    }
+
+    private func refileSheet(_ items: [TranscriptItem]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(items.count > 1 ? "Refile \(items.count) meetings" : "Refile meeting").font(.headline)
+            Text("Sets where the meeting is filed. A summary note that's already been committed is moved into the new folder.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            DestinationField(path: $refileDraft, destinations: vault.destinations,
+                             firstRoot: settings.scanRoots.first ?? "Internal")
+                .frame(width: 380)
+            HStack {
+                Spacer()
+                Button("Cancel") { fileOp = nil }
+                Button("Refile") { commitRefile(items) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16).frame(width: 420)
+    }
+
+    private func commitRefile(_ items: [TranscriptItem]) {
+        var lastURL: URL?
+        for item in items { lastURL = store.refile(item, to: refileDraft) }
+        if items.count == 1, let u = lastURL { selection = [u.path] }
+        fileOp = nil
+    }
+
+    private func deleteSheet(_ items: [TranscriptItem]) -> some View {
+        let links = items.map { store.links(for: $0) }
+        let audioBytes = links.reduce(Int64(0)) { $0 + $1.audioBytes }
+        let anyAudio = links.contains { $0.audioSession != nil }
+        let anyNote = links.contains { $0.note != nil }
+        return VStack(alignment: .leading, spacing: 12) {
+            Text(items.count > 1 ? "Move \(items.count) meetings to the Trash" : "Move meeting to the Trash")
+                .font(.headline)
+            Text("Recoverable from the Trash. The transcript is always moved; choose what else to include.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if anyAudio {
+                Toggle(isOn: $deleteAudioToo) {
+                    Text("Also delete the recorded audio (\(ByteCountFormatter.string(fromByteCount: audioBytes, countStyle: .file)))")
+                }
+            }
+            if anyNote {
+                Toggle(isOn: $deleteNoteToo) {
+                    Text("Also delete the filed summary note\(items.count > 1 ? "s" : "")")
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { fileOp = nil }
+                Button("Move to Trash", role: .destructive) { commitDelete(items) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16).frame(width: 420)
+    }
+
+    private func commitDelete(_ items: [TranscriptItem]) {
+        store.deleteMany(items, alsoAudio: deleteAudioToo, alsoNote: deleteNoteToo)
+        selection.subtract(Set(items.map(\.id)))
+        fileOp = nil
     }
 
     // MARK: Helpers

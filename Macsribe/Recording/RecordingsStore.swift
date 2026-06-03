@@ -38,24 +38,25 @@ final class RecordingsStore: ObservableObject {
                 ?? (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate
                 ?? Date.distantPast
             return RecordingFolder(url: url, title: title, date: date,
-                                   sizeBytes: Self.folderSize(url),
+                                   sizeBytes: MeetingFiles.size(of: url),
                                    isActive: manifest?.status == .active)
         }
         .sorted { $0.date > $1.date }
     }
 
     func delete(_ folder: RecordingFolder) {
-        try? FileManager.default.removeItem(at: folder.url)
-        AppLog.log("Deleted recording session \(folder.id) (\(ByteCountFormatter.string(fromByteCount: folder.sizeBytes, countStyle: .file)))", category: "record")
+        MeetingFiles.trash(folder.url)
+        AppLog.log("Trashed recording session \(folder.id) (\(ByteCountFormatter.string(fromByteCount: folder.sizeBytes, countStyle: .file)))", category: "record")
         refresh()
     }
 
-    /// Delete several sessions at once (multi-select + the "older than" purge).
+    /// Delete several sessions at once (multi-select + the "older than" purge). Recoverable
+    /// (macOS Trash) for consistency with History's cascade delete.
     func delete(_ folders: [RecordingFolder]) {
         guard !folders.isEmpty else { return }
         let bytes = folders.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        for folder in folders { try? FileManager.default.removeItem(at: folder.url) }
-        AppLog.log("Deleted \(folders.count) recording session(s) (\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)))", category: "record")
+        for folder in folders { MeetingFiles.trash(folder.url) }
+        AppLog.log("Trashed \(folders.count) recording session(s) (\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)))", category: "record")
         refresh()
     }
 
@@ -64,16 +65,10 @@ final class RecordingsStore: ObservableObject {
         sessions.filter { $0.date < date }
     }
 
-    /// Recursively sums the byte size of a session folder.
-    private static func folderSize(_ url: URL) -> Int64 {
-        let fm = FileManager.default
-        guard let walker = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
-        var total: Int64 = 0
-        for case let file as URL in walker {
-            if let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
-                total += Int64(size)
-            }
-        }
-        return total
+    /// Sessions whose folder isn't referenced by any surviving transcript's `audio:` link —
+    /// i.e. raw audio you can no longer reach from History (the transcript was deleted). Pass
+    /// the standardized session-dir paths still referenced (from `TranscriptStore`).
+    func orphanedSessions(referencedSessionPaths: Set<String>) -> [RecordingFolder] {
+        sessions.filter { !referencedSessionPaths.contains($0.url.standardizedFileURL.path) }
     }
 }
