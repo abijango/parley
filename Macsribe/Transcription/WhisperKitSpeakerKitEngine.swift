@@ -15,11 +15,15 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
     private let voiceprints: VoiceprintStore?
     private let identificationThreshold: Double
 
-    // Live WhisperKit wiring (mirrors WhisperKitEngine).
+    // Live WhisperKit wiring. SINGLE mixed stream (not two tracks): mic + system are
+    // summed into one ring and decoded by ONE pipeline, halving the live ASR load —
+    // the live "Me/Remote" split is discarded at stop anyway, where SpeakerKit
+    // relabels by speaker. Live uses the fast `liveModel`; offline uses `model`.
     private let service = TranscriptionService()
     private let merger = TranscriptMerger()
-    private var micPipeline: TrackPipeline?
-    private var systemPipeline: TrackPipeline?
+    private let mixedRing = AudioRingBuffer(capacity: 16_000 * 60)
+    private var mixerTask: Task<Void, Never>?
+    private var livePipeline: TrackPipeline?
     private var pipelineTasks: [Task<Void, Never>] = []
 
     private let diarizer = SpeakerKitDiarizer()
@@ -62,15 +66,23 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
     func seed(_ segments: [Segment]) { merger.seed(segments) }
 
     func start(micRing: AudioRingBuffer, systemRing: AudioRingBuffer, startElapsed: TimeInterval) {
-        let mic = TrackPipeline(track: .me, ring: micRing, service: service, merger: merger, startElapsed: startElapsed)
-        let sys = TrackPipeline(track: .remote, ring: systemRing, service: service, merger: merger, startElapsed: startElapsed)
-        micPipeline = mic
-        systemPipeline = sys
-        pipelineTasks = [Task { await mic.run() }, Task { await sys.run() }]
+        // Mix mic + system into one ring (mic-anchored real-time clock), feed ONE pipeline.
+        let mixedRing = self.mixedRing
+        mixerTask = Task.detached {
+            while !Task.isCancelled {
+                if let mixed = Self.mixLive(mic: micRing, system: systemRing), !mixed.isEmpty {
+                    mixed.withUnsafeBufferPointer { mixedRing.write($0) }
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+        let pipe = TrackPipeline(track: .remote, ring: mixedRing, service: service, merger: merger, startElapsed: startElapsed)
+        livePipeline = pipe
+        pipelineTasks = [Task { await pipe.run() }]
         Task {
-            if let kit = await models.prepare(settings.model) {
+            if let kit = await models.prepare(settings.liveModel) {
                 await service.setModel(kit)
-                AppLog.log("Model ready — live transcription active (WhisperKit + SpeakerKit)", category: "record")
+                AppLog.log("Model ready — live transcription active (WhisperKit \(settings.liveModel.rawValue) + SpeakerKit)", category: "record")
             } else {
                 AppLog.log("Model failed to load; capturing audio only (archive preserved, re-processable)", category: "record")
             }
@@ -78,14 +90,30 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
     }
 
     func stop() async {
-        await micPipeline?.stop()
-        await systemPipeline?.stop()
+        mixerTask?.cancel()
+        mixerTask = nil
+        await livePipeline?.stop()
         await service.clear()
         pipelineTasks.forEach { $0.cancel() }
         pipelineTasks = []
-        micPipeline = nil
-        systemPipeline = nil
+        livePipeline = nil
         await diarizer.unload()
+    }
+
+    /// Sum the mic + system rings into one mono buffer, anchored to the mic ring as the
+    /// real-time clock (the mic tap runs continuously at 16 kHz even during silence).
+    nonisolated private static func mixLive(mic: AudioRingBuffer, system: AudioRingBuffer) -> [Float]? {
+        let n = mic.availableToRead
+        guard n > 0 else { return nil }
+        var micBuf = [Float](), sysBuf = [Float]()
+        let rm = mic.read(maxCount: n, into: &micBuf)
+        guard rm > 0 else { return nil }
+        let rs = system.read(maxCount: rm, into: &sysBuf)
+        var out = [Float](repeating: 0, count: rm)
+        for i in 0..<rm { out[i] += micBuf[i] }
+        for i in 0..<min(rs, rm) { out[i] += sysBuf[i] }
+        for i in 0..<rm { out[i] = max(-1, min(1, out[i])) }
+        return out
     }
 
     // MARK: Offline pass

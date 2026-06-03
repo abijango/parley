@@ -333,8 +333,21 @@ struct SettingsView: View {
             Divider()
 
             if settings.transcriptionEngine == .whisperKit {
-                Text("Active model").font(.headline)
-                Text("Bigger models are more accurate but slower and larger. The active model is used for new recordings.")
+                Text("Live model").font(.headline)
+                Picker("", selection: Binding(
+                    get: { settings.liveModel }, set: { settings.liveModel = $0 }
+                )) {
+                    ForEach(WhisperModel.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.menu).frame(maxWidth: 260).labelsHidden()
+                .disabled(recording.isRecording)
+                Text("Used for the fast LIVE transcript during a call. Pick a small/fast model so it keeps real-time — if you see \"OVERLOADED — skipped audio\" in the logs, choose a smaller one. (Speakers are labelled at stop regardless.)")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                Text("Final model (at stop)").font(.headline)
+                Text("Re-transcribes the whole recording when you stop — this is the SAVED transcript. Use the most accurate model you can; it only runs once and isn't real-time. Can be the same as the live model.")
                     .font(.caption).foregroundStyle(.secondary)
 
                 VStack(spacing: 0) {

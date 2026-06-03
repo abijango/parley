@@ -587,10 +587,10 @@ final class RecordingController: ObservableObject {
                 notes.reset()
                 store.refresh()
                 // Auto-run is opt-in; skip it when there's nothing to summarise. For
-                // FluidAudio, DON'T run here — defer until speakers are assigned (after
-                // the offline pass / review) so the summary uses the attributed
-                // transcript. stop()'s Task / finishSpeakerReview trigger it.
-                if settings.autoRunClaude && !segments.isEmpty && !(engine is FluidAudioEngine) {
+                // ANY speaker-capable engine, DON'T run here — defer until speakers are
+                // assigned (after the offline pass / review) so the summary uses the
+                // attributed transcript. stop()'s Task / finishSpeakerReview trigger it.
+                if settings.autoRunClaude && !segments.isEmpty && !(engine is SpeakerCapableEngine) {
                     notes.generate(transcriptURL: result.url, destination: destination,
                                    attendees: attendees, settings: settings)
                 }

@@ -112,6 +112,7 @@ final class AppSettings: ObservableObject {
         // TODO(app-name): key prefix
         static let vaultPath = "macsribe.vaultPath"
         static let model = "macsribe.model"
+        static let liveModel = "macsribe.liveModel"
         static let computeMode = "macsribe.computeMode"
         static let captureMode = "macsribe.captureMode"
         static let autoRunClaude = "macsribe.autoRunClaude"
@@ -184,6 +185,10 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.vaultPath) var vaultPath: String = "\(NSHomeDirectory())/ObsidianVault"
     @AppStorage(Key.captureMode) var captureModeRaw: String = CaptureMode.systemWide.rawValue
     @AppStorage(Key.model) var modelRaw: String = WhisperModel.small.rawValue
+    /// WhisperKit + SpeakerKit only: the model used for the fast LIVE transcript
+    /// (the `model` above is the offline/final transcript at stop). Defaults to a
+    /// small/fast model so live decoding keeps up with real-time.
+    @AppStorage(Key.liveModel) var liveModelRaw: String = WhisperModel.small.rawValue
     @AppStorage(Key.computeMode) var computeModeRaw: String = ComputeMode.gpu.rawValue
     @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.fluidAudio.rawValue
     @AppStorage(Key.parakeetVersion) var parakeetVersionRaw: String = FluidParakeetVersion.v3.rawValue
@@ -211,9 +216,16 @@ final class AppSettings: ObservableObject {
         set { captureModeRaw = newValue.rawValue }
     }
 
+    /// Offline / final transcript model (also used by recovery + FluidAudio-era preload).
     var model: WhisperModel {
         get { WhisperModel(rawValue: modelRaw) ?? .small }
         set { modelRaw = newValue.rawValue }
+    }
+
+    /// Live-display model for the WhisperKit + SpeakerKit engine (fast).
+    var liveModel: WhisperModel {
+        get { WhisperModel(rawValue: liveModelRaw) ?? .small }
+        set { liveModelRaw = newValue.rawValue }
     }
 
     var computeMode: ComputeMode {
