@@ -151,6 +151,13 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
         rederive()
         publish()
 
+        // The offline transcribe loaded the heavier `model`; swap the fast live model
+        // back in (background, non-blocking) so the NEXT recording starts instantly
+        // instead of reloading the small model on demand.
+        if settings.liveModel != settings.model {
+            Task { [models, settings] in _ = await models.prepare(settings.liveModel) }
+        }
+
         let elapsed = Date().timeIntervalSince(started)
         let n = callSpeakerIds().count
         let suffix = offlineWords.isEmpty ? " · transcript unchanged (ASR pass empty)" : ""
