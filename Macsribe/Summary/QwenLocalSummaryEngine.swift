@@ -31,7 +31,7 @@ final class QwenLocalSummaryEngine: SummaryEngine {
         do {
             let session = ChatSession(container)
             let out = try await session.respond(to: prompt)
-            let text = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = Self.stripReasoning(out)
             guard !text.isEmpty else { throw SummaryError.generationFailed("Local model produced no output.") }
             return text
         } catch let e as SummaryError {
@@ -39,5 +39,22 @@ final class QwenLocalSummaryEngine: SummaryEngine {
         } catch {
             throw SummaryError.generationFailed(error.localizedDescription)
         }
+    }
+
+    /// Qwen3 is a reasoning model: it emits a `<think>…</think>` block before the answer.
+    /// Keep reasoning ON (better quality) but drop the block from the displayed note.
+    /// Handles a normal block, an unclosed `<think>`, and a stray closing `</think>`.
+    static func stripReasoning(_ text: String) -> String {
+        var s = text
+        if let start = s.range(of: "<think>") {
+            if let end = s.range(of: "</think>", range: start.upperBound..<s.endIndex) {
+                s.removeSubrange(start.lowerBound..<end.upperBound)
+            } else {
+                s.removeSubrange(start.lowerBound..<s.endIndex)   // unclosed → drop the rest
+            }
+        } else if let end = s.range(of: "</think>") {
+            s.removeSubrange(s.startIndex..<end.upperBound)        // closing tag only
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
