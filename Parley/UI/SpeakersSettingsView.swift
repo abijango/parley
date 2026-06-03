@@ -17,67 +17,63 @@ struct SpeakersSettingsView: View {
     @State private var reenrolling = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Saved speakers").font(.headline)
-            Text("Voiceprints used to recognise people across calls. Stored encrypted on this Mac (key in the Keychain).")
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        Form {
+            Section("Saved speakers") {
+                Text("Voiceprints used to recognise people across calls. Stored encrypted on this Mac (key in the Keychain).")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-            if store.voiceprints.isEmpty {
-                Text("No saved speakers yet. Name a speaker after a FluidAudio recording to remember their voice.")
-                    .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(store.voiceprints) { vp in
-                            row(vp)
-                            Divider()
-                        }
+                if store.voiceprints.isEmpty {
+                    Text("No saved speakers yet. Name a speaker after a FluidAudio recording to remember their voice.")
+                        .font(Theme.Typography.secondary).foregroundStyle(.secondary)
+                        .padding(.vertical, Theme.Spacing.small)
+                } else {
+                    ForEach(store.voiceprints) { vp in
+                        row(vp)
                     }
                 }
-                .frame(maxHeight: 220)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
             }
 
             if !store.voiceprints.isEmpty {
-                Divider()
                 reEnrollSection
             }
 
-            Divider()
-            Text("Backup & transfer").font(.headline)
-            Text("Export to a file you can back up or move to another Mac. Add a passphrase to encrypt the export; leave it empty for plain (inspectable) JSON.")
-                .font(.caption2).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                SecureField("Export passphrase (optional)", text: $exportPassphrase).frame(width: 230)
-                Button("Export…") { exportStore() }.disabled(store.voiceprints.isEmpty)
+            Section("Backup & transfer") {
+                Text("Export to a file you can back up or move to another Mac. Add a passphrase to encrypt the export; leave it empty for plain (inspectable) JSON.")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    SecureField("Export passphrase (optional)", text: $exportPassphrase).frame(width: 230)
+                    Button("Export…") { exportStore() }.disabled(store.voiceprints.isEmpty)
+                }
+                HStack {
+                    SecureField("Import passphrase (if encrypted)", text: $importPassphrase).frame(width: 230)
+                    Button("Import…") { importStore() }
+                }
+                if let status {
+                    Text(status)
+                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                }
             }
-            HStack {
-                SecureField("Import passphrase (if encrypted)", text: $importPassphrase).frame(width: 230)
-                Button("Import…") { importStore() }
-            }
-            if let status {
-                Text(status).font(.caption2).foregroundStyle(.secondary)
-            }
-            Spacer()
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .formStyle(.grouped)
         .onDisappear { player.stop() }
         .sheet(isPresented: Binding(get: { renamingID != nil }, set: { if !$0 { renamingID = nil } })) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Rename speaker").font(.headline)
+            VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+                Text("Rename speaker").font(Theme.Typography.sheetTitle)
                 TextField("Name", text: $renameText).frame(width: 240)
                     .onSubmit(commitRename)
                 HStack {
                     Spacer()
                     Button("Cancel") { renamingID = nil }
-                    Button("Save", action: commitRename).keyboardShortcut(.defaultAction)
+                        .glassButton()
+                    Button("Save", action: commitRename)
+                        .glassProminentButton()
+                        .keyboardShortcut(.defaultAction)
                         .disabled(renameText.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-            .padding().frame(width: 300)
+            .padding(Theme.Spacing.large).frame(width: 300)
         }
     }
 
@@ -86,24 +82,25 @@ struct SpeakersSettingsView: View {
     private var reEnrollSection: some View {
         let clipBacked = store.voiceprints.filter { $0.audioSample != nil }.count
         let stale = store.staleVoiceprints.count
-        return VStack(alignment: .leading, spacing: 6) {
-            Text("Re-enrollment").font(.headline)
+        return Section("Re-enrollment") {
             Text("If a FluidAudio update changes the embedding model, saved voiceprints stop matching. Regenerate their vectors from the retained clips — no re-recording needed.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if stale > 0 {
                 Label("\(stale) voiceprint\(stale == 1 ? "" : "s") use an outdated model and won't match until re-enrolled.",
                       systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Severity.warning.color)
             }
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.Spacing.small) {
                 if reenrolling { ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center) }
                 Button(stale > 0 ? "Re-enroll outdated (\(stale))" : "Regenerate from clips (\(clipBacked))") {
                     reEnrollFromClips(staleOnly: stale > 0)
                 }
                 .disabled(reenrolling || clipBacked == 0)
                 if clipBacked == 0 {
-                    Text("No retained clips yet.").font(.caption2).foregroundStyle(.secondary)
+                    Text("No retained clips yet.")
+                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
                 }
             }
         }
@@ -132,7 +129,7 @@ struct SpeakersSettingsView: View {
     }
 
     private func row(_ vp: Voiceprint) -> some View {
-        HStack {
+        HStack(spacing: Theme.Spacing.medium) {
             // Play the retained enrolment clip to confirm this voiceprint is the
             // right person (rename/delete to reassign if it's a mismatch).
             Button { playClip(vp) } label: { Image(systemName: "play.circle") }
@@ -140,21 +137,21 @@ struct SpeakersSettingsView: View {
                 .disabled(vp.audioSample == nil)
                 .help(vp.audioSample == nil ? "No saved clip for this voice" : "Play the saved voice clip")
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(vp.name).font(.body.weight(.medium))
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+                Text(vp.name).font(Theme.Typography.controlLabel)
                 Text("\(vp.sampleCount) sample\(vp.sampleCount == 1 ? "" : "s")"
                      + (vp.audioSample != nil ? " · clip kept" : " · no clip")
                      + " · updated \(vp.updatedAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Rename") { renamingID = vp.id; renameText = vp.name }.font(.caption)
+            Button("Rename") { renamingID = vp.id; renameText = vp.name }
             Button(role: .destructive) { store.delete(vp.id) } label: {
                 Image(systemName: "trash")
             }
             .buttonStyle(.borderless)
         }
-        .padding(.horizontal, 10).padding(.vertical, 7)
+        .padding(.vertical, Theme.Spacing.xxSmall)
     }
 
     private func playClip(_ vp: Voiceprint) {
