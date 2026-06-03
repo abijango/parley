@@ -31,6 +31,9 @@ packages:
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio.git
     from: "0.14.8"          # native Parakeet ASR + diarization + speaker embeddings (Apache-2.0)
+  MLXExamples:
+    url: https://github.com/ml-explore/mlx-swift-examples.git
+    from: "2.29.1"          # MLXLLM + MLXLMCommon: local LLM summaries on the GPU (offline)
 
 targets:
   Macsribe:                 # TODO(app-name)
@@ -46,6 +49,10 @@ targets:
         product: SpeakerKit
       - package: MarkdownUI
       - package: FluidAudio
+      - package: MLXExamples
+        product: MLXLLM
+      - package: MLXExamples
+        product: MLXLMCommon
     info:
       path: Macsribe/App/Info.plist
       properties:

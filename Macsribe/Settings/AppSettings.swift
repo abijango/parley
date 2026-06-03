@@ -137,6 +137,7 @@ final class AppSettings: ObservableObject {
         static let minSpeechToIdentify = "macsribe.minSpeechToIdentify"
         static let liveTranscriptEnabled = "macsribe.liveTranscriptEnabled"
         static let summaryPromptTemplate = "macsribe.summaryPromptTemplate"
+        static let localSummaryModelId = "macsribe.localSummaryModelId"
     }
 
     // MARK: Memory
@@ -284,6 +285,11 @@ final class AppSettings: ObservableObject {
     /// the agentic skill. Tokens substituted at run time: `{{transcript}}`, `{{contacts}}`,
     /// `{{attendees}}`, `{{destination}}`. Editable in the Summary settings + compare view.
     @AppStorage(Key.summaryPromptTemplate) var summaryPromptTemplate: String = AppSettings.defaultSummaryPrompt
+
+    /// HuggingFace repo id of the local MLX model used by the Qwen summary engine (GPU).
+    /// Must be an MLX *text* build. Confirmed-good defaults: `mlx-community/Qwen3-4B-4bit`,
+    /// `mlx-community/Qwen2.5-3B-Instruct-4bit`. Downloaded on first use.
+    @AppStorage(Key.localSummaryModelId) var localSummaryModelId: String = "mlx-community/Qwen3-4B-4bit"
 
     static let defaultSummaryPrompt = """
     You are a meeting-notes assistant. Turn the transcript below into a clean, well-structured \
