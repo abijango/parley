@@ -343,7 +343,11 @@ final class AppSettings: ObservableObject {
     phrasing.
 
     ## Attendees
-    (Markdown table: Name | Role | Company)
+    (Markdown table: Name | Role | Company. List ONLY people who actually participated in \
+    THIS call — i.e. who spoke or were present. People merely mentioned/referenced but NOT on \
+    the call must NOT appear here; capture them in Key Topics instead. If someone was invited \
+    but absent, you may add a row marked "(invited — not present)". When in doubt about whether \
+    someone was present, do not list them as an attendee.)
 
     ## Executive Summary
     (2–3 paragraphs: who met, why, the core need/opportunity, and the outcome / immediate next step.)

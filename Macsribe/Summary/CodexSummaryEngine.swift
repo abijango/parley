@@ -73,14 +73,26 @@ final class CodexSummaryEngine: SummaryEngine {
         }.value
     }
 
-    /// Map common Codex failures to actionable messages.
+    /// Map common Codex failures to actionable messages. Order matters: a usage-limit
+    /// error often co-occurs with a noisy `TokenRefreshFailed`, so check the quota first
+    /// (otherwise we'd wrongly tell the user to re-login).
     private nonisolated static func friendlyError(_ output: String, exit: Int32) -> String {
         let lower = output.lowercased()
-        if lower.contains("not supported when using codex with a chatgpt account") {
+        if lower.contains("usage limit") || lower.contains("upgrade to plus")
+            || lower.contains("rate limit") || lower.contains("quota") {
+            // Surface codex's own "try again at …" line if present.
+            if let line = output.split(separator: "\n").map({ $0.trimmingCharacters(in: .whitespaces) })
+                .last(where: { $0.lowercased().contains("usage limit") }) {
+                return String(line.replacingOccurrences(of: "ERROR: ", with: "").prefix(240))
+            }
+            return "Codex usage limit reached for your plan — try again later or upgrade. (Re-logging in won't help.)"
+        }
+        if lower.contains("not supported when using codex with a chatgpt account")
+            || lower.contains("is not supported") {
             return "Codex rejected the model for your account. Set a supported model in Settings → Summary (e.g. gpt-5.5)."
         }
-        if lower.contains("tokenrefreshfailed") || lower.contains("client id and client secret")
-            || lower.contains("not logged in") || lower.contains("unauthorized") {
+        if lower.contains("not logged in") || lower.contains("run `codex login`")
+            || lower.contains("please run codex login") || lower.contains("unauthorized") {
             return "Codex isn't authenticated. Run `codex login` in a terminal, then retry."
         }
         // Otherwise surface the last non-empty error line.
