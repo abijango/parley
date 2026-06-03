@@ -102,51 +102,6 @@ enum FluidParakeetVersion: String, CaseIterable, Identifiable {
     }
 }
 
-/// How aggressively the diarizer cuts speaker turns (FluidAudio). Maps to the
-/// segmentation `minSpeechDuration` / `minSilenceGap`. Finer = splits rapid
-/// back-and-forth into separate turns; relaxed = merges short turns.
-enum TurnSensitivity: String, CaseIterable, Identifiable {
-    case relaxed   // library defaults — merges short turns
-    case balanced  // splits typical conversation
-    case fine      // splits rapid back-and-forth
-
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .relaxed: return "Relaxed"
-        case .balanced: return "Balanced"
-        case .fine: return "Fine"
-        }
-    }
-    /// Shortest turn (seconds) the diarizer will keep as its own segment. Kept at /
-    /// near the library default — going much below ~0.5 s yields segments too short
-    /// for a reliable speaker embedding, which degrades clustering (one voice splits
-    /// into several, and quieter speakers get absorbed). The main "rapid turn" lever
-    /// is `minSilenceGap`, which cuts at natural pauses without shrinking segments.
-    var minSpeechDuration: Float {
-        switch self {
-        case .relaxed: return 1.0
-        case .balanced: return 0.75
-        case .fine: return 0.5
-        }
-    }
-    /// Shortest pause (seconds) that splits one turn from the next.
-    var minSilenceGap: Float {
-        switch self {
-        case .relaxed: return 0.5
-        case .balanced: return 0.35
-        case .fine: return 0.2
-        }
-    }
-    var blurb: String {
-        switch self {
-        case .relaxed: return "Merges short turns. Best for monologues / one main speaker."
-        case .balanced: return "Splits typical conversation. Good default."
-        case .fine: return "Splits rapid back-and-forth into separate turns. Use for fast interviews."
-        }
-    }
-}
-
 /// App-wide settings persisted via UserDefaults (`@AppStorage`).
 /// TODO(app-name): the AppStorage keys are namespaced with a literal prefix below.
 @MainActor
@@ -178,8 +133,6 @@ final class AppSettings: ObservableObject {
         static let diarizationThreshold = "macsribe.diarizationThreshold"
         static let identificationThreshold = "macsribe.identificationThreshold"
         static let offlineAsrRepass = "macsribe.offlineAsrRepass"
-        static let expectedSpeakerCount = "macsribe.expectedSpeakerCount"
-        static let turnSensitivity = "macsribe.turnSensitivity"
         static let minSpeechToIdentify = "macsribe.minSpeechToIdentify"
     }
 
@@ -246,10 +199,6 @@ final class AppSettings: ObservableObject {
     /// batch Parakeet pass (higher accuracy than the streaming chunks) and rewrite
     /// the saved transcript. Off = keep the live streaming transcript.
     @AppStorage(Key.offlineAsrRepass) var offlineAsrRepass: Bool = true
-    /// FluidAudio only: 0 = auto-detect speaker count; N > 0 = force exactly N
-    /// speakers in the offline pass (merges over-split clusters down to N).
-    @AppStorage(Key.expectedSpeakerCount) var expectedSpeakerCount: Int = 0
-    @AppStorage(Key.turnSensitivity) var turnSensitivityRaw: String = TurnSensitivity.balanced.rawValue
     /// Seconds of clean, quality-gated speech before a voice is auto-identified/named.
     @AppStorage(Key.minSpeechToIdentify) var minSpeechToIdentify: Double = 5
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
@@ -282,12 +231,6 @@ final class AppSettings: ObservableObject {
     var parakeetVersion: FluidParakeetVersion {
         get { FluidParakeetVersion(rawValue: parakeetVersionRaw) ?? .v3 }
         set { parakeetVersionRaw = newValue.rawValue }
-    }
-
-    /// Diarizer turn-cutting sensitivity for the FluidAudio engine.
-    var turnSensitivity: TurnSensitivity {
-        get { TurnSensitivity(rawValue: turnSensitivityRaw) ?? .balanced }
-        set { turnSensitivityRaw = newValue.rawValue }
     }
 
     /// Root folders (vault-relative) to scan for filing destinations.

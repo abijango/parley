@@ -70,6 +70,11 @@ final class RecordingController: ObservableObject {
     /// file — the URL is unchanged on a rewrite, so it wouldn't reload otherwise.
     @Published private(set) var transcriptRevision = 0
 
+    /// Auto-run was deferred at stop because the FluidAudio recording still has
+    /// unassigned speakers — finishing the speaker review will trigger it, so the
+    /// summary is generated from the attributed transcript.
+    private var autoRunAfterReview = false
+
     let models = ModelManager()
     let fluidModels = FluidModelManager()
     let voiceprints = VoiceprintStore()
@@ -269,6 +274,7 @@ final class RecordingController: ObservableObject {
         }
         state = .preparing
         offlinePass = .idle
+        autoRunAfterReview = false
         segments = []
         lastResult = nil
         lastTranscriptURL = nil
@@ -507,6 +513,17 @@ final class RecordingController: ObservableObject {
                         speakers: speakers,
                         mixedCaf: self.sessionDirectory?.appendingPathComponent("mixed.caf"))
                 }
+                // Auto-run (if enabled): summarize now when every speaker is already
+                // identified (or none were found); otherwise wait until the user
+                // assigns names in the review, so the summary is correctly attributed.
+                if self.settings.autoRunClaude {
+                    let hasUnnamed = speakers.contains { $0.resolvedName == nil }
+                    if speakers.isEmpty || !hasUnnamed {
+                        self.maybeAutoRunClaude()
+                    } else {
+                        self.autoRunAfterReview = true
+                    }
+                }
             }
         }
         clock = nil
@@ -560,8 +577,11 @@ final class RecordingController: ObservableObject {
                     : "Transcript saved: \(result.url.lastPathComponent)"
                 notes.reset()
                 store.refresh()
-                // Auto-run is opt-in; skip it when there's nothing to summarise.
-                if settings.autoRunClaude && !segments.isEmpty {
+                // Auto-run is opt-in; skip it when there's nothing to summarise. For
+                // FluidAudio, DON'T run here — defer until speakers are assigned (after
+                // the offline pass / review) so the summary uses the attributed
+                // transcript. stop()'s Task / finishSpeakerReview trigger it.
+                if settings.autoRunClaude && !segments.isEmpty && !(engine is FluidAudioEngine) {
                     notes.generate(transcriptURL: result.url, destination: destination,
                                    attendees: attendees, settings: settings)
                 }
@@ -681,6 +701,22 @@ final class RecordingController: ObservableObject {
     func finishSpeakerReview() {
         pendingSpeakerReview = nil
         rewriteLastTranscript(reason: "reviewed speakers")
+        // If auto-run was deferred at stop pending speaker assignment, run it now —
+        // on the freshly-attributed transcript.
+        if autoRunAfterReview {
+            autoRunAfterReview = false
+            maybeAutoRunClaude()
+        }
+    }
+
+    /// Start the AI note generation for the just-saved recording, if auto-run is on
+    /// and a summary isn't already running. Used for the deferred (attributed)
+    /// auto-run path; reads the current transcript so it reflects assigned speakers.
+    private func maybeAutoRunClaude() {
+        guard settings.autoRunClaude, !notes.isRunning, let url = lastTranscriptURL else { return }
+        guard !(engine?.finalTimeline() ?? segments).isEmpty else { return }
+        notes.generate(transcriptURL: url, destination: destinationPath,
+                       attendees: attendees, settings: settings)
     }
 
     /// Rewrite the saved transcript from the engine's current (post-offline-pass)

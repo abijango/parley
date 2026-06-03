@@ -153,6 +153,83 @@ do {
     } else {
         line("\n[ID demo] skipped — no speaker has ≥2 quality-gated segments")
     }
+
+    // ───── Two-pass short-interjection experiment (#3) ─────
+    // Pass A (above, minSpeechDuration 1.0) gives reliable speaker centroids.
+    // Pass B uses a LOW minSpeechDuration to catch short turns the default drops,
+    // then RE-LABELS each fine segment by matching its embedding to Pass A's
+    // centroids (ignoring Pass B's own clustering, which over-splits at low values).
+    // Goal: extra short turns attributed to the right existing speaker.
+    func l2b(_ v: [Float]) -> [Float] { let n = v.reduce(Float(0)) { $0 + $1*$1 }.squareRoot(); return n > 0 ? v.map { $0/n } : v }
+    var anchors: [String: [Float]] = [:]
+    var anchorAcc: [String: [[Float]]] = [:]
+    for seg in result.segments where seg.qualityScore >= 0.5 && !seg.embedding.isEmpty {
+        anchorAcc[seg.speakerId, default: []].append(seg.embedding)
+    }
+    for (spk, embs) in anchorAcc {
+        var acc = [Float](repeating: 0, count: embs[0].count)
+        for v in embs { for i in v.indices { acc[i] += v[i] } }
+        anchors[spk] = l2b(acc.map { $0 / Float(embs.count) })
+    }
+    var cfgB = DiarizerConfig()
+    cfgB.clusteringThreshold = threshold
+    cfgB.minSpeechDuration = 0.3
+    cfgB.minSilenceGap = 0.2
+    let diarB = DiarizerManager(config: cfgB)
+    diarB.initialize(models: diarModels)
+    let resB = try diarB.performCompleteDiarization(samples, sampleRate: 16000)
+    line("\n[TWO-PASS #3] Pass A speakers: \(anchors.keys.sorted()); Pass B fine segments: \(resB.segments.count)")
+    var relabeled: [(spk: String, start: Double, end: Double)] = []
+    for seg in resB.segments {
+        var bestSpk = seg.speakerId; var bestSim = -Float.greatestFiniteMagnitude
+        if !seg.embedding.isEmpty {
+            for (spk, c) in anchors { let s = cosine(seg.embedding, c); if s > bestSim { bestSim = s; bestSpk = spk } }
+        }
+        relabeled.append((bestSpk, Double(seg.startTimeSeconds), Double(seg.endTimeSeconds)))
+    }
+    // GATED relabel: accept the centroid match only when confident (cos ≥ 0.45);
+    // otherwise fall back to Pass A's label at that time (temporal). Build the merged
+    // timeline and run diarization-first on it.
+    let acceptCos: Float = 0.45
+    func passASpeakerAt(_ t: Double) -> String {
+        for s in diarSegs where t >= s.start && t <= s.end { return s.spk }
+        var best: (spk: String, d: Double)?
+        for s in diarSegs { let d = Swift.min(abs(t - s.start), abs(t - s.end)); if d < (best?.d ?? .infinity) { best = (s.spk, d) } }
+        return best?.spk ?? "?"
+    }
+    var twoPass: [(spk: String, start: Double, end: Double)] = []
+    var accepted = 0
+    for seg in resB.segments {
+        let mid = (Double(seg.startTimeSeconds) + Double(seg.endTimeSeconds)) / 2
+        var bestSpk = ""; var bestSim = -Float.greatestFiniteMagnitude
+        if !seg.embedding.isEmpty { for (spk, c) in anchors { let s = cosine(seg.embedding, c); if s > bestSim { bestSim = s; bestSpk = spk } } }
+        let spk = (bestSim >= acceptCos) ? bestSpk : passASpeakerAt(mid)
+        if bestSim >= acceptCos { accepted += 1 }
+        twoPass.append((spk, Double(seg.startTimeSeconds), Double(seg.endTimeSeconds)))
+    }
+    line("  gated relabel: \(accepted)/\(resB.segments.count) confident (cos≥\(acceptCos)); rest fell back to temporal")
+    // diarization-first over the two-pass timeline
+    func twoPassSpeakerAt(_ t: Double) -> String {
+        for s in twoPass where t >= s.start && t <= s.end { return s.spk }
+        var best: (spk: String, d: Double)?
+        for s in twoPass { let d = Swift.min(abs(t - s.start), abs(t - s.end)); if d < (best?.d ?? .infinity) { best = (s.spk, d) } }
+        return best?.spk ?? "?"
+    }
+    var wg: [[(text: String, start: Double, end: Double)]] = []
+    for t in asrTokens { if wg.isEmpty || t.text.hasPrefix("\u{2581}") || t.text.hasPrefix(" ") { wg.append([t]) } else { wg[wg.count-1].append(t) } }
+    struct L2 { var spk: String; var start: Double; var end: Double; var text: String }
+    var l2lines: [L2] = []
+    for w in wg {
+        let spk = twoPassSpeakerAt((w.first!.start + w.last!.end) / 2)
+        let wt = w.map(\.text).joined()
+        if var last = l2lines.last, last.spk == spk { last.end = w.last!.end; last.text += wt; l2lines[l2lines.count-1] = last }
+        else { l2lines.append(L2(spk: spk, start: w.first!.start, end: w.last!.end, text: wt)) }
+    }
+    line("  [TWO-PASS diarization-first] \(l2lines.count) lines:")
+    for l in l2lines {
+        let txt = l.text.replacingOccurrences(of: "\u{2581}", with: " ").trimmingCharacters(in: .whitespaces)
+        line(String(format: "    Speaker %@  [%.1f–%.1fs]  %@", l.spk, l.start, l.end, String(txt.prefix(64))))
+    }
 } catch {
     FileHandle.standardError.write(Data("  DIARIZATION FAILED: \(error)\n".utf8))
     exit(3)
