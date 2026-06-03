@@ -20,6 +20,7 @@ final class SummarizerManager: ObservableObject {
 
     private var container: ModelContainer?
     private var loadingTask: Task<ModelContainer?, Never>?
+    private let downloader = HFModelDownloader()
 
     var isReady: Bool { if case .ready = status { return true }; return false }
     var failureReason: String? { if case .failed(let m) = status { return m }; return nil }
@@ -42,14 +43,18 @@ final class SummarizerManager: ObservableObject {
         status = .downloading(0)
         AppLog.log("Summary(Qwen): loading \(modelId)…", category: "summary")
         do {
-            let loaded = try await loadModelContainer(id: modelId) { [weak self] progress in
-                let fraction = progress.fractionCompleted
+            // Download the files ourselves (bypassing the Hub's flaky Xet client), then load
+            // MLX from the local directory so it never re-fetches via Xet.
+            let dir = AppPaths.summaryModelsDirectory.appendingPathComponent(modelId, isDirectory: true)
+            let resolved = try await downloader.ensureModel(id: modelId, in: dir) { [weak self] fraction in
                 Task { @MainActor in
                     guard let self else { return }
                     if fraction < 1 { self.status = .downloading(fraction) }
-                    else if case .downloading = self.status { self.status = .loading }
                 }
             }
+            status = .loading
+            AppLog.log("Summary(Qwen): files ready, loading weights from \(resolved.lastPathComponent)…", category: "summary")
+            let loaded = try await loadModelContainer(configuration: ModelConfiguration(directory: resolved))
             container = loaded
             loadedModelId = modelId
             status = .ready(modelId)

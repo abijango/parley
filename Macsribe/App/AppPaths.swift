@@ -17,6 +17,11 @@ enum AppPaths {
         supportDirectory.appendingPathComponent("Recordings", isDirectory: true)
     }
 
+    /// Local MLX summary models (downloaded directly, bypassing the Hub's Xet client).
+    static var summaryModelsDirectory: URL {
+        supportDirectory.appendingPathComponent("SummaryModels", isDirectory: true)
+    }
+
     /// Persistent speaker voiceprints (biometric data — kept outside the vault).
     static var speakersDirectory: URL {
         supportDirectory.appendingPathComponent("Speakers", isDirectory: true)
