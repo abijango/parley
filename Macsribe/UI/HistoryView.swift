@@ -10,7 +10,7 @@ struct HistoryView: View {
     @EnvironmentObject private var vault: VaultDirectory
     @ObservedObject private var settings = AppSettings.shared
     @State private var selection: TranscriptItem.ID?
-    @State private var filter: HistoryFilter = .all
+    @State private var filter: HistoryFilter = .needsSpeakers
     /// The item currently being processed/re-processed (drives the streaming bar).
     @State private var runningItemID: TranscriptItem.ID?
 
@@ -39,18 +39,18 @@ struct HistoryView: View {
     @State private var compareItem: TranscriptItem?
 
     var body: some View {
-        // A plain HStack (not a nested HSplitView) so this view doesn't add a second
-        // splitter inside the window's NavigationSplitView detail — that nesting broke
-        // the layout on narrow displays. Fixed-width list, detail fills the rest.
-        HStack(spacing: 0) {
+        // Resizable list/detail split (the window sidebar is a plain HStack, not a
+        // NavigationSplitView, so a single HSplitView here is safe and gives a draggable
+        // divider). The list has a sensible min/ideal/max; the detail fills the rest.
+        HSplitView {
             list
-                .frame(width: 300)
-            Divider()
+                .frame(minWidth: 220, idealWidth: 300, maxWidth: 480)
+                .frame(maxHeight: .infinity)
             detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { store.refresh() }
+        .onAppear { store.refresh(); store.startWatching() }
         .onChange(of: recording.notes.pendingDiff) { presentDiffIfReady() }
         // Assign-speakers review for an on-demand "Detect speakers" run from History.
         .sheet(isPresented: Binding(

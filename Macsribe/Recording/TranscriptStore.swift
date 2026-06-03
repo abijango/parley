@@ -41,7 +41,49 @@ final class TranscriptStore: ObservableObject {
                 ? $0.meta.date > $1.meta.date
                 : $0.url.lastPathComponent > $1.url.lastPathComponent
         }
-        items = found
+        if found != items { items = found }   // avoid needless republish when nothing changed
+    }
+
+    // MARK: Live folder watching
+
+    private var watchers: [DispatchSourceFileSystemObject] = []
+    private var refreshTask: Task<Void, Never>?
+
+    /// Starts watching the `Unprocessed/` and `Processed/` folders so the History tab
+    /// reflects external changes (files added, moved, processed, or deleted) live, not
+    /// just at app launch. Idempotent.
+    func startWatching() {
+        guard watchers.isEmpty else { return }
+        AppPaths.ensureVaultFolders()
+        for url in [AppPaths.unprocessedURL, AppPaths.processedURL] {
+            let fd = open(url.path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+            source.setEventHandler { [weak self] in
+                Task { @MainActor in self?.scheduleRefresh() }
+            }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            watchers.append(source)
+        }
+    }
+
+    func stopWatching() {
+        watchers.forEach { $0.cancel() }
+        watchers.removeAll()
+        refreshTask?.cancel()
+    }
+
+    /// Debounced refresh — folder events can arrive in bursts (e.g. a move writes both
+    /// directories); coalesce them into one rescan.
+    private func scheduleRefresh() {
+        refreshTask?.cancel()
+        refreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            self?.refresh()
+        }
     }
 
     /// Moves a transcript into `Processed/` and stamps its frontmatter.

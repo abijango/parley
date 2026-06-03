@@ -7,6 +7,7 @@ struct MainWindowView: View {
     @EnvironmentObject private var recording: RecordingController
     @State private var selection: SidebarSection? = .record
     @State private var showingRecovery = false
+    @AppStorage("macsribe.sidebarCollapsed") private var sidebarCollapsed = false
 
     enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
         case record = "Record", history = "History"
@@ -54,31 +55,70 @@ struct MainWindowView: View {
         }
     }
 
-    /// Fixed-width navigation sidebar (Record / History).
+    /// Navigation sidebar (Record / History) with Settings pinned at the bottom.
+    /// Collapses to a thin icon-only rail.
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(SidebarSection.allCases) { section in
-                let isSelected = (selection ?? .record) == section
-                Button {
-                    selection = section
-                } label: {
-                    Label(section.rawValue, systemImage: section.symbol)
-                        .font(.body)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 8).padding(.vertical, 6)
-                        .background(isSelected ? Color.accentColor.opacity(0.18) : .clear,
-                                    in: RoundedRectangle(cornerRadius: 6))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(isSelected ? Color.accentColor : .primary)
+            // Collapse / expand toggle.
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { sidebarCollapsed.toggle() }
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.body)
+                    .frame(maxWidth: .infinity, alignment: sidebarCollapsed ? .center : .trailing)
+                    .padding(.horizontal, 8).padding(.vertical, 6)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
+
+            ForEach(SidebarSection.allCases) { section in
+                navButton(section)
+            }
+
             Spacer()
+
+            // Settings pinned to the bottom-left (opens the Settings window).
+            SettingsLink {
+                navRow(symbol: "gearshape", title: "Settings", isSelected: false)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .help(sidebarCollapsed ? "Settings" : "")
         }
         .padding(8)
-        .frame(width: 170)
+        .frame(width: sidebarCollapsed ? 52 : 170)
         .frame(maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func navButton(_ section: SidebarSection) -> some View {
+        let isSelected = (selection ?? .record) == section
+        return Button {
+            selection = section
+        } label: {
+            navRow(symbol: section.symbol, title: section.rawValue, isSelected: isSelected)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? Color.accentColor : .primary)
+        .help(sidebarCollapsed ? section.rawValue : "")
+    }
+
+    /// A sidebar row: icon-only when collapsed, icon + label when expanded.
+    @ViewBuilder private func navRow(symbol: String, title: String, isSelected: Bool) -> some View {
+        Group {
+            if sidebarCollapsed {
+                Image(systemName: symbol).frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                Label(title, systemImage: symbol).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .font(.body)
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(isSelected ? Color.accentColor.opacity(0.18) : .clear,
+                    in: RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
     }
 }
 
