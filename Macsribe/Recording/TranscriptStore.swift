@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AppKit
 
 /// One transcript in the app-owned vault folder, surfaced to the History tab.
 struct TranscriptItem: Identifiable, Equatable {
@@ -48,25 +49,49 @@ final class TranscriptStore: ObservableObject {
 
     private var watchers: [DispatchSourceFileSystemObject] = []
     private var refreshTask: Task<Void, Never>?
+    private var didStartWatching = false
 
-    /// Starts watching the `Unprocessed/` and `Processed/` folders so the History tab
-    /// reflects external changes (files added, moved, processed, or deleted) live, not
-    /// just at app launch. Idempotent.
+    /// Keeps the History list in sync with the filesystem via two mechanisms:
+    ///   1. `DispatchSource` vnode watchers on `Unprocessed/` + `Processed/` — catch live,
+    ///      in-app changes.
+    ///   2. An app-became-active observer — catches changes made by other tools (Finder,
+    ///      the skill, iCloud sync) that vnode can miss, when the user returns to the app.
+    /// Idempotent. Also re-arms watchers if the folders are recreated.
     func startWatching() {
-        guard watchers.isEmpty else { return }
+        guard !didStartWatching else { return }
+        didStartWatching = true
+
+        // (2) Rescan whenever Macsribe regains focus — reliable for external/Finder adds.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.scheduleRefresh() }
+        }
+
+        armWatchers()
+    }
+
+    /// (1) (Re)create the vnode watchers on the two folders.
+    private func armWatchers() {
+        watchers.forEach { $0.cancel() }
+        watchers.removeAll()
         AppPaths.ensureVaultFolders()
         for url in [AppPaths.unprocessedURL, AppPaths.processedURL] {
             let fd = open(url.path, O_EVTONLY)
-            guard fd >= 0 else { continue }
+            guard fd >= 0 else {
+                AppLog.log("History: couldn't watch \(url.lastPathComponent)", category: "history")
+                continue
+            }
             let source = DispatchSource.makeFileSystemObjectSource(
                 fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
             source.setEventHandler { [weak self] in
-                Task { @MainActor in self?.scheduleRefresh() }
+                AppLog.log("History: folder change detected", category: "history")
+                MainActor.assumeIsolated { self?.scheduleRefresh() }
             }
             source.setCancelHandler { close(fd) }
             source.resume()
             watchers.append(source)
         }
+        AppLog.log("History: watching \(watchers.count) folder(s) + app-active refresh — \(AppPaths.unprocessedURL.path)", category: "history")
     }
 
     func stopWatching() {
@@ -136,9 +161,10 @@ final class TranscriptStore: ObservableObject {
 
         var result: [TranscriptItem] = []
         for url in entries {
-            // Skip the staging dir, hidden files, non-markdown.
+            // Skip hidden files; accept transcript files (.md written by the app, and
+            // .txt transcripts dropped in manually — the skill processes both).
             if url.lastPathComponent.hasPrefix(".") { continue }
-            guard url.pathExtension.lowercased() == "md" else { continue }
+            guard ["md", "txt"].contains(url.pathExtension.lowercased()) else { continue }
             let text = try? String(contentsOf: url, encoding: .utf8)
             var meta = (text.flatMap { TranscriptWriter.parseFrontmatter(text: $0) })
                 ?? fallbackMeta(url, processed: processed)
