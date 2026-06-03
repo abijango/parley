@@ -6,7 +6,7 @@ import Foundation
 /// Approve step). Distinct from the production `NotesGenerator` skill path, which stays.
 enum SummaryEngineKind: String, CaseIterable, Identifiable, Equatable {
     case claude            // raw `claude -p` with the shared prompt (no skill/tools)
-    case appleFoundation   // Apple Foundation Models, on the ANE (macOS 26+)
+    case codex             // `codex exec` with the shared prompt (whatever model codex is configured for)
     case qwenLocal         // local Qwen via MLX, on the GPU
 
     var id: String { rawValue }
@@ -15,7 +15,7 @@ enum SummaryEngineKind: String, CaseIterable, Identifiable, Equatable {
     var title: String {
         switch self {
         case .claude: return "Claude"
-        case .appleFoundation: return "Apple"
+        case .codex: return "Codex"
         case .qwenLocal: return "Qwen"
         }
     }
@@ -24,14 +24,14 @@ enum SummaryEngineKind: String, CaseIterable, Identifiable, Equatable {
     var blurb: String {
         switch self {
         case .claude: return "Anthropic Claude via the CLI — same prompt, no skill or tools."
-        case .appleFoundation: return "Apple's on-device model on the Neural Engine (needs Apple Intelligence enabled)."
+        case .codex: return "OpenAI Codex via `codex exec` — uses whatever model Codex is configured for."
         case .qwenLocal: return "Local Qwen running on the GPU via MLX — fully offline."
         }
     }
 }
 
 /// Whether an engine can run right now, with a human-readable reason when it can't
-/// (shown in the compare view / settings — e.g. "enable Apple Intelligence", "download the model").
+/// (shown in the compare view / settings — e.g. "run codex login", "download the model").
 enum SummaryAvailability: Equatable {
     case available
     case unavailable(String)

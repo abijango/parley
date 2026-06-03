@@ -24,7 +24,7 @@ final class SummaryComparison: ObservableObject {
     }
 
     /// All engines, in display order (left-to-right).
-    let allKinds: [SummaryEngineKind] = [.claude, .appleFoundation, .qwenLocal]
+    let allKinds: [SummaryEngineKind] = [.claude, .codex, .qwenLocal]
 
     /// Engines the user has enabled for the comparison (subset of `allKinds`).
     var kinds: [SummaryEngineKind] { allKinds.filter { settings.isSummaryEngineEnabled($0) } }
@@ -43,7 +43,7 @@ final class SummaryComparison: ObservableObject {
     init(settings: AppSettings, summarizer: SummarizerManager) {
         self.settings = settings
         self.summarizer = summarizer
-        self.results = [Result(kind: .claude), Result(kind: .appleFoundation), Result(kind: .qwenLocal)]
+        self.results = [Result(kind: .claude), Result(kind: .codex), Result(kind: .qwenLocal)]
     }
 
     func configure(transcriptURL: URL, title: String, attendees: String, destination: String) {
@@ -112,7 +112,7 @@ final class SummaryComparison: ObservableObject {
     private func engine(_ kind: SummaryEngineKind) -> SummaryEngine {
         switch kind {
         case .claude: return ClaudeSummaryEngine(settings: settings)
-        case .appleFoundation: return AppleFoundationSummaryEngine()
+        case .codex: return CodexSummaryEngine(settings: settings)
         case .qwenLocal: return QwenLocalSummaryEngine(settings: settings, manager: summarizer)
         }
     }

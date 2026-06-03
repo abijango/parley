@@ -138,6 +138,8 @@ final class AppSettings: ObservableObject {
         static let liveTranscriptEnabled = "macsribe.liveTranscriptEnabled"
         static let summaryPromptTemplate = "macsribe.summaryPromptTemplate"
         static let localSummaryModelId = "macsribe.localSummaryModelId"
+        static let codexBinaryPath = "macsribe.codexBinaryPath"
+        static let codexModel = "macsribe.codexModel"
         static let summaryEnginesEnabled = "macsribe.summaryEnginesEnabled"
     }
 
@@ -292,10 +294,16 @@ final class AppSettings: ObservableObject {
     /// `mlx-community/Qwen2.5-3B-Instruct-4bit`. Downloaded on first use.
     @AppStorage(Key.localSummaryModelId) var localSummaryModelId: String = "mlx-community/Qwen3-4B-4bit"
 
+    /// OpenAI Codex CLI used by the Codex summary engine (`codex exec`).
+    @AppStorage(Key.codexBinaryPath) var codexBinaryPath: String = "/opt/homebrew/bin/codex"
+    /// Optional model override passed to `codex exec -m`. Empty = use codex's own config
+    /// (`~/.codex/config.toml`), e.g. the default cloud model.
+    @AppStorage(Key.codexModel) var codexModel: String = ""
+
     /// Which engines participate in the summary comparison (so the user can compare any
     /// subset, e.g. just Qwen vs Claude). Stored as comma-separated `SummaryEngineKind`
     /// raw values; defaults to all three.
-    @AppStorage(Key.summaryEnginesEnabled) var summaryEnginesEnabledRaw: String = "claude,appleFoundation,qwenLocal"
+    @AppStorage(Key.summaryEnginesEnabled) var summaryEnginesEnabledRaw: String = "claude,codex,qwenLocal"
 
     var enabledSummaryEngines: Set<SummaryEngineKind> {
         Set(summaryEnginesEnabledRaw.split(separator: ",").compactMap { SummaryEngineKind(rawValue: String($0)) })
@@ -315,29 +323,56 @@ final class AppSettings: ObservableObject {
     }
 
     static let defaultSummaryPrompt = """
-    You are a meeting-notes assistant. Turn the transcript below into a clean, well-structured \
-    Markdown meeting note.
+    You are a senior analyst writing a thorough, faithful record of a client meeting. Produce a \
+    clean Markdown note from the transcript below.
 
-    Resolve first names and partial names against these known contacts, using their full name, \
-    title, and company where a confident match exists (otherwise keep the name as spoken — never invent details):
+    Speaker mapping: the transcript labels speakers as "Me" (the person recording) or \
+    "Remote"/"Speaker N". Map each to a real attendee using context and the attendee list; never \
+    leave generic labels in the note.
+
+    Resolve names against these known contacts — use full name, title, and company where a \
+    confident match exists; otherwise keep the name as spoken. Never invent contact details:
     {{contacts}}
 
-    Additional attendees the user supplied for this meeting: {{attendees}}
-    Intended filing location (for context only — do not output a path): {{destination}}
+    Attendees supplied: {{attendees}}
+    Filing location (context only, do not output): {{destination}}
 
-    Use EXACTLY these sections, in this order; omit a section only if it would be genuinely empty:
+    Write these sections in order. Be COMPREHENSIVE and SPECIFIC — capture every concrete detail: \
+    named people, companies, clients, products, technologies/platforms, headcounts, monetary \
+    figures, timelines, dates, locations, tenures, and commitments. Prefer specifics over generic \
+    phrasing.
+
     ## Attendees
-    ## Executive Summary
-    ## Key Topics
-    ## Decisions
-    ## Action Items
-    ## Questions & Open Issues
-    ## Next Steps
+    (Markdown table: Name | Role | Company)
 
-    Rules:
-    - Output ONLY the Markdown note — no preamble, no code fences, no closing commentary.
-    - Action items: one bullet each as "**Owner** — task — due/when" when known.
-    - Be faithful to the transcript; do not fabricate decisions, owners, dates, or metrics.
+    ## Executive Summary
+    (2–3 paragraphs: who met, why, the core need/opportunity, and the outcome / immediate next step.)
+
+    ## Key Topics Discussed
+    (Group into themed ### sub-headings. Under each, bullet the specifics — names, numbers, \
+    technologies, named clients, locations.)
+
+    ## Decisions Made
+    (Numbered; only decisions explicitly agreed in the meeting.)
+
+    ## Action Items
+    (Markdown table: Action | Owner | Due / Timeframe | Priority. Only items explicitly stated — \
+    do NOT invent dates.)
+
+    ## Questions & Open Issues
+    (Numbered.)
+
+    ## Key Metrics or Data Points
+    (Bullets: every concrete number, date, headcount, spend, timeline, location, and named client \
+    mentioned.)
+
+    ## Next Steps
+    (Numbered.)
+
+    Strict rules:
+    - Use ONLY information explicitly present in the transcript. Do NOT fabricate decisions, \
+    owners, dates, figures, or metrics. If a section has nothing explicit, write "None recorded."
+    - Output ONLY the Markdown note — no preamble, no code fences, no commentary.
 
     TRANSCRIPT:
     {{transcript}}

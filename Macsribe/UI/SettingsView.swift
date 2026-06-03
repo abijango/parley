@@ -91,8 +91,19 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
-                Text("Apple model (Foundation Models, on the Neural Engine)").font(.subheadline.weight(.semibold))
-                Text("Apple's on-device model — no download, fully offline. Requires macOS 26 with Apple Intelligence enabled in System Settings → Apple Intelligence & Siri.")
+                Text("Codex CLI (cloud or local, per your codex config)").font(.subheadline.weight(.semibold))
+                HStack(spacing: 6) {
+                    Text("Binary").font(.caption).foregroundStyle(.secondary)
+                    TextField("/opt/homebrew/bin/codex", text: $settings.codexBinaryPath)
+                        .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
+                }
+                HStack(spacing: 6) {
+                    Text("Model override").font(.caption).foregroundStyle(.secondary)
+                    TextField("(blank = use ~/.codex/config.toml)", text: $settings.codexModel)
+                        .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: 260)
+                }
+                Text("Runs `codex exec` non-interactively (read-only, ephemeral). Uses whatever model Codex is configured for; set an override only if needed (e.g. gpt-5.5). Requires `codex login` to be authenticated.")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
