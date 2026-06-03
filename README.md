@@ -98,6 +98,42 @@ xcodebuild build -project Macsribe.xcodeproj -scheme Macsribe \
   -destination 'platform=macOS,arch=arm64'
 ```
 
+### Local release (`Tools/localrelease.sh`)
+
+For a day-to-day **installed** build — an optimized Release `.app` in `~/Applications`
+that you actually run between coding sessions — use the helper script instead of a raw
+`xcodebuild`:
+
+```bash
+Tools/localrelease.sh            # regenerate project, build Release, install to ~/Applications
+Tools/localrelease.sh --open     # …and launch it afterwards
+```
+
+It runs `xcodegen generate`, builds the `Macsribe` scheme in **Release**, and `ditto`s the
+product into `~/Applications/Macsribe.app`, replacing the previous copy.
+
+The important part is **signing**: the script mints (once) and reuses a self-signed
+code-signing certificate named **`<PRODUCT_NAME> Local Codesign`** and signs every build
+with it. A *stable* signing identity gives the app a constant **designated requirement**
+(`identifier "com.naufalmir.macsribe" and certificate leaf = …`), which is what macOS keys
+on for:
+
+- **TCC permissions** — mic, system-audio capture, Documents/Desktop folder access
+- **the keychain** — saved grants
+- **the ANE cache** — `~/Library/Caches/<bundleID>/com.apple.e5rt.e5bundlecache`
+
+Xcode's default fallback is *ad-hoc* signing, whose code hash changes on every build, so all
+three are treated as a brand-new app each time — re-prompting for permissions and
+re-specializing the CoreML models on the Neural Engine (the minutes-long `Specializing…`
+step). Signing with the same cert avoids that churn.
+
+> The cert is tied to the app **name** on purpose: rename the app (the `TODO(app-name)`
+> sweep) and a new cert is minted — but the bundle id changes too, so a rename is one clean
+> new identity by design. **The first launch after switching from ad-hoc to the cert
+> re-prompts for permissions once; every rebuild after that keeps them.** This is a *local*
+> identity only — not notarized, so the build runs on this Mac but is Gatekeeper-blocked
+> elsewhere. For public distribution use the archive → export → notarize → staple flow.
+
 ### Opening in Xcode from the command line
 
 `open` hands a path to its default app — `.xcodeproj` / `.xcworkspace` open in Xcode:

@@ -11,9 +11,13 @@ import FoundationModels
 final class AppleFoundationSummaryEngine: SummaryEngine {
     let kind = SummaryEngineKind.appleFoundation
 
-    /// Conservative input budget for the on-device model's context window. The note we
-    /// produce is short; the transcript dominates. ~16k chars ≈ a few thousand tokens.
-    private let maxPromptChars = 16_000
+    /// The on-device model's context window is small (~4096 tokens, shared by input AND
+    /// output). Budget conservatively: cap the prompt to ~8k chars (~2.3–2.7k tokens) and
+    /// bound the response (below) so input+output stays under the window. Long transcripts
+    /// are truncated (with a note) — a fair full-length Apple summary would need
+    /// map-reduce chunking, which is a future enhancement.
+    private let maxPromptChars = 8_000
+    private let maxResponseTokens = 1_000
 
     func availability() async -> SummaryAvailability {
         #if canImport(FoundationModels)
@@ -47,7 +51,8 @@ final class AppleFoundationSummaryEngine: SummaryEngine {
             }
             do {
                 let session = LanguageModelSession()
-                let response = try await session.respond(to: trimmed)
+                let options = GenerationOptions(maximumResponseTokens: maxResponseTokens)
+                let response = try await session.respond(to: trimmed, options: options)
                 let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { throw SummaryError.generationFailed("Apple model produced no output.") }
                 return wasTruncated
