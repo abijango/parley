@@ -67,3 +67,38 @@ extension ButtonStyle where Self == RowButtonStyle {
         RowButtonStyle(isSelected: selected)
     }
 }
+
+/// Hover-aware capsule chip for compact inline affordances (file chips, token-like
+/// pills). Quaternary fill at rest, brightening slightly on hover/press — the
+/// missing hover affordance the audit catalogued on every custom chip.
+struct ChipButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        ChipLabel(configuration: configuration)
+    }
+
+    private struct ChipLabel: View {
+        let configuration: Configuration
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .padding(.horizontal, Theme.Spacing.small)
+                .padding(.vertical, Theme.Spacing.xxSmall + 1)
+                .background(
+                    ZStack {
+                        Capsule().fill(.quaternary.opacity(Theme.Opacity.surface))
+                        Capsule().fill(Color.primary.opacity(
+                            configuration.isPressed ? 0.10 : (hovering ? 0.05 : 0)))
+                    }
+                )
+                .contentShape(Capsule())
+                .onHover { hovering = $0 }
+                .animation(Theme.Motion.quick, value: hovering)
+        }
+    }
+}
+
+extension ButtonStyle where Self == ChipButtonStyle {
+    /// Hover-aware capsule chip. Use `.buttonStyle(.chip)`.
+    static var chip: ChipButtonStyle { ChipButtonStyle() }
+}

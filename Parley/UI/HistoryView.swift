@@ -140,6 +140,8 @@ struct HistoryView: View {
 
     // MARK: List
 
+    /// The list column is navigation chrome (like the window sidebar): it floats
+    /// on material while the selected note — the content — sits at base.
     private var list: some View {
         VStack(spacing: 0) {
             searchBar
@@ -151,36 +153,47 @@ struct HistoryView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .padding(8)
+            .padding(Theme.Spacing.small)
             Divider()
 
             if filteredItems.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: searchQuery.isEmpty ? "clock.arrow.circlepath" : "magnifyingglass")
-                        .font(.system(size: 30)).foregroundStyle(.secondary)
-                    Text(emptyMessage)
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                listEmptyState
             } else {
                 List(filteredItems, selection: $selection) { item in
                     row(item).tag(item.id)
                         .contextMenu { rowMenu(item) }
                 }
                 .listStyle(.inset)
+                .scrollContentBackground(.hidden)
                 .onDeleteCommand { if !selectedItems.isEmpty { beginDelete(selectedItems) } }
             }
         }
+        .chromeSurface()
     }
 
-    private var emptyMessage: String {
-        if !searchQuery.isEmpty { return "No meetings match “\(searchQuery)”." }
-        return filter == .all ? "No transcripts yet." : "No \(filter.rawValue.lowercased()) transcripts."
+    @ViewBuilder private var listEmptyState: some View {
+        if !searchQuery.isEmpty {
+            EmptyStateView(
+                icon: "magnifyingglass",
+                title: "No results",
+                detail: "No meetings match “\(searchQuery)”.")
+        } else if filter == .all {
+            EmptyStateView(
+                icon: "clock.arrow.circlepath",
+                title: "No transcripts yet",
+                detail: "Finish a recording and it will appear here.")
+        } else {
+            EmptyStateView(
+                icon: "clock.arrow.circlepath",
+                title: "Nothing here",
+                detail: "No \(filter.rawValue.lowercased()) transcripts.")
+        }
     }
 
     private var searchBar: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: Theme.Spacing.small) {
+            Image(systemName: "magnifyingglass")
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
             TextField("Search meetings", text: $searchQuery)
                 .textFieldStyle(.plain)
             if !searchQuery.isEmpty {
@@ -195,7 +208,7 @@ struct HistoryView: View {
             .toggleStyle(.button).controlSize(.small)
             .help("Also search inside transcript text (slower)")
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
+        .padding(.horizontal, Theme.Spacing.medium).padding(.vertical, Theme.Spacing.small)
     }
 
     /// Per-row context menu — operates on the right-clicked item (selecting it first if it
@@ -227,8 +240,8 @@ struct HistoryView: View {
     }
 
     private func row(_ item: TranscriptItem) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+            HStack(spacing: Theme.Spacing.small) {
                 Text(item.meta.title)
                     .font(.headline)
                     .lineLimit(1)
@@ -238,36 +251,35 @@ struct HistoryView: View {
                         .help("Summarizing in the background…")
                 } else if item.hasUnnamedSpeakers {
                     Image(systemName: "person.crop.circle.badge.exclamationmark")
-                        .foregroundStyle(.orange).font(.caption)
+                        .foregroundStyle(Theme.Severity.warning.color)
+                        .font(Theme.Typography.caption)
                         .help("Speakers not assigned — needs review")
                 }
                 statusBadge(item)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: Theme.Spacing.small) {
                 Image(systemName: item.meta.type == "manual" ? "pencil" : "mic")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
                 Text(Self.dateString(item.meta.date))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
             }
             if !item.meta.attendees.isEmpty {
                 Text(item.meta.attendees.joined(separator: ", "))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
                     .lineLimit(1)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.Spacing.xxSmall)
     }
 
+    /// Review → info (accent), Processed → success, Unprocessed → warning. Folds the
+    /// ad-hoc `Color.blue` badge into the one-accent rule.
     private func statusBadge(_ item: TranscriptItem) -> some View {
-        let (label, color): (String, Color) =
-            item.summaryReadyURL != nil ? ("Review", .blue)
-            : item.isProcessed ? ("Processed", .green)
-            : ("Unprocessed", .orange)
-        return Text(label)
-            .font(.caption2).bold()
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(color.opacity(0.18), in: Capsule())
-            .foregroundStyle(color)
+        let (label, severity): (String, Theme.Severity) =
+            item.summaryReadyURL != nil ? ("Review", .info)
+            : item.isProcessed ? ("Processed", .success)
+            : ("Unprocessed", .warning)
+        return StatusBadge(label, severity: severity)
     }
 
     // MARK: Detail
@@ -288,13 +300,10 @@ struct HistoryView: View {
                 }
             }
         } else {
-            VStack(spacing: 8) {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .font(.system(size: 34)).foregroundStyle(.secondary)
-                Text("Select a transcript to preview it.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            EmptyStateView(
+                icon: "doc.text.magnifyingglass",
+                title: "Nothing selected",
+                detail: "Select a transcript to preview it.")
         }
     }
 
@@ -302,46 +311,52 @@ struct HistoryView: View {
     private var bulkPanel: some View {
         let items = selectedItems
         let bytes = items.reduce(Int64(0)) { $0 + store.links(for: $1).audioBytes }
-        return VStack(spacing: 16) {
-            Image(systemName: "checklist").font(.system(size: 34)).foregroundStyle(.secondary)
-            Text("\(items.count) meetings selected").font(.title3).bold()
+        return VStack(spacing: Theme.Spacing.large) {
+            Image(systemName: "checklist")
+                .font(.system(size: 30, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Theme.Palette.accent)
+                .frame(width: 76, height: 76)
+                .background(Theme.Palette.accent.opacity(Theme.Opacity.tintFill), in: Circle())
+            Text("\(items.count) meetings selected").font(Theme.Typography.sectionHeader)
             if bytes > 0 {
                 Text("\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) of linked audio")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
             }
-            HStack(spacing: 12) {
+            HStack(spacing: Theme.Spacing.medium) {
                 Button { beginRefile(items) } label: { Label("Refile \(items.count)…", systemImage: "tray.and.arrow.down") }
+                    .glassButton()
                 Button { items.forEach { summarize($0) } } label: { Label("Summarize \(items.count)", systemImage: "sparkles") }
+                    .glassProminentButton()
                     .disabled(busy)
                 Button(role: .destructive) { beginDelete(items) } label: { Label("Delete \(items.count)…", systemImage: "trash") }
+                    .glassButton()
             }
-            Text("Actions apply to all selected meetings.").font(.caption).foregroundStyle(.secondary)
+            Text("Actions apply to all selected meetings.")
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        .padding(Theme.Spacing.xLarge)
     }
 
     /// Live "summarizing…/failed" bar for a transcript without a staged summary yet.
     @ViewBuilder private func summaryStatusBar(_ item: TranscriptItem) -> some View {
         switch summaryService.state(for: item) {
         case .pending:
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.Spacing.small) {
                 ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center)
-                Text("Summarizing in the background…").font(.caption).foregroundStyle(.secondary)
+                Text("Summarizing in the background…")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 Spacer()
             }
-            .padding(.horizontal, 16).padding(.vertical, 6)
-            .background(.quaternary.opacity(0.35))
+            .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
+            .background(.quaternary.opacity(Theme.Opacity.surface))
             Divider()
         case .failed(let reason):
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                Text(reason).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                Spacer()
-                Button("Retry") { summarize(item) }.font(.caption)
-            }
-            .padding(.horizontal, 16).padding(.vertical, 6)
-            .background(.orange.opacity(0.10))
+            StatusBanner(.warning, reason,
+                         actionLabel: "Retry", action: { summarize(item) })
+                .padding(.horizontal, Theme.Spacing.small)
+                .padding(.vertical, Theme.Spacing.xSmall)
             Divider()
         case .none:
             EmptyView()
@@ -352,35 +367,40 @@ struct HistoryView: View {
     /// rendered note, with Commit / Discard / Regenerate.
     @ViewBuilder private func reviewPane(_ item: TranscriptItem, staged: URL) -> some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.small) {
                 Text("Summary ready — review, set where it's filed, then commit to your vault.")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack(spacing: 8) {
-                    Text("Will be filed to:").font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                HStack(spacing: Theme.Spacing.small) {
+                    Text("Will be filed to:")
+                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
                     DestinationField(path: $reviewDestination,
                                      destinations: vault.destinations,
                                      firstRoot: settings.scanRoots.first ?? "Internal")
                 }
             }
-            .padding(.horizontal, 16).padding(.vertical, 8)
+            .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
+            .chromeSurface()
             Divider()
             TranscriptPreviewView(url: staged, reloadToken: recording.transcriptRevision)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
-            HStack(spacing: 10) {
+            HStack(spacing: Theme.Spacing.medium) {
                 Button(role: .destructive) { summaryService.discard(item) } label: {
                     Label("Discard", systemImage: "trash")
                 }
+                .glassButton()
                 Button { summaryService.regenerate(item) } label: {
                     Label("Regenerate", systemImage: "arrow.clockwise")
                 }
+                .glassButton()
                 Spacer()
                 Button { summaryService.commit(item, destination: reviewDestination) } label: {
                     Label("Commit & File", systemImage: "tray.and.arrow.down")
                 }
-                .buttonStyle(.borderedProminent)
+                .glassProminentButton()
             }
-            .padding(.horizontal, 16).padding(.vertical, 8)
+            .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
+            .chromeSurface()
         }
     }
 
@@ -393,10 +413,10 @@ struct HistoryView: View {
     }
 
     private func detailHeader(_ item: TranscriptItem) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(item.meta.title).font(.title3).bold()
+                VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+                    Text(item.meta.title).font(Theme.Typography.screenTitle)
                     metadataLine(item)
                 }
                 Spacer()
@@ -418,52 +438,48 @@ struct HistoryView: View {
             }
             filesStrip(item)
             if item.hasUnnamedSpeakers {
-                HStack(spacing: 6) {
-                    Image(systemName: "person.crop.circle.badge.exclamationmark").foregroundStyle(.orange)
-                    Text(audioAvailable(item)
-                         ? "Speakers aren't assigned yet. Detect & name them so the summary attributes everything correctly."
-                         : "Speakers aren't assigned and the audio is no longer available to detect them.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                StatusBanner(.warning,
+                             audioAvailable(item)
+                             ? "Speakers aren't assigned yet. Detect & name them so the summary attributes everything correctly."
+                             : "Speakers aren't assigned and the audio is no longer available to detect them.",
+                             symbol: "person.crop.circle.badge.exclamationmark")
             }
             actionRow(item)
             if recording.offlinePass == .running {
-                HStack(spacing: 6) {
+                HStack(spacing: Theme.Spacing.small) {
                     ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center)
-                    Text("Detecting speakers…").font(.caption).foregroundStyle(.secondary)
+                    Text("Detecting speakers…")
+                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 }
             }
         }
-        .padding(16)
+        .padding(Theme.Spacing.large)
     }
 
     private func metadataLine(_ item: TranscriptItem) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
             Text(Self.dateString(item.meta.date))
-                .font(.caption).foregroundStyle(.secondary)
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
             if !item.meta.attendees.isEmpty {
                 Text("Attendees: \(item.meta.attendees.joined(separator: ", "))")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
             }
             if !item.meta.filing.trimmingCharacters(in: .whitespaces).isEmpty {
                 Text("Filing: \(item.meta.filing)")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
             }
         }
     }
 
     private func actionRow(_ item: TranscriptItem) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Theme.Spacing.medium) {
             if let notePath = item.meta.note, !notePath.isEmpty {
                 Button {
                     recording.notes.openInObsidian(URL(fileURLWithPath: notePath))
                 } label: {
                     Label("Open in Obsidian", systemImage: "arrow.up.right.square")
                 }
+                .glassButton()
             }
 
             if let audioPath = item.meta.audio, !audioPath.isEmpty {
@@ -472,6 +488,7 @@ struct HistoryView: View {
                 } label: {
                     Label("Reveal audio", systemImage: "waveform")
                 }
+                .glassButton()
             }
 
             addAttendeeButton(item)
@@ -481,13 +498,13 @@ struct HistoryView: View {
                     Button { detectSpeakers(item) } label: {
                         Label("Detect speakers", systemImage: "person.2.wave.2")
                     }
-                    .buttonStyle(.borderedProminent).disabled(busy)
+                    .glassProminentButton().disabled(busy)
                     .help("Diarize this recording and assign names")
                 } else {
                     Button { detectSpeakers(item) } label: {
                         Label("Detect speakers", systemImage: "person.2.wave.2")
                     }
-                    .disabled(busy)
+                    .glassButton().disabled(busy)
                     .help("Re-run diarization + speaker ID on this recording's audio")
                 }
             }
@@ -501,10 +518,10 @@ struct HistoryView: View {
                 let summarizeLabel = Label(item.isProcessed ? "Re-summarize" : "Summarize", systemImage: "sparkles")
                 if item.hasUnnamedSpeakers && audioAvailable(item) {
                     Button { pendingProcessItem = item } label: { summarizeLabel }
-                        .buttonStyle(.bordered).disabled(busy || pending)
+                        .glassButton().disabled(busy || pending)
                 } else {
                     Button { summarize(item) } label: { summarizeLabel }
-                        .buttonStyle(.borderedProminent).disabled(busy || pending)
+                        .glassProminentButton().disabled(busy || pending)
                 }
             }
         }
@@ -515,29 +532,33 @@ struct HistoryView: View {
         Button { attendeeDraft = ""; addingAttendee = true } label: {
             Label("Add attendee", systemImage: "person.badge.plus")
         }
+        .glassButton()
         .disabled(busy)
         .popover(isPresented: $addingAttendee) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Add an attendee").font(.headline)
+            VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+                Text("Add an attendee").font(Theme.Typography.sheetTitle)
                 Text("For someone who was present but didn't speak, or a name missed during the call. No transcript line is attributed to them.")
-                    .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 TextField("Name", text: $attendeeDraft)
                     .textFieldStyle(.roundedBorder).frame(width: 240)
                     .onSubmit { commitAddAttendee(item) }
                 let matches = attendeeMatches(item)
                 if !matches.isEmpty {
                     ForEach(matches, id: \.self) { p in
-                        Button(p) { attendeeDraft = p }.buttonStyle(.plain).font(.callout)
+                        Button(p) { attendeeDraft = p }
+                            .buttonStyle(.plain).font(Theme.Typography.secondary)
                     }
                 }
                 HStack {
                     Spacer()
                     Button("Add") { commitAddAttendee(item) }
+                        .glassProminentButton()
                         .keyboardShortcut(.defaultAction)
                         .disabled(attendeeDraft.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-            .padding(12).frame(width: 270)
+            .padding(Theme.Spacing.medium).frame(width: 280)
         }
     }
 
@@ -580,7 +601,7 @@ struct HistoryView: View {
     /// reveal/open. Surfaces links the data model already carries (`meta.audio`/`meta.note`).
     @ViewBuilder private func filesStrip(_ item: TranscriptItem) -> some View {
         let l = store.links(for: item)
-        HStack(spacing: 8) {
+        HStack(spacing: Theme.Spacing.small) {
             fileChip(icon: "doc.text", label: "Transcript",
                      detail: item.url.pathExtension.uppercased(), reveal: item.url)
             if l.audioSession != nil {
@@ -600,20 +621,20 @@ struct HistoryView: View {
 
     @ViewBuilder private func fileChip(icon: String, label: String, detail: String?,
                                        reveal: URL?, open: (() -> Void)? = nil) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon).foregroundStyle(.secondary)
-            Text(label)
-            if let detail { Text(detail).foregroundStyle(.secondary) }
-        }
-        .font(.caption)
-        .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(.quaternary.opacity(0.4), in: Capsule())
-        .contentShape(Capsule())
-        .help(open != nil ? "Open in Obsidian" : (reveal != nil ? "Reveal in Finder" : ""))
-        .onTapGesture {
+        Button {
             if let open { open() }
             else if let reveal { NSWorkspace.shared.activateFileViewerSelecting([reveal]) }
+        } label: {
+            HStack(spacing: Theme.Spacing.xSmall) {
+                Image(systemName: icon).foregroundStyle(.secondary)
+                Text(label)
+                if let detail { Text(detail).foregroundStyle(.secondary) }
+            }
+            .font(Theme.Typography.caption)
         }
+        .buttonStyle(.chip)
+        .disabled(open == nil && reveal == nil)
+        .help(open != nil ? "Open in Obsidian" : (reveal != nil ? "Reveal in Finder" : ""))
     }
 
     // MARK: File-management actions (rename / refile / delete)
@@ -638,22 +659,25 @@ struct HistoryView: View {
     }
 
     private func renameSheet(_ item: TranscriptItem) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Rename meeting").font(.headline)
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            Text("Rename meeting").font(Theme.Typography.sheetTitle)
             Text("Updates the title in the transcript and renames the file (its date prefix is kept). A filed note is renamed to match.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             TextField("Title", text: $renameDraft)
                 .textFieldStyle(.roundedBorder).frame(width: 340)
                 .onSubmit { commitRename(item) }
             HStack {
                 Spacer()
                 Button("Cancel") { fileOp = nil }
+                    .glassButton()
                 Button("Rename") { commitRename(item) }
+                    .glassProminentButton()
                     .keyboardShortcut(.defaultAction)
                     .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(16).frame(width: 380)
+        .padding(Theme.Spacing.large).frame(width: 380)
     }
 
     private func commitRename(_ item: TranscriptItem) {
@@ -663,21 +687,25 @@ struct HistoryView: View {
     }
 
     private func refileSheet(_ items: [TranscriptItem]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(items.count > 1 ? "Refile \(items.count) meetings" : "Refile meeting").font(.headline)
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            Text(items.count > 1 ? "Refile \(items.count) meetings" : "Refile meeting")
+                .font(Theme.Typography.sheetTitle)
             Text("Sets where the meeting is filed. A summary note that's already been committed is moved into the new folder.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             DestinationField(path: $refileDraft, destinations: vault.destinations,
                              firstRoot: settings.scanRoots.first ?? "Internal")
                 .frame(width: 380)
             HStack {
                 Spacer()
                 Button("Cancel") { fileOp = nil }
+                    .glassButton()
                 Button("Refile") { commitRefile(items) }
+                    .glassProminentButton()
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(16).frame(width: 420)
+        .padding(Theme.Spacing.large).frame(width: 420)
     }
 
     private func commitRefile(_ items: [TranscriptItem]) {
@@ -692,11 +720,12 @@ struct HistoryView: View {
         let audioBytes = links.reduce(Int64(0)) { $0 + $1.audioBytes }
         let anyAudio = links.contains { $0.audioSession != nil }
         let anyNote = links.contains { $0.note != nil }
-        return VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             Text(items.count > 1 ? "Move \(items.count) meetings to the Trash" : "Move meeting to the Trash")
-                .font(.headline)
+                .font(Theme.Typography.sheetTitle)
             Text("Recoverable from the Trash. The transcript is always moved; choose what else to include.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             if anyAudio {
                 Toggle(isOn: $deleteAudioToo) {
                     Text("Also delete the recorded audio (\(ByteCountFormatter.string(fromByteCount: audioBytes, countStyle: .file)))")
@@ -710,11 +739,14 @@ struct HistoryView: View {
             HStack {
                 Spacer()
                 Button("Cancel") { fileOp = nil }
+                    .glassButton()
                 Button("Move to Trash", role: .destructive) { commitDelete(items) }
+                    .glassProminentButton()
+                    .tint(Theme.Severity.danger.color)
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(16).frame(width: 420)
+        .padding(Theme.Spacing.large).frame(width: 420)
     }
 
     private func commitDelete(_ items: [TranscriptItem]) {
