@@ -35,6 +35,8 @@ struct HistoryView: View {
     /// Add-attendee popover (for someone present who didn't speak / was forgotten).
     @State private var addingAttendee = false
     @State private var attendeeDraft = ""
+    /// Item whose summaries are being compared (drives the compare sheet).
+    @State private var compareItem: TranscriptItem?
 
     var body: some View {
         // A plain HStack (not a nested HSplitView) so this view doesn't add a second
@@ -89,6 +91,13 @@ struct HistoryView: View {
                     store.refresh()
                 }
             )
+        }
+        .sheet(item: $compareItem) { item in
+            SummaryCompareView(item: item, summarizer: recording.summarizer) { kind, markdown in
+                recording.fileSummary(for: item, engine: kind.title, markdown: markdown)
+                compareItem = nil
+                store.refresh()
+            }
         }
     }
 
@@ -290,6 +299,12 @@ struct HistoryView: View {
                     .help("Re-run diarization + speaker ID on this recording's audio")
                 }
             }
+
+            Button { compareItem = item } label: {
+                Label("Compare summaries", systemImage: "rectangle.split.3x1")
+            }
+            .disabled(busy)
+            .help("Generate summaries with Claude / Apple / Qwen side-by-side")
 
             Spacer()
 
