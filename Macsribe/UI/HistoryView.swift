@@ -9,34 +9,34 @@ struct HistoryView: View {
     @EnvironmentObject private var store: TranscriptStore
     @EnvironmentObject private var vault: VaultDirectory
     @ObservedObject private var settings = AppSettings.shared
+    /// Observed directly so live job state (pending/failed) republishes the view.
+    @ObservedObject private var summaryService = RecordingController.shared.summaryService
     @State private var selection: TranscriptItem.ID?
     @State private var filter: HistoryFilter = .needsSpeakers
-    /// The item currently being processed/re-processed (drives the streaming bar).
-    @State private var runningItemID: TranscriptItem.ID?
 
     enum HistoryFilter: String, CaseIterable, Identifiable {
-        case all = "All", needsSpeakers = "Unassigned", unprocessed = "Unprocessed", processed = "Processed"
+        case all = "All", review = "Review", needsSpeakers = "Unassigned", unprocessed = "Unprocessed", processed = "Processed"
         var id: String { rawValue }
     }
 
     private var filteredItems: [TranscriptItem] {
         switch filter {
         case .all: return store.items
+        case .review: return store.items.filter { $0.summaryReadyURL != nil }
         case .needsSpeakers: return store.items.filter { $0.hasUnnamedSpeakers }
         case .unprocessed: return store.items.filter { !$0.isProcessed }
         case .processed: return store.items.filter { $0.isProcessed }
         }
     }
-    @State private var diffExisting = ""
-    @State private var diffStaged = ""
-    @State private var showDiff = false
-    /// Item awaiting the "speakers not assigned" confirmation before processing.
+    /// Count of summaries staged and waiting for review (drives discoverability).
+    private var reviewCount: Int { store.items.filter { $0.summaryReadyURL != nil }.count }
+    /// Item awaiting the "speakers not assigned" confirmation before summarizing.
     @State private var pendingProcessItem: TranscriptItem?
     /// Add-attendee popover (for someone present who didn't speak / was forgotten).
     @State private var addingAttendee = false
     @State private var attendeeDraft = ""
-    /// Item whose summaries are being compared (drives the compare sheet).
-    @State private var compareItem: TranscriptItem?
+    /// Editable destination for the summary currently under review (seeded from meta.filing).
+    @State private var reviewDestination = ""
 
     var body: some View {
         // Resizable list/detail split (the window sidebar is a plain HStack, not a
@@ -50,8 +50,9 @@ struct HistoryView: View {
                 .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { store.refresh(); store.startWatching() }
-        .onChange(of: recording.notes.pendingDiff) { presentDiffIfReady() }
+        .onAppear { store.refresh(); store.startWatching(); seedReviewDestination() }
+        .onChange(of: selection) { seedReviewDestination() }
+        .onChange(of: selectedItem?.summaryReadyURL) { seedReviewDestination() }
         // Assign-speakers review for an on-demand "Detect speakers" run from History.
         .sheet(isPresented: Binding(
             get: { recording.pendingSpeakerReview != nil },
@@ -67,45 +68,23 @@ struct HistoryView: View {
             presenting: pendingProcessItem
         ) { item in
             Button("Detect speakers first") { detectSpeakers(item); pendingProcessItem = nil }
-            Button("Process anyway") { startProcessing(item); pendingProcessItem = nil }
+            Button("Summarize anyway") { summarize(item); pendingProcessItem = nil }
             Button("Cancel", role: .cancel) { pendingProcessItem = nil }
         } message: { _ in
             Text("This transcript still has unnamed speakers (e.g. \"Speaker 1\"). The summary attributes actions and discussion to whoever's labelled, so it may misattribute. Detect/assign speakers first for a higher-quality note.")
         }
-        .sheet(isPresented: $showDiff) {
-            NoteDiffView(
-                existing: diffExisting,
-                staged: diffStaged,
-                onAccept: {
-                    let url = recording.notes.commitReprocess()
-                    showDiff = false
-                    runningItemID = nil
-                    recording.notes.reset()
-                    store.refresh()
-                    if let url { AppLog.log("History: accepted reprocess for \(url.lastPathComponent)", category: "history") }
-                },
-                onDiscard: {
-                    recording.notes.discardReprocess()
-                    showDiff = false
-                    runningItemID = nil
-                    store.refresh()
-                }
-            )
-        }
-        .sheet(item: $compareItem) { item in
-            SummaryCompareView(item: item, summarizer: recording.summarizer) { kind, markdown in
-                recording.fileSummary(for: item, engine: kind.title, markdown: markdown)
-                compareItem = nil
-                store.refresh()
-            }
+    }
+
+    /// Seed the editable review destination from the selected item's filing.
+    private func seedReviewDestination() {
+        if let item = selectedItem, item.summaryReadyURL != nil {
+            reviewDestination = item.meta.filing
         }
     }
 
-    private func presentDiffIfReady() {
-        guard let diff = recording.notes.pendingDiff else { return }
-        diffExisting = (try? String(contentsOf: diff.existingURL, encoding: .utf8)) ?? ""
-        diffStaged = (try? String(contentsOf: diff.stagedURL, encoding: .utf8)) ?? ""
-        showDiff = true
+    /// Queue a background Claude summary; switch to the Review filter so it's visible when ready.
+    private func summarize(_ item: TranscriptItem) {
+        recording.summaryService.summarize(item)
     }
 
     // MARK: List
@@ -113,7 +92,9 @@ struct HistoryView: View {
     private var list: some View {
         VStack(spacing: 0) {
             Picker("", selection: $filter) {
-                ForEach(HistoryFilter.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(HistoryFilter.allCases) { f in
+                    Text(f == .review && reviewCount > 0 ? "Review (\(reviewCount))" : f.rawValue).tag(f)
+                }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -167,14 +148,15 @@ struct HistoryView: View {
     }
 
     private func statusBadge(_ item: TranscriptItem) -> some View {
-        Text(item.isProcessed ? "Processed" : "Unprocessed")
+        let (label, color): (String, Color) =
+            item.summaryReadyURL != nil ? ("Review", .blue)
+            : item.isProcessed ? ("Processed", .green)
+            : ("Unprocessed", .orange)
+        return Text(label)
             .font(.caption2).bold()
             .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(
-                (item.isProcessed ? Color.green : Color.orange).opacity(0.18),
-                in: Capsule()
-            )
-            .foregroundStyle(item.isProcessed ? Color.green : Color.orange)
+            .background(color.opacity(0.18), in: Capsule())
+            .foregroundStyle(color)
     }
 
     // MARK: Detail
@@ -183,19 +165,14 @@ struct HistoryView: View {
         if let item = selectedItem {
             VStack(spacing: 0) {
                 detailHeader(item)
-                if runningItemID == item.id {
-                    Divider()
-                    NotesActionBar(
-                        generator: recording.notes,
-                        destination: item.meta.filing,
-                        attendees: item.meta.attendees.joined(separator: ", "),
-                        model: settings.claudeModel,
-                        onGenerate: { startProcessing(item) }
-                    )
-                }
                 Divider()
-                TranscriptPreviewView(url: item.url, reloadToken: recording.transcriptRevision)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let staged = item.summaryReadyURL {
+                    reviewPane(item, staged: staged)
+                } else {
+                    summaryStatusBar(item)
+                    TranscriptPreviewView(url: item.url, reloadToken: recording.transcriptRevision)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         } else {
             VStack(spacing: 8) {
@@ -205,6 +182,69 @@ struct HistoryView: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// Live "summarizing…/failed" bar for a transcript without a staged summary yet.
+    @ViewBuilder private func summaryStatusBar(_ item: TranscriptItem) -> some View {
+        switch summaryService.state(for: item) {
+        case .pending:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center)
+                Text("Summarizing in the background…").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 16).padding(.vertical, 6)
+            .background(.quaternary.opacity(0.35))
+            Divider()
+        case .failed(let reason):
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                Text(reason).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Spacer()
+                Button("Retry") { summarize(item) }.font(.caption)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 6)
+            .background(.orange.opacity(0.10))
+            Divider()
+        case .none:
+            EmptyView()
+        }
+    }
+
+    /// The review pane shown when a summary is staged: editable destination above the
+    /// rendered note, with Commit / Discard / Regenerate.
+    @ViewBuilder private func reviewPane(_ item: TranscriptItem, staged: URL) -> some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Summary ready — review, set where it's filed, then commit to your vault.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text("Will be filed to:").font(.caption).foregroundStyle(.secondary)
+                    DestinationField(path: $reviewDestination,
+                                     destinations: vault.destinations,
+                                     firstRoot: settings.scanRoots.first ?? "Internal")
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            Divider()
+            TranscriptPreviewView(url: staged, reloadToken: recording.transcriptRevision)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
+            HStack(spacing: 10) {
+                Button(role: .destructive) { summaryService.discard(item) } label: {
+                    Label("Discard", systemImage: "trash")
+                }
+                Button { summaryService.regenerate(item) } label: {
+                    Label("Regenerate", systemImage: "arrow.clockwise")
+                }
+                Spacer()
+                Button { summaryService.commit(item, destination: reviewDestination) } label: {
+                    Label("Commit & File", systemImage: "tray.and.arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 8)
         }
     }
 
@@ -283,8 +323,6 @@ struct HistoryView: View {
             addAttendeeButton(item)
 
             if audioAvailable(item) {
-                // When speakers still need assigning, this is the primary action;
-                // otherwise it's a secondary "re-run".
                 if item.hasUnnamedSpeakers {
                     Button { detectSpeakers(item) } label: {
                         Label("Detect speakers", systemImage: "person.2.wave.2")
@@ -300,26 +338,20 @@ struct HistoryView: View {
                 }
             }
 
-            Button { compareItem = item } label: {
-                Label("Compare summaries", systemImage: "rectangle.split.3x1")
-            }
-            .disabled(busy)
-            .help("Generate summaries with Claude / Apple / Qwen side-by-side")
-
             Spacer()
 
-            // Warn (but allow) if the transcript still has unnamed speakers — the
-            // summary attributes actions/discussion to whoever's labelled.
-            let processLabel = Label(item.isProcessed ? "Re-process" : "Process",
-                                     systemImage: "arrow.triangle.2.circlepath")
-            if item.hasUnnamedSpeakers && audioAvailable(item) {
-                Button { pendingProcessItem = item } label: { processLabel }
-                    .buttonStyle(.bordered).disabled(busy)
-            } else {
-                Button {
-                    if unattributed(item) { pendingProcessItem = item } else { startProcessing(item) }
-                } label: { processLabel }
-                .buttonStyle(.borderedProminent).disabled(busy)
+            // Summarize → background Claude → staged for review. Hidden while a summary is
+            // already staged (the review pane handles it) or currently running.
+            if item.summaryReadyURL == nil {
+                let pending = summaryService.state(for: item).map { if case .pending = $0 { return true } else { return false } } ?? false
+                let summarizeLabel = Label(item.isProcessed ? "Re-summarize" : "Summarize", systemImage: "sparkles")
+                if item.hasUnnamedSpeakers && audioAvailable(item) {
+                    Button { pendingProcessItem = item } label: { summarizeLabel }
+                        .buttonStyle(.bordered).disabled(busy || pending)
+                } else {
+                    Button { summarize(item) } label: { summarizeLabel }
+                        .buttonStyle(.borderedProminent).disabled(busy || pending)
+                }
             }
         }
     }
@@ -381,48 +413,11 @@ struct HistoryView: View {
         return FileManager.default.fileExists(atPath: a)
     }
 
-    /// True if the saved transcript still has generic, unnamed speaker labels
-    /// ("Speaker N" / "Me" / "Remote") — i.e. speakers haven't been assigned.
-    private func unattributed(_ item: TranscriptItem) -> Bool {
-        guard audioAvailable(item) else { return false }   // nothing to detect from
-        guard let text = try? String(contentsOf: item.url, encoding: .utf8) else { return false }
-        return text.contains("] Speaker ") || text.contains("] Me:") || text.contains("] Remote:")
-    }
-
     private func detectSpeakers(_ item: TranscriptItem) {
         recording.reprocessSpeakers(
             forAudioPath: item.meta.audio, transcript: item.url,
             attendees: item.meta.attendees.joined(separator: ", "),
             title: item.meta.title, filing: item.meta.filing)
-    }
-
-    /// Runs Claude for the given item. An already-processed item re-processes into
-    /// staging (then the diff sheet appears via `pendingDiff`); an unprocessed item
-    /// runs a fresh filing run and, on success, moves to `Processed/`.
-    private func startProcessing(_ item: TranscriptItem) {
-        guard !recording.notes.isRunning else { return }
-        runningItemID = item.id
-        recording.notes.reset()
-
-        if item.isProcessed, let notePath = item.meta.note, !notePath.isEmpty {
-            recording.notes.reprocess(
-                transcriptURL: item.url,
-                existingNoteURL: URL(fileURLWithPath: notePath),
-                destination: item.meta.filing,
-                attendees: item.meta.attendees.joined(separator: ", "),
-                settings: settings)
-        } else {
-            recording.notes.generate(
-                transcriptURL: item.url,
-                destination: item.meta.filing,
-                attendees: item.meta.attendees.joined(separator: ", "),
-                settings: settings,
-                onFreshSuccess: { transcriptURL, notePath in
-                    recording.markProcessed(transcriptURL: transcriptURL, notePath: notePath)
-                    runningItemID = nil
-                    store.refresh()
-                })
-        }
     }
 
     // MARK: Helpers

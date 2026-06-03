@@ -46,66 +46,45 @@ struct SettingsView: View {
     private var summaryTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Summary comparison").font(.headline)
-                Text("Generate meeting notes with several models on the SAME prompt and compare them side-by-side from History → \"Compare summaries\". The Claude + skill auto-filing path is separate and unaffected.")
+                Text("Meeting summaries").font(.headline)
+                Text("After a recording's speakers are assigned, Claude writes a summary in the background. When it's ready, review it in History → \"Review\", set where it's filed, then commit it to your vault.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
-                Text("Engines to compare").font(.subheadline.weight(.semibold))
-                ForEach(SummaryEngineKind.allCases) { kind in
-                    Toggle(isOn: Binding(
-                        get: { settings.isSummaryEngineEnabled(kind) },
-                        set: { settings.setSummaryEngine(kind, enabled: $0) })) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(kind.title)
-                            Text(kind.blurb).font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                Text("At least one stays enabled. Pick any subset — e.g. Qwen vs Claude, or Qwen vs Apple.")
+                Toggle("Auto-summarize after speakers are assigned", isOn: $settings.autoRunClaude)
+                Text("When off, summaries only run when you press Summarize on a transcript in History.")
                     .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
-                Text("Shared prompt").font(.subheadline.weight(.semibold))
-                Text("Sent verbatim to every engine. Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
+                Text("Claude model").font(.subheadline.weight(.semibold))
+                TextField("sonnet", text: $settings.claudeModel)
+                    .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: 220)
+                HStack(spacing: 6) {
+                    Text("CLI").font(.caption).foregroundStyle(.secondary)
+                    TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
+                        .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
+                }
+                Text("Runs `claude -p` (raw prompt, no skill/tools; extended thinking left on). Requires the Claude CLI to be installed + logged in.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                Text("Prompt").font(.subheadline.weight(.semibold))
+                Text("The instructions Claude follows. Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 TextEditor(text: $settings.summaryPromptTemplate)
                     .font(.system(.caption, design: .monospaced))
-                    .frame(height: 200)
+                    .frame(height: 220)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
                 HStack {
                     Spacer()
                     Button("Reset to default") { settings.summaryPromptTemplate = AppSettings.defaultSummaryPrompt }
                         .font(.caption)
                 }
-
-                Divider()
-                Text("Local model (Qwen / MLX, on the GPU)").font(.subheadline.weight(.semibold))
-                TextField("mlx-community/…", text: $settings.localSummaryModelId)
-                    .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
-                SummaryLocalModelStatus(summarizer: recording.summarizer)
-                Text("An MLX text model id from Hugging Face — downloaded on first use, runs fully offline. Good picks: mlx-community/Qwen3-4B-4bit, mlx-community/Qwen2.5-3B-Instruct-4bit. (The on-disk LM Studio GGUF isn't used — MLX needs its own format.)")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Divider()
-                Text("Codex CLI (cloud or local, per your codex config)").font(.subheadline.weight(.semibold))
-                HStack(spacing: 6) {
-                    Text("Binary").font(.caption).foregroundStyle(.secondary)
-                    TextField("/opt/homebrew/bin/codex", text: $settings.codexBinaryPath)
-                        .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
-                }
-                HStack(spacing: 6) {
-                    Text("Model override").font(.caption).foregroundStyle(.secondary)
-                    TextField("(blank = use ~/.codex/config.toml)", text: $settings.codexModel)
-                        .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: 260)
-                }
-                Text("Runs `codex exec` non-interactively (read-only, ephemeral). Uses whatever model Codex is configured for; set an override only if needed (e.g. gpt-5.5). Requires `codex login` to be authenticated.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding()
         }
@@ -756,41 +735,6 @@ private struct FluidModelSection: View {
                 Button("Retry") { models.download() }.disabled(isRecording)
                 Text(msg).font(.caption2).foregroundStyle(.red).lineLimit(2)
             }
-        }
-    }
-}
-
-/// Live status row for the local MLX summary model. Observes `SummarizerManager` directly
-/// (a nested ObservableObject won't republish through its parent).
-private struct SummaryLocalModelStatus: View {
-    @ObservedObject var summarizer: SummarizerManager
-
-    var body: some View {
-        HStack(spacing: 8) {
-            statusLabel
-            Spacer()
-            if summarizer.isReady {
-                Button("Unload") { summarizer.unload() }.font(.caption)
-            }
-        }
-    }
-
-    @ViewBuilder private var statusLabel: some View {
-        switch summarizer.status {
-        case .idle:
-            Text("Not loaded (loads on first comparison run).").font(.caption2).foregroundStyle(.secondary)
-        case .downloading(let p):
-            HStack(spacing: 6) {
-                ProgressView(value: p).frame(width: 90)
-                Text("Downloading \(Int(p * 100))%").font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-            }
-        case .loading:
-            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Loading…").font(.caption2).foregroundStyle(.secondary) }
-        case .ready(let id):
-            Label(id, systemImage: "checkmark.circle.fill")
-                .font(.caption).foregroundStyle(.green).lineLimit(1).truncationMode(.middle)
-        case .failed(let m):
-            Label(m, systemImage: "xmark.circle.fill").font(.caption2).foregroundStyle(.red).lineLimit(2)
         }
     }
 }

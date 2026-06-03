@@ -82,7 +82,8 @@ final class RecordingController: ObservableObject {
     let notes = NotesGenerator()
     let store = TranscriptStore()
     /// Holds the local MLX summary model across compare runs (download/load/unload).
-    let summarizer = SummarizerManager()
+    /// Drives the background Claude summary → review → commit flow.
+    private(set) lazy var summaryService = SummaryService(store: store)
     let callDetector = CallDetector()
 
     private let settings = AppSettings.shared
@@ -593,8 +594,7 @@ final class RecordingController: ObservableObject {
                 // assigned (after the offline pass / review) so the summary uses the
                 // attributed transcript. stop()'s Task / finishSpeakerReview trigger it.
                 if settings.autoRunClaude && !segments.isEmpty && !(engine is SpeakerCapableEngine) {
-                    notes.generate(transcriptURL: result.url, destination: destination,
-                                   attendees: attendees, settings: settings)
+                    maybeAutoRunClaude()
                 }
             } catch {
                 AppLog.log("Finalize failed: \(error.localizedDescription)", category: "record")
@@ -728,14 +728,16 @@ final class RecordingController: ObservableObject {
         }
     }
 
-    /// Start the AI note generation for the just-saved recording, if auto-run is on
-    /// and a summary isn't already running. Used for the deferred (attributed)
-    /// auto-run path; reads the current transcript so it reflects assigned speakers.
+    /// Queue a background Claude summary for the just-saved recording, if auto-summarize
+    /// is on. Reads the current transcript (post-attribution) from the store so the summary
+    /// reflects assigned speakers + attendees. The result is staged for review in History.
     private func maybeAutoRunClaude() {
-        guard settings.autoRunClaude, !notes.isRunning, let url = lastTranscriptURL else { return }
+        guard settings.autoRunClaude, let url = lastTranscriptURL else { return }
         guard !(engine?.finalTimeline() ?? segments).isEmpty else { return }
-        notes.generate(transcriptURL: url, destination: destinationPath,
-                       attendees: attendees, settings: settings)
+        store.refresh()
+        guard let item = store.items.first(where: { $0.url == url })
+            ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) else { return }
+        summaryService.summarize(item)
     }
 
     /// Rewrite the saved transcript from the engine's current (post-offline-pass)
@@ -959,57 +961,6 @@ final class RecordingController: ObservableObject {
         }
         let moved = store.moveToProcessed(item, notePath: notePath)
         if lastTranscriptURL == transcriptURL { lastTranscriptURL = moved }
-    }
-
-    /// Files an approved comparison summary into the vault, then marks the transcript
-    /// processed (moves it to `Processed/`, stamps `note:`). Re-files to the existing note
-    /// path when the transcript already has one; otherwise writes a new note into the
-    /// transcript's filing destination. `engine` is the source engine's title.
-    func fileSummary(for item: TranscriptItem, engine: String, markdown: String) {
-        let fm = FileManager.default
-        let vault = settings.vaultURL
-        let noteURL: URL
-        if let existing = item.meta.note, !existing.isEmpty {
-            noteURL = URL(fileURLWithPath: existing)
-        } else {
-            let folder = item.meta.filing.isEmpty
-                ? vault : vault.appendingPathComponent(item.meta.filing, isDirectory: true)
-            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
-            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
-            let safeTitle = item.meta.title.replacingOccurrences(of: "/", with: "-")
-            let base = "\(df.string(from: item.meta.date)) - \(safeTitle)"
-            var candidate = folder.appendingPathComponent("\(base).md")
-            if fm.fileExists(atPath: candidate.path) {
-                candidate = folder.appendingPathComponent("\(base) (\(engine)).md")
-            }
-            noteURL = candidate
-        }
-        let content = Self.composeSummaryNote(item: item, engine: engine, body: markdown)
-        do {
-            try content.write(to: noteURL, atomically: true, encoding: .utf8)
-        } catch {
-            AppLog.log("Summary: failed to file note — \(error.localizedDescription)", category: "summary")
-            return
-        }
-        markProcessed(transcriptURL: item.url, notePath: noteURL.path)
-        notes.openInObsidian(noteURL)
-        AppLog.log("Summary: filed \(engine) note → \(noteURL.lastPathComponent)", category: "summary")
-    }
-
-    /// Prepends light YAML frontmatter to a model-produced note body (unless the body
-    /// already carries its own frontmatter).
-    private static func composeSummaryNote(item: TranscriptItem, engine: String, body: String) -> String {
-        if body.hasPrefix("---\n") || body.hasPrefix("---\r\n") { return body }
-        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        var lines = ["---", "title: \(item.meta.title)", "date: \(df.string(from: item.meta.date))"]
-        if !item.meta.attendees.isEmpty {
-            lines.append("attendees:")
-            for a in item.meta.attendees { lines.append("  - \(a)") }
-        }
-        if !item.meta.filing.isEmpty { lines.append("filing: \(item.meta.filing)") }
-        lines.append("summary_engine: \(engine)")
-        lines.append("---")
-        return lines.joined(separator: "\n") + "\n\n" + body
     }
 
     func teardownForQuit() {

@@ -137,10 +137,6 @@ final class AppSettings: ObservableObject {
         static let minSpeechToIdentify = "macsribe.minSpeechToIdentify"
         static let liveTranscriptEnabled = "macsribe.liveTranscriptEnabled"
         static let summaryPromptTemplate = "macsribe.summaryPromptTemplate"
-        static let localSummaryModelId = "macsribe.localSummaryModelId"
-        static let codexBinaryPath = "macsribe.codexBinaryPath"
-        static let codexModel = "macsribe.codexModel"
-        static let summaryEnginesEnabled = "macsribe.summaryEnginesEnabled"
     }
 
     // MARK: Memory
@@ -219,7 +215,9 @@ final class AppSettings: ObservableObject {
     /// speaker-attributed transcript in one pass at stop. The offline pass is fast and
     /// accurate, so live text is opt-in; turning it off removes all live-decode load.
     @AppStorage(Key.liveTranscriptEnabled) var liveTranscriptEnabled: Bool = false
-    @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
+    /// Auto-summarize: after a recording's speakers are assigned, fire the background
+    /// Claude summary automatically (result is staged for review in History). Default on.
+    @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = true
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt
     @AppStorage(Key.claudeModel) var claudeModel: String = "sonnet"
@@ -283,44 +281,10 @@ final class AppSettings: ObservableObject {
     Run non-interactively: use the context above, do not ask for confirmation, write the note into the destination folder above.
     """
 
-    /// Shared, self-contained summary prompt used by the comparison engines
-    /// (Claude raw / Apple / Qwen) — distinct from `claudePromptTemplate`, which drives
-    /// the agentic skill. Tokens substituted at run time: `{{transcript}}`, `{{contacts}}`,
-    /// `{{attendees}}`, `{{destination}}`. Editable in the Summary settings + compare view.
+    /// Shared, self-contained prompt for the Claude meeting summary (raw `claude -p`, no
+    /// skill). Tokens substituted at run time: `{{transcript}}`, `{{contacts}}`,
+    /// `{{attendees}}`, `{{destination}}`. Editable in Settings → Summary.
     @AppStorage(Key.summaryPromptTemplate) var summaryPromptTemplate: String = AppSettings.defaultSummaryPrompt
-
-    /// HuggingFace repo id of the local MLX model used by the Qwen summary engine (GPU).
-    /// Must be an MLX *text* build. Confirmed-good defaults: `mlx-community/Qwen3-4B-4bit`,
-    /// `mlx-community/Qwen2.5-3B-Instruct-4bit`. Downloaded on first use.
-    @AppStorage(Key.localSummaryModelId) var localSummaryModelId: String = "mlx-community/Qwen3-4B-4bit"
-
-    /// OpenAI Codex CLI used by the Codex summary engine (`codex exec`).
-    @AppStorage(Key.codexBinaryPath) var codexBinaryPath: String = "/opt/homebrew/bin/codex"
-    /// Optional model override passed to `codex exec -m`. Empty = use codex's own config
-    /// (`~/.codex/config.toml`), e.g. the default cloud model.
-    @AppStorage(Key.codexModel) var codexModel: String = ""
-
-    /// Which engines participate in the summary comparison (so the user can compare any
-    /// subset, e.g. just Qwen vs Claude). Stored as comma-separated `SummaryEngineKind`
-    /// raw values; defaults to all three.
-    @AppStorage(Key.summaryEnginesEnabled) var summaryEnginesEnabledRaw: String = "claude,codex,qwenLocal"
-
-    var enabledSummaryEngines: Set<SummaryEngineKind> {
-        Set(summaryEnginesEnabledRaw.split(separator: ",").compactMap { SummaryEngineKind(rawValue: String($0)) })
-    }
-
-    func isSummaryEngineEnabled(_ kind: SummaryEngineKind) -> Bool {
-        enabledSummaryEngines.contains(kind)
-    }
-
-    /// Toggle an engine's participation, keeping at least one enabled.
-    func setSummaryEngine(_ kind: SummaryEngineKind, enabled: Bool) {
-        var set = enabledSummaryEngines
-        if enabled { set.insert(kind) } else { set.remove(kind) }
-        guard !set.isEmpty else { return }   // never disable the last one
-        summaryEnginesEnabledRaw = SummaryEngineKind.allCases
-            .filter { set.contains($0) }.map(\.rawValue).joined(separator: ",")
-    }
 
     static let defaultSummaryPrompt = """
     You are a senior analyst writing a thorough, faithful record of a client meeting. Produce a \

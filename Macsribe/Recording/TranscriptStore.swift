@@ -11,11 +11,15 @@ struct TranscriptItem: Identifiable, Equatable {
     /// The transcript still has generic, unnamed speaker labels ("Speaker N" / "Me" /
     /// "Remote") — i.e. speakers haven't been assigned yet. Drives the History badge.
     var hasUnnamedSpeakers: Bool = false
+    /// A background summary has finished and is staged for review (the `.staging` file).
+    /// Non-nil ⇒ show the review pane in History. Cleared on commit/discard.
+    var summaryReadyURL: URL? = nil
 
     static func == (lhs: TranscriptItem, rhs: TranscriptItem) -> Bool {
         lhs.url == rhs.url
             && lhs.isProcessed == rhs.isProcessed
             && lhs.hasUnnamedSpeakers == rhs.hasUnnamedSpeakers
+            && lhs.summaryReadyURL == rhs.summaryReadyURL
             && lhs.meta.status == rhs.meta.status
             && lhs.meta.note == rhs.meta.note
             && lhs.meta.title == rhs.meta.title
@@ -75,7 +79,8 @@ final class TranscriptStore: ObservableObject {
         watchers.forEach { $0.cancel() }
         watchers.removeAll()
         AppPaths.ensureVaultFolders()
-        for url in [AppPaths.unprocessedURL, AppPaths.processedURL] {
+        AppPaths.ensureDirectory(AppPaths.stagingURL)   // so we can watch it for staged summaries
+        for url in [AppPaths.unprocessedURL, AppPaths.processedURL, AppPaths.stagingURL] {
             let fd = open(url.path, O_EVTONLY)
             guard fd >= 0 else {
                 AppLog.log("History: couldn't watch \(url.lastPathComponent)", category: "history")
@@ -170,8 +175,12 @@ final class TranscriptStore: ObservableObject {
                 ?? fallbackMeta(url, processed: processed)
             meta.date = resolvedDate(url, meta.date)
             let unnamed = text.map(Self.hasGenericSpeakerLabels) ?? false
+            // A staged summary (.staging/<base>.md) means "ready for review".
+            let stageURL = AppPaths.stagingURL.appendingPathComponent(
+                url.deletingPathExtension().lastPathComponent + ".md")
+            let summaryReady = fm.fileExists(atPath: stageURL.path) ? stageURL : nil
             result.append(TranscriptItem(url: url, meta: meta, isProcessed: processed,
-                                         hasUnnamedSpeakers: unnamed))
+                                         hasUnnamedSpeakers: unnamed, summaryReadyURL: summaryReady))
         }
         return result
     }
