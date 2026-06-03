@@ -333,6 +333,14 @@ struct SettingsView: View {
             Divider()
 
             if settings.transcriptionEngine == .whisperKit {
+                Text("Live transcript").font(.headline)
+                Toggle("Show a live transcript while recording", isOn: $settings.liveTranscriptEnabled)
+                    .disabled(recording.isRecording)
+                Text("Off = offline-only: capture audio silently and generate the full, speaker-attributed transcript in one fast pass when you stop. Turn on to also see streaming text during the call (uses the live model below) — at the cost of continuous live decoding.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
                 Text("Live model").font(.headline)
                 Picker("", selection: Binding(
                     get: { settings.liveModel }, set: { settings.liveModel = $0 }
@@ -340,8 +348,11 @@ struct SettingsView: View {
                     ForEach(WhisperModel.allCases) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.menu).frame(maxWidth: 260).labelsHidden()
-                .disabled(recording.isRecording)
-                Text("Used for the fast LIVE transcript during a call. Pick a small/fast model so it keeps real-time — if you see \"OVERLOADED — skipped audio\" in the logs, choose a smaller one. (Speakers are labelled at stop regardless.)")
+                .disabled(recording.isRecording || !settings.liveTranscriptEnabled)
+                .opacity(settings.liveTranscriptEnabled ? 1 : 0.5)
+                Text(settings.liveTranscriptEnabled
+                     ? "Used for the fast LIVE transcript during a call. Pick a small/fast model so it keeps real-time — if you see \"OVERLOADED — skipped audio\" in the logs, choose a smaller one. (Speakers are labelled at stop regardless.)"
+                     : "Only used when Live transcript is on.")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 

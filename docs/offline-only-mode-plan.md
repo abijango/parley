@@ -1,6 +1,7 @@
-# Plan: optional "offline-only" transcription mode
+# Optional "offline-only" transcription mode
 
-**Status:** Planned, not built. This documents how to add it when we decide to.
+**Status:** ✅ Implemented (2026-06-03). Setting `liveTranscriptEnabled` (default **off** =
+offline-only). The sketch below matches what was built. Kept as a design record.
 
 ## Motivation
 

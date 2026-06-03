@@ -165,7 +165,8 @@ struct RecordDetailView: View {
                 people: vault.people,
                 attendees: TranscriptWriter.splitAttendees(recording.attendees),
                 onNameSpeaker: settings.transcriptionEngine == .fluidAudio
-                    ? { id, name in recording.nameSpeaker(id, as: name) } : nil
+                    ? { id, name in recording.nameSpeaker(id, as: name) } : nil,
+                liveDisabled: settings.transcriptionEngine == .whisperKit && !settings.liveTranscriptEnabled
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .preview:

@@ -135,6 +135,7 @@ final class AppSettings: ObservableObject {
         static let identificationThreshold = "macsribe.identificationThreshold"
         static let offlineAsrRepass = "macsribe.offlineAsrRepass"
         static let minSpeechToIdentify = "macsribe.minSpeechToIdentify"
+        static let liveTranscriptEnabled = "macsribe.liveTranscriptEnabled"
     }
 
     // MARK: Memory
@@ -208,6 +209,11 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.offlineAsrRepass) var offlineAsrRepass: Bool = true
     /// Seconds of clean, quality-gated speech before a voice is auto-identified/named.
     @AppStorage(Key.minSpeechToIdentify) var minSpeechToIdentify: Double = 5
+    /// WhisperKit + SpeakerKit only: show a live (streaming) transcript while recording.
+    /// Off (default) = offline-only — capture audio silently and produce the full,
+    /// speaker-attributed transcript in one pass at stop. The offline pass is fast and
+    /// accurate, so live text is opt-in; turning it off removes all live-decode load.
+    @AppStorage(Key.liveTranscriptEnabled) var liveTranscriptEnabled: Bool = false
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = false
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt

@@ -66,6 +66,13 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
     func seed(_ segments: [Segment]) { merger.seed(segments) }
 
     func start(micRing: AudioRingBuffer, systemRing: AudioRingBuffer, startElapsed: TimeInterval) {
+        // Offline-only mode: skip ALL live wiring (no mixer, no pipeline, no live-model
+        // warm-up). The capture layer still archives mic/system to disk, so the offline
+        // pass at stop has its audio and produces the full attributed transcript.
+        guard settings.liveTranscriptEnabled else {
+            AppLog.log("Offline-only mode — capturing audio; transcript generated at stop (WhisperKit \(settings.model.rawValue) + SpeakerKit)", category: "record")
+            return
+        }
         // Mix mic + system into one ring (mic-anchored real-time clock), feed ONE pipeline.
         let mixedRing = self.mixedRing
         mixerTask = Task.detached {
@@ -151,10 +158,11 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
         rederive()
         publish()
 
-        // The offline transcribe loaded the heavier `model`; swap the fast live model
-        // back in (background, non-blocking) so the NEXT recording starts instantly
-        // instead of reloading the small model on demand.
-        if settings.liveModel != settings.model {
+        // The offline transcribe loaded the heavier `model`; if live transcription is on,
+        // swap the fast live model back in (background, non-blocking) so the NEXT recording
+        // starts instantly. In offline-only mode there's no live model to warm — leave the
+        // heavy model loaded so the next offline pass reuses it.
+        if settings.liveTranscriptEnabled, settings.liveModel != settings.model {
             Task { [models, settings] in _ = await models.prepare(settings.liveModel) }
         }
 

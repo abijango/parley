@@ -14,6 +14,9 @@ struct LiveTranscriptView: View {
     /// The attendees already selected for this call — shown as one-tap picks.
     var attendees: [String] = []
     var onNameSpeaker: ((String, String) -> Void)? = nil
+    /// Offline-only mode: no live stream is produced; show a "generated at stop"
+    /// placeholder while recording instead of "Listening…".
+    var liveDisabled: Bool = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -37,14 +40,28 @@ struct LiveTranscriptView: View {
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: isRecording ? "waveform" : "text.bubble")
-                .font(.system(size: 34))
-                .foregroundStyle(.secondary)
-            Text(isRecording ? "Listening…" : "Start recording to see the live transcript")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+    @ViewBuilder private var emptyState: some View {
+        if liveDisabled {
+            VStack(spacing: 8) {
+                Image(systemName: isRecording ? "waveform.badge.magnifyingglass" : "doc.text")
+                    .font(.system(size: 34))
+                    .foregroundStyle(.secondary)
+                Text(isRecording ? "Recording… transcript is generated when you stop"
+                                 : "Offline-only mode — the transcript appears after you stop")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 24)
+        } else {
+            VStack(spacing: 8) {
+                Image(systemName: isRecording ? "waveform" : "text.bubble")
+                    .font(.system(size: 34))
+                    .foregroundStyle(.secondary)
+                Text(isRecording ? "Listening…" : "Start recording to see the live transcript")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
