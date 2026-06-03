@@ -8,19 +8,18 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            HStack(spacing: Theme.Spacing.small) {
                 Image(systemName: "waveform")
-                Text(AppInfo.name).font(.headline)   // TODO(app-name)
+                Text(AppInfo.name).font(Theme.Typography.controlLabel)   // TODO(app-name)
                 Spacer()
-                Text(statusText).font(.caption).foregroundStyle(.secondary)
+                statusBadge
             }
 
             if case .error(let message) = recording.state {
-                Text(message).font(.caption).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+                StatusBanner(.danger, message)
             } else if let result = recording.lastResult {
-                Text(result).font(.caption).foregroundStyle(.secondary)
+                Text(result).font(Theme.Typography.caption).foregroundStyle(.secondary)
                     .lineLimit(2)
             }
 
@@ -32,12 +31,24 @@ struct MenuBarView: View {
                 Label("Open \(AppInfo.name) Window", systemImage: "macwindow")  // TODO(app-name)
                     .frame(maxWidth: .infinity)
             }
+            .glassButton()
 
             Divider()
             footer
         }
-        .padding(14)
+        .padding(Theme.Spacing.large)
         .frame(width: 280)
+    }
+
+    /// Status dot + text, the same treatment as the main window's status row.
+    private var statusBadge: some View {
+        HStack(spacing: Theme.Spacing.xSmall) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
+                .animation(Theme.Motion.quick, value: statusColor)
+            Text(statusText).font(Theme.Typography.caption).foregroundStyle(.secondary)
+        }
     }
 
     private var recordButton: some View {
@@ -47,13 +58,12 @@ struct MenuBarView: View {
                 else { await recording.start() }
             }
         } label: {
-            HStack {
-                Image(systemName: recording.isRecording ? "stop.fill" : "record.circle")
-                Text(recording.isRecording ? "Stop" : "Start")
-            }
-            .frame(maxWidth: .infinity)
+            Label(recording.isRecording ? "Stop" : "Start",
+                  systemImage: recording.isRecording ? "stop.fill" : "record.circle")
+                .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .glassProminentButton()
         .tint(recording.isRecording ? .red : .green)
         .disabled(recording.state == .preparing || recording.state == .stopping)
     }
@@ -67,7 +77,7 @@ struct MenuBarView: View {
                 NSApplication.shared.terminate(nil)
             }
         }
-        .font(.caption)
+        .font(Theme.Typography.caption)
     }
 
     private func openMainWindow() {
@@ -79,9 +89,18 @@ struct MenuBarView: View {
         switch recording.state {
         case .idle: return "Ready"
         case .preparing: return "Preparing…"
-        case .recording: return "● Recording"
+        case .recording: return "Recording"
         case .stopping: return "Stopping…"
         case .error: return "Error"
+        }
+    }
+
+    private var statusColor: Color {
+        switch recording.state {
+        case .recording: return .red
+        case .preparing, .stopping: return .orange
+        case .error: return .red
+        case .idle: return .secondary
         }
     }
 }
