@@ -190,7 +190,9 @@ final class AppSettings: ObservableObject {
     /// small/fast model so live decoding keeps up with real-time.
     @AppStorage(Key.liveModel) var liveModelRaw: String = WhisperModel.small.rawValue
     @AppStorage(Key.computeMode) var computeModeRaw: String = ComputeMode.gpu.rawValue
-    @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.fluidAudio.rawValue
+    // Default engine: WhisperKit + SpeakerKit (kept after the A/B). FluidAudio remains
+    // selectable as a secondary option. Only affects fresh installs / unset stores.
+    @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.whisperKit.rawValue
     @AppStorage(Key.parakeetVersion) var parakeetVersionRaw: String = FluidParakeetVersion.v3.rawValue
     /// FluidAudio in-session diarization clustering threshold (lower = more speakers /
     /// more sensitive; higher = merges similar voices). Default 0.6 — the library's
