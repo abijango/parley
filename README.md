@@ -37,10 +37,13 @@ choice applies to the *next* recording (no mid-session switch).
 
 | Engine | ASR | Speaker labels | Latency |
 |--------|-----|----------------|---------|
-| **WhisperKit** | OpenAI Whisper (small / medium / large-v3 / turbo) | "Me" vs "Remote" from the two capture tracks | ~1 s (re-transcribes the buffer) |
+| **WhisperKit + SpeakerKit** | OpenAI Whisper (small / medium / large-v3 / turbo) | Per-speaker diarization + cross-session voiceprint ID (applied **at stop**) | **~1 s live text**; speakers labelled at stop |
 | **FluidAudio** *(default)* | Parakeet TDT 0.6b **v3** (multilingual) | Per-speaker diarization + cross-session voiceprint ID | ~11 s live; corrected at stop |
 
-- **WhisperKit** keeps the two-track design above ("Me"/"Remote", no diarization ML) — transcription only, behaviour unchanged.
+There are two speaker-capable engines (pick in Settings → Transcription; applies to the next session). Both share the review / voiceprint / History machinery via the `SpeakerCapableEngine` protocol.
+
+- **WhisperKit + SpeakerKit** — WhisperKit transcribes live (fast, ~1 s, track-labelled "Me"/"Remote"); at stop an **offline pass** builds the clean mix, re-transcribes it with word timestamps, diarizes it with **SpeakerKit** ([Argmax `argmax-oss-swift`](https://github.com/argmaxinc/argmax-oss-swift), MIT, pyannote v4 on the Neural Engine; pinned to a `main` commit until a tagged release ships the embedding API), and attributes words to speakers (diarization-first). Cross-session voiceprints reuse SpeakerKit's per-speaker centroid embeddings (256-d), tagged `pyannote_v3` so they never cross-match FluidAudio's prints. Models (~11 MB) download on first use; diarization is ~28× real-time. So the live transcript is snappy and speaker names appear after the recording stops.
+- **(legacy) WhisperKit-only** ("Me"/"Remote", no diarization) is superseded by the hybrid above; `WhisperKitEngine` remains in the tree but is no longer selectable.
 - **FluidAudio** is a self-contained native stack ([FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio), Apache-2.0, **pinned to `0.14.8`**). It keeps both taps but **mixes mic + system into one 16 kHz mono stream** (the far side of a call isn't audible on the mic alone) and runs everything from that single buffer:
   - **Transcription** — Parakeet TDT 0.6b v3, multilingual, via `SlidingWindowAsrManager` using the `.streaming` preset (~11 s chunks). The first text therefore appears after ~11 s — higher latency than WhisperKit, but it preserves the v3 model. (The low-latency end-of-utterance manager needs different, non-v3 models, so it's not used.) `v2` is English-only; `v3` (default) is multilingual.
   - **Diarization + speaker identification** — pyannote segmentation + WeSpeaker **256-d** embeddings (`embeddingModel` `wespeaker_v2`). Live labels come from ~10 s diarization chunks; at stop, one **offline pass** re-diarizes the whole recording for a consistent speaker set, optionally re-transcribes it with the full-context batch Parakeet model, and rewrites the saved transcript. Confident matches against saved voiceprints are auto-named and added to attendees.
@@ -60,6 +63,7 @@ control for the FluidAudio model.
 | 5 | Enrollment / labeling UX (inline + at-stop review), auto-identify + auto-add to attendees, retained playable clips | ✅ done |
 | 6 | Encrypted export / import / backup (Keychain + CryptoKit), Speakers management tab | ✅ done |
 | 7 | Offline re-pass at stop: whole-recording diarization + optional batch-ASR re-transcribe | ✅ done |
+| 8 | **WhisperKit + SpeakerKit** engine: WhisperKit ASR + SpeakerKit (pyannote v4) diarization at stop, shared `SpeakerCapableEngine` protocol, voiceprints (`pyannote_v3`), 2-option picker | ✅ done |
 
 > **Speaker identification is biometric data.** Each voiceprint is stored with its
 > embedding-model id (`wespeaker_v2`), dimension (**256**), and a schema version, and is

@@ -250,12 +250,13 @@ final class ModelManager: ObservableObject {
     /// ANE matches WhisperKit's defaults (encoder/decoder on the ANE).
     private static func computeOptions(for mode: ComputeMode) -> ModelComputeOptions {
         switch mode {
+        // WhisperKit 1.0 dropped the `prefillCompute` parameter from ModelComputeOptions.
         case .gpu:
             return ModelComputeOptions(melCompute: .cpuAndGPU, audioEncoderCompute: .cpuAndGPU,
-                                       textDecoderCompute: .cpuAndGPU, prefillCompute: .cpuAndGPU)
+                                       textDecoderCompute: .cpuAndGPU)
         case .neuralEngine:
             return ModelComputeOptions(melCompute: .cpuAndGPU, audioEncoderCompute: .cpuAndNeuralEngine,
-                                       textDecoderCompute: .cpuAndNeuralEngine, prefillCompute: .cpuOnly)
+                                       textDecoderCompute: .cpuAndNeuralEngine)
         }
     }
 

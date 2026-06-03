@@ -30,11 +30,16 @@ final class VoiceprintStore: ObservableObject {
     /// Best match for `embedding` by cosine similarity vs each stored centroid,
     /// returned only if it clears `threshold`. Prints from a different embedding
     /// model or dimension are ignored.
-    func match(_ embedding: [Float], threshold: Double) -> (voiceprint: Voiceprint, score: Double)? {
+    /// `model` scopes matching to prints from the same embedding model — different
+    /// engines (FluidAudio `wespeaker_v2` vs SpeakerKit `pyannote_v3`) use different,
+    /// non-comparable embedding spaces, so they never cross-match. Defaults to the
+    /// FluidAudio model so existing callers are unchanged.
+    func match(_ embedding: [Float], threshold: Double,
+               model: String = VoiceprintStore.embeddingModel) -> (voiceprint: Voiceprint, score: Double)? {
         let q = Self.normalized(embedding)
         var best: (Voiceprint, Double)?
         for vp in voiceprints
-        where vp.embeddingModel == Self.embeddingModel && vp.embeddingDim == q.count {
+        where vp.embeddingModel == model && vp.embeddingDim == q.count {
             // Best similarity over the centroid AND each enrolled sample — more
             // forgiving of cross-session variation than the averaged centroid alone
             // (the averaged centroid can dilute a match for a less-consistent voice).
@@ -52,14 +57,21 @@ final class VoiceprintStore: ObservableObject {
 
     // MARK: - Mutations (persist immediately)
 
+    /// Speaker-embedding model id used by the WhisperKit + SpeakerKit engine
+    /// (pyannote v3 embedder, 256-d). Distinct from FluidAudio's `wespeaker_v2`.
+    /// This string is an OPAQUE SCOPE KEY for matching — do NOT "correct" it to a
+    /// version number, or every previously-enrolled SpeakerKit print stops matching.
+    static let speakerKitEmbeddingModel = "pyannote_v3"
+
     @discardableResult
-    func enroll(name: String, embedding: [Float]) -> Voiceprint {
+    func enroll(name: String, embedding: [Float],
+                model: String = VoiceprintStore.embeddingModel) -> Voiceprint {
         let e = Self.normalized(embedding)
         let now = Date()
         let vp = Voiceprint(
             id: UUID(), name: name, embeddings: [e], centroid: e, sampleCount: 1,
             createdAt: now, updatedAt: now,
-            embeddingModel: Self.embeddingModel, embeddingDim: e.count,
+            embeddingModel: model, embeddingDim: e.count,
             schemaVersion: Voiceprint.currentSchemaVersion, audioSample: nil)
         voiceprints.append(vp)
         save()

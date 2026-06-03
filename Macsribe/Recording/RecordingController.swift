@@ -124,7 +124,11 @@ final class RecordingController: ObservableObject {
         let engine: TranscriptionEngine
         switch settings.transcriptionEngine {
         case .whisperKit:
-            engine = WhisperKitEngine(models: models, settings: settings)
+            // WhisperKit ASR + SpeakerKit diarization + voiceprints.
+            let wsk = WhisperKitSpeakerKitEngine(models: models, settings: settings, voiceprints: voiceprints,
+                                                 identificationThreshold: settings.identificationThreshold)
+            wsk.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
+            engine = wsk
         case .fluidAudio:
             let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
                                          identificationThreshold: settings.identificationThreshold)
@@ -147,18 +151,23 @@ final class RecordingController: ObservableObject {
     /// voiceprint (so future sessions recognise them), and add them to attendees.
     func nameSpeaker(_ speakerId: String, as rawName: String) {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, let fluid = engine as? FluidAudioEngine else { return }
-        let centroid = fluid.setSpeakerName(speakerId, as: name)
+        guard !name.isEmpty, let eng = engine as? SpeakerCapableEngine else { return }
+        let model = eng.embeddingModelId
+        let centroid = eng.setSpeakerName(speakerId, as: name)
         if let centroid {
             let vpId: UUID
-            if let existing = voiceprints.voiceprints.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            // Match an existing print of the SAME name AND embedding model (different
+            // engines use non-comparable embedding spaces, so keep them separate).
+            if let existing = voiceprints.voiceprints.first(where: {
+                $0.name.caseInsensitiveCompare(name) == .orderedSame && $0.embeddingModel == model
+            }) {
                 voiceprints.addSample(to: existing.id, embedding: centroid); vpId = existing.id
             } else {
-                vpId = voiceprints.enroll(name: name, embedding: centroid).id
+                vpId = voiceprints.enroll(name: name, embedding: centroid, model: model).id
             }
             // Retain a short enrollment clip for re-enrollment (off-main, best-effort).
             Task { [weak self] in
-                guard let self, let audio = await fluid.repAudioSample(for: speakerId) else { return }
+                guard let self, let audio = await eng.repAudioSample(for: speakerId) else { return }
                 self.voiceprints.attachAudioSample(to: vpId, samples: audio)
             }
         } else {
@@ -383,12 +392,12 @@ final class RecordingController: ObservableObject {
         // Hand the capture rings to the active engine, anchored to the shared
         // timeline (0 for a fresh start, or the prior duration when resuming). The
         // engine loads its model in the background and holds audio until ready.
-        // FluidAudio builds a clean mixed file from the archived tracks at stop (for
-        // the final diarization + play-sample + retained clips).
-        if let fluid = engine as? FluidAudioEngine {
-            fluid.mixedAudioURL = sessionDir.appendingPathComponent("mixed.caf")
-            fluid.micArchiveURL = micArchive
-            fluid.systemArchiveURL = systemArchive
+        // Speaker-capable engines build a clean mixed file from the archived tracks at
+        // stop (for the offline diarization + play-sample + retained clips).
+        if let eng = engine as? SpeakerCapableEngine {
+            eng.mixedAudioURL = sessionDir.appendingPathComponent("mixed.caf")
+            eng.micArchiveURL = micArchive
+            eng.systemArchiveURL = systemArchive
         }
         engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
 
@@ -493,21 +502,21 @@ final class RecordingController: ObservableObject {
 
         // Tear down the engine off the main actor; finalize() below reads the
         // already-populated timeline synchronously, so it needn't wait on this.
-        // For FluidAudio, then run one authoritative whole-recording diarization
+        // For a speaker-capable engine, then run one authoritative whole-recording
         // pass and offer the speaker-review sheet with the cleaned-up speakers.
         let engine = self.engine
         Task { [weak self] in
             await engine?.stop()
-            if let fluid = engine as? FluidAudioEngine {
+            if let eng = engine as? SpeakerCapableEngine {
                 self?.offlinePass = .running
-                let summary = await fluid.finalizeDiarization()
+                let summary = await eng.runOfflinePass()
                 guard let self else { return }
                 self.offlinePass = .done(summary.note)
                 // Persist the offline result (corrected labels + higher-accuracy
                 // transcript) to the saved file — finalize() wrote the streaming
                 // version synchronously before this pass completed.
                 self.rewriteLastTranscript(reason: "offline pass")
-                let speakers = fluid.speakerSummaries()
+                let speakers = eng.speakerSummaries()
                 if !speakers.isEmpty {
                     self.pendingSpeakerReview = SpeakerReview(
                         speakers: speakers,
@@ -624,16 +633,24 @@ final class RecordingController: ObservableObject {
             lastResult = "The audio for this recording was deleted — can't detect speakers."; return
         }
 
-        let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
-                                     identificationThreshold: settings.identificationThreshold)
-        fluid.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
-        fluid.mixedAudioURL = dir.appendingPathComponent("mixed.caf")
-        fluid.micArchiveURL = micURL
-        fluid.systemArchiveURL = dir.appendingPathComponent("system.caf")
-        fluid.forceOfflineAsr = true   // no streaming units exist for a saved call
+        // Build a transient speaker-capable engine matching the current setting.
+        let eng: SpeakerCapableEngine
+        switch settings.transcriptionEngine {
+        case .whisperKit:
+            eng = WhisperKitSpeakerKitEngine(models: models, settings: settings, voiceprints: voiceprints,
+                                             identificationThreshold: settings.identificationThreshold)
+        case .fluidAudio:
+            eng = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
+                                   identificationThreshold: settings.identificationThreshold)
+        }
+        eng.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
+        eng.mixedAudioURL = dir.appendingPathComponent("mixed.caf")
+        eng.micArchiveURL = micURL
+        eng.systemArchiveURL = dir.appendingPathComponent("system.caf")
+        eng.forceOfflineAsr = true   // no streaming units exist for a saved call
 
         // Point the review/rewrite machinery at this item.
-        engine = fluid
+        engine = eng
         lastTranscriptURL = transcript
         self.attendees = attendees
         meetingTitle = title
@@ -642,15 +659,15 @@ final class RecordingController: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
-            let summary = await fluid.finalizeDiarization()
+            let summary = await eng.runOfflinePass()
             self.offlinePass = .done(summary.note)
             self.rewriteLastTranscript(reason: "history speaker detection")
             self.store.refresh()
-            let speakers = fluid.speakerSummaries()
+            let speakers = eng.speakerSummaries()
             if speakers.isEmpty {
                 self.lastResult = "No speakers detected in this recording."
             } else {
-                self.pendingSpeakerReview = SpeakerReview(speakers: speakers, mixedCaf: fluid.mixedAudioURL)
+                self.pendingSpeakerReview = SpeakerReview(speakers: speakers, mixedCaf: eng.mixedAudioURL)
             }
         }
     }

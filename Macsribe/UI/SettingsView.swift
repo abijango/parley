@@ -291,6 +291,30 @@ struct SettingsView: View {
         }
     }
 
+    /// Cross-session speaker-recognition sliders, shared by both speaker-capable
+    /// engines (FluidAudio + WhisperKit + SpeakerKit).
+    @ViewBuilder private var speakerRecognitionSection: some View {
+        Text("Speaker recognition").font(.headline)
+        HStack(spacing: 10) {
+            Slider(value: $settings.identificationThreshold, in: 0.40...0.85, step: 0.05)
+                .frame(maxWidth: 260)
+            Text(String(format: "%.2f", settings.identificationThreshold))
+                .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
+        }
+        Text("How close a voice must be to a saved person before it's auto-named. Higher = stricter (fewer wrong names, but may miss a known voice); lower = more eager (may attach the wrong person).")
+            .font(.caption2).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 10) {
+            Slider(value: $settings.minSpeechToIdentify, in: 2...15, step: 1)
+                .frame(maxWidth: 260)
+            Text("\(Int(settings.minSpeechToIdentify)) s")
+                .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
+        }
+        Text("How much clean speech from a speaker before they're auto-identified and named. Lower names people sooner but on less evidence.")
+            .font(.caption2).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var transcriptionTab: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 10) {
@@ -382,6 +406,15 @@ struct SettingsView: View {
                     }
                     .disabled(recording.isRecording)
                 }
+
+                Divider()
+                Text("Speaker detection").font(.headline)
+                Text("SpeakerKit (pyannote v4, on the Neural Engine) labels who spoke. It runs once when the recording stops — the live transcript stays fast; speaker names appear at stop. Models download on first use.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                speakerRecognitionSection
             } else {
                 FluidModelSection(models: recording.fluidModels, isRecording: recording.isRecording)
 
@@ -399,25 +432,7 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
-                Text("Speaker recognition").font(.headline)
-                HStack(spacing: 10) {
-                    Slider(value: $settings.identificationThreshold, in: 0.40...0.85, step: 0.05)
-                        .frame(maxWidth: 260)
-                    Text(String(format: "%.2f", settings.identificationThreshold))
-                        .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
-                }
-                Text("How close a voice must be to a saved person before it's auto-named. Higher = stricter (fewer wrong names, but may miss a known voice); lower = more eager (may attach the wrong person). Separate from speaker separation above.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
-                    Slider(value: $settings.minSpeechToIdentify, in: 2...15, step: 1)
-                        .frame(maxWidth: 260)
-                    Text("\(Int(settings.minSpeechToIdentify)) s")
-                        .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
-                }
-                Text("How much clean speech from a speaker before they're auto-identified and named. Lower names people sooner but on less evidence.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                speakerRecognitionSection
 
                 Divider()
                 Text("Final transcript").font(.headline)

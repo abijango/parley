@@ -70,19 +70,19 @@ enum ComputeMode: String, CaseIterable, Identifiable {
 /// Which transcription engine a recording uses. Chosen in Settings; applies to
 /// the NEXT recording session (no mid-session switch).
 enum TranscriptionEngineKind: String, CaseIterable, Identifiable {
-    case whisperKit   // original WhisperKit path — transcription only, no speaker ID
-    case fluidAudio   // native FluidAudio stack — transcription + speaker identification
+    case whisperKit   // WhisperKit ASR + SpeakerKit diarization + speaker ID
+    case fluidAudio   // native FluidAudio stack — Parakeet ASR + diarization + speaker ID
 
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .whisperKit: return "WhisperKit"
+        case .whisperKit: return "WhisperKit + SpeakerKit"
         case .fluidAudio: return "FluidAudio"
         }
     }
     var blurb: String {
         switch self {
-        case .whisperKit: return "OpenAI Whisper on-device. High accuracy, no speaker labels — the original, well-tested path."
+        case .whisperKit: return "WhisperKit ASR for fast live text + SpeakerKit diarization & speaker ID applied at stop. Labels who spoke."
         case .fluidAudio: return "Native Parakeet ASR + on-device diarization & speaker identification. Labels who spoke."
         }
     }

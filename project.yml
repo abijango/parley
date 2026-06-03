@@ -17,9 +17,14 @@ options:
   groupSortPosition: top
 
 packages:
-  WhisperKit:
-    url: https://github.com/argmaxinc/WhisperKit.git
-    from: "0.13.0"          # resolves to latest 0.18.x (stable 0.x API line)
+  # Argmax OSS SDK: provides BOTH WhisperKit (ASR) and SpeakerKit (diarization +
+  # speaker embeddings) as products of one package. The per-speaker embedding API
+  # (DiarizationResult.speakerCentroidEmbeddings / nearestSpeakerCentroid) is only
+  # on main (not the v1.0.0 tag), so we pin a validated main commit. NOTE: this
+  # upgrades WhisperKit from the old 0.18.x line to the 1.0 API.
+  ArgmaxOSS:
+    url: https://github.com/argmaxinc/argmax-oss-swift.git
+    revision: 94cf6b120cf9dde32d9dea01acc326e77371302c
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui.git
     from: "2.4.0"           # SwiftUI GitHub-flavored markdown renderer
@@ -35,7 +40,10 @@ targets:
     sources:
       - path: Macsribe
     dependencies:
-      - package: WhisperKit
+      - package: ArgmaxOSS
+        product: WhisperKit
+      - package: ArgmaxOSS
+        product: SpeakerKit
       - package: MarkdownUI
       - package: FluidAudio
     info:
