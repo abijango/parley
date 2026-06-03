@@ -24,40 +24,42 @@ enum VoiceprintCrypto {
         try AES.GCM.open(AES.GCM.SealedBox(combined: ciphertext), using: keychainKey())
     }
 
-    /// Fetch the store key from the Keychain, generating + storing it on first use.
+    /// File holding the raw 32-byte store key (0600). The Keychain isn't usable here: this is
+    /// a self-signed, no-team local app, so the legacy Keychain re-prompts on every rebuild and
+    /// the data-protection Keychain returns errSecMissingEntitlement (it needs a provisioning
+    /// profile we can't supply). A user-only-readable key file under Application Support gives
+    /// equivalent local protection for the at-rest voiceprint store without any access prompt.
+    private static var keyFileURL: URL {
+        AppPaths.speakersDirectory.appendingPathComponent(".store-key", isDirectory: false)
+    }
+
+    /// Fetch the store key, generating + storing it (0600) on first use.
     private static func keychainKey() throws -> SymmetricKey {
-        if let data = readKeychain() { return SymmetricKey(data: data) }
+        if let data = try? Data(contentsOf: keyFileURL), data.count == 32 {
+            return SymmetricKey(data: data)
+        }
+        purgeOldKeychainKeys()   // drop any prior Keychain-stored key (it caused the prompts)
         let key = SymmetricKey(size: .bits256)
         let data = key.withUnsafeBytes { Data($0) }
-        try writeKeychain(data)
+        AppPaths.ensureDirectory(keyFileURL.deletingLastPathComponent())
+        try data.write(to: keyFileURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFileURL.path)
+        AppLog.log("Voiceprints: store key initialized (key file, 0600)", category: "model")
         return key
     }
 
-    private static func readKeychain() -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var out: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess else { return nil }
-        return out as? Data
-    }
-
-    private static func writeKeychain(_ data: Data) throws {
+    /// Best-effort removal of any previously Keychain-stored key (legacy + data-protection) so
+    /// it stops prompting and doesn't linger.
+    private static func purgeOldKeychainKeys() {
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(base as CFDictionary)
-        var add = base
-        add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        let status = SecItemAdd(add as CFDictionary, nil)
-        guard status == errSecSuccess else { throw CryptoError.keychain(status) }
+        var dp = base
+        dp[kSecUseDataProtectionKeychain as String] = true
+        SecItemDelete(dp as CFDictionary)
     }
 
     // MARK: Passphrase-wrapped (export/import)
