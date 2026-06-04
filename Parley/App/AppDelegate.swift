@@ -5,6 +5,12 @@ import UserNotifications
 /// audio tap / aggregate device on quit, and routing "Start recording"
 /// notification actions back into the recording controller.
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    // Earliest delegate hook — runs before the model/recording stores read their
+    // Application Support paths, so a post-rename data migration lands first.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        SupportDirectoryMigration.runIfNeeded()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
         MainActor.assumeIsolated { CallNotifier.shared.configure() }
