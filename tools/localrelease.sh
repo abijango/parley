@@ -24,8 +24,8 @@
 # distribution use the archive → export → notarize → staple flow instead.
 #
 # Usage:
-#   Tools/localrelease.sh            # build + install
-#   Tools/localrelease.sh --open     # also launch it afterwards
+#   tools/localrelease.sh            # quit running copy, build, install (+ relaunch if it was running)
+#   tools/localrelease.sh --open     # also launch it afterwards
 #
 set -euo pipefail
 
@@ -43,6 +43,9 @@ DERIVED="$REPO_ROOT/.build-xcode"
 BUILT_APP="$DERIVED/Build/Products/Release/$APP_NAME"
 DEST_DIR="$HOME/Applications"
 DEST_APP="$DEST_DIR/$APP_NAME"
+
+# Set to 1 if we quit a running instance, so we relaunch the fresh build at the end.
+WAS_RUNNING=0
 
 # Stable self-signed signing identity, named after the app.
 CERT_CN="${PRODUCT_NAME} Local Codesign"
@@ -94,7 +97,34 @@ EOF
     || echo "    (note: could not set trust automatically — signing still works locally)"
 }
 
+# --- Quit any running copy, neatly, before rebuilding -------------------------
+# A graceful AppleScript quit lets the app run its normal teardown (tearing down
+# the Core Audio process tap / aggregate device) instead of being killed mid-tap.
+# Escalates to SIGTERM then SIGKILL only if it doesn't exit. Quitting first also
+# frees the installed bundle so the rebuilt copy replaces it cleanly, and the
+# user ends up on the new build (relaunched below) rather than the stale process.
+quit_running_app() {
+  pgrep -x "$PRODUCT_NAME" >/dev/null 2>&1 || return 0
+  WAS_RUNNING=1
+  echo "==> Quitting running $PRODUCT_NAME (graceful)…"
+  osascript -e "tell application \"$PRODUCT_NAME\" to quit" >/dev/null 2>&1 || true
+  for _ in $(seq 1 50); do                      # up to ~10s for a clean exit
+    pgrep -x "$PRODUCT_NAME" >/dev/null 2>&1 || { echo "    closed."; return 0; }
+    sleep 0.2
+  done
+  echo "    not responding — sending SIGTERM…"
+  pkill -x "$PRODUCT_NAME" 2>/dev/null || true
+  for _ in $(seq 1 15); do                      # up to ~3s more
+    pgrep -x "$PRODUCT_NAME" >/dev/null 2>&1 || { echo "    closed."; return 0; }
+    sleep 0.2
+  done
+  echo "    forcing SIGKILL…"
+  pkill -9 -x "$PRODUCT_NAME" 2>/dev/null || true
+  sleep 0.3
+}
+
 ensure_signing_cert
+quit_running_app
 
 echo "==> Regenerating $PROJECT from project.yml"
 xcodegen generate
@@ -126,7 +156,9 @@ ditto "$BUILT_APP" "$DEST_APP"
 echo "==> Installed: $DEST_APP"
 echo "    signed by: $(codesign -dvv "$DEST_APP" 2>&1 | grep -E '^Authority=' | head -1 | sed 's/^Authority=//')"
 
-if [[ "${1:-}" == "--open" ]]; then
-  echo "==> Launching"
+# Relaunch if asked (--open) or if we just quit a running copy (so the user lands
+# on the freshly-built version rather than having to reopen it manually).
+if [[ "${1:-}" == "--open" || "$WAS_RUNNING" == "1" ]]; then
+  echo "==> Launching $PRODUCT_NAME"
   open "$DEST_APP"
 fi

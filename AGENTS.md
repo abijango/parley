@@ -12,9 +12,9 @@ get overwritten on the next regenerate).
 
 - **Quick dev build:** `xcodegen generate` then open in Xcode (⌘R), or
   `xcodebuild build -project Parley.xcodeproj -scheme Parley -destination 'platform=macOS,arch=arm64'`.
-- **Installed local release:** `Tools/localrelease.sh` (add `--open` to launch).
+- **Installed local release:** `tools/localrelease.sh` (add `--open` to launch).
 
-## `Tools/localrelease.sh` — use this for each rebuild the user runs locally
+## `tools/localrelease.sh` — use this for each rebuild the user runs locally
 
 Builds the `Parley` scheme in **Release** and installs it to `~/Applications/Parley.app`,
 replacing the previous copy. Prefer this over a raw `xcodebuild` whenever the user wants an

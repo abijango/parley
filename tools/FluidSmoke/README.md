@@ -8,7 +8,7 @@ two-speaker clip.
 ## Run
 
 ```sh
-cd Tools/FluidSmoke
+cd tools/FluidSmoke
 swift run FluidSmoke Fixtures/two-speakers.wav            # default clusteringThreshold 0.7
 swift run FluidSmoke Fixtures/two-speakers.wav 0.65       # override threshold (2nd arg)
 ```

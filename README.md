@@ -55,7 +55,7 @@ control for the FluidAudio model.
 
 | Phase | Scope | State |
 |-------|-------|-------|
-| 0–1 | Recon + ASR/diarization smoke test (`Tools/FluidSmoke`) | ✅ done |
+| 0–1 | Recon + ASR/diarization smoke test (`tools/FluidSmoke`) | ✅ done |
 | 2 | `TranscriptionEngine` protocol, `WhisperKitEngine`, live FluidAudio transcription, settings | ✅ done |
 | 3 | Live diarization + per-segment speaker labels in the FluidAudio engine | ✅ done |
 | 4 | `VoiceprintStore` — 256-d embeddings, cosine matching, configurable `identificationThreshold` | ✅ done |
@@ -97,15 +97,15 @@ xcodebuild build -project Parley.xcodeproj -scheme Parley \
   -destination 'platform=macOS,arch=arm64'
 ```
 
-### Local release (`Tools/localrelease.sh`)
+### Local release (`tools/localrelease.sh`)
 
 For a day-to-day **installed** build — an optimized Release `.app` in `~/Applications`
 that you actually run between coding sessions — use the helper script instead of a raw
 `xcodebuild`:
 
 ```bash
-Tools/localrelease.sh            # regenerate project, build Release, install to ~/Applications
-Tools/localrelease.sh --open     # …and launch it afterwards
+tools/localrelease.sh            # regenerate project, build Release, install to ~/Applications
+tools/localrelease.sh --open     # …and launch it afterwards
 ```
 
 It runs `xcodegen generate`, builds the `Parley` scheme in **Release**, and `ditto`s the

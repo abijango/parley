@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.parley.meetingprobe</string>
+    <key>CFBundleName</key>
+    <string>MeetingProbe</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>MeetingProbe reads calendar events overlapping the current time to test calendar-based meeting-title detection.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>MeetingProbe asks browsers for their open tabs to test meeting-tab detection.</string>
+</dict>
+</plist>
