@@ -91,8 +91,14 @@ final class CallDetector: ObservableObject {
         let now = Date()
 
         if let active = activeCall {
+            // active.bundleID is the *parent* app for helper-process capturers,
+            // so the bundle comparison must be prefix-aware too (the helper pid
+            // can change mid-call, e.g. Chromium renderer swaps).
             let stillActive = nonSelf.contains { $0.pid == active.pid }
-                || nonSelf.contains { $0.bundleID?.lowercased() == active.bundleID }
+                || nonSelf.contains {
+                    guard let bid = $0.bundleID?.lowercased() else { return false }
+                    return bid == active.bundleID || bid.hasPrefix(active.bundleID + ".")
+                }
             if stillActive {
                 lastActiveSeen = now
             } else if let last = lastActiveSeen, now.timeIntervalSince(last) >= settings.callEndGraceSeconds {
@@ -117,11 +123,20 @@ final class CallDetector: ObservableObject {
     }
 
     /// Prefer a known conferencing app; otherwise the first non-self capturer.
+    /// Browsers capture the mic from a *helper* process (`com.brave.Browser.helper`,
+    /// `com.google.Chrome.helper`, …), so a capturer counts as known when its
+    /// bundle id matches a known id exactly OR is a dotted child of one — and the
+    /// call is attributed to the parent app either way (display name, AX lookups).
+    /// Safari is the documented exception: WebKit captures as
+    /// `com.apple.WebKit.GPU`, which carries no Safari prefix to match.
     private func bestCandidate(from caps: [AudioInputProcess]) -> DetectedCall? {
         let known = settings.conferencingBundleIDs
-        if let hit = caps.first(where: { ($0.bundleID?.lowercased()).map(known.contains) ?? false }) {
-            return DetectedCall(pid: hit.pid, bundleID: hit.bundleID!.lowercased(),
-                                displayName: Self.displayName(hit.bundleID!), known: true)
+        for cap in caps {
+            guard let bid = cap.bundleID?.lowercased() else { continue }
+            if let parent = known.first(where: { bid == $0 || bid.hasPrefix($0 + ".") }) {
+                return DetectedCall(pid: cap.pid, bundleID: parent,
+                                    displayName: Self.displayName(parent), known: true)
+            }
         }
         if let any = caps.first(where: { $0.bundleID != nil }) {
             return DetectedCall(pid: any.pid, bundleID: any.bundleID!.lowercased(),

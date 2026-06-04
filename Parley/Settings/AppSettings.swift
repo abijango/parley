@@ -126,6 +126,7 @@ final class AppSettings: ObservableObject {
         static let autoRecordEnabled = "parley.autoRecordEnabled"
         static let conferencingBundleIDs = "parley.conferencingBundleIDs"
         static let verboseDetectionLogging = "parley.verboseDetectionLogging"
+        static let metadataDiscoveryEnabled = "parley.metadataDiscoveryEnabled"
         static let callEndGraceSeconds = "parley.callEndGraceSeconds"
         static let idleUnloadEnabled = "parley.idleUnloadEnabled"
         static let idleUnloadMinutes = "parley.idleUnloadMinutes"
@@ -151,6 +152,9 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.autoRecordEnabled) var autoRecordEnabled: Bool = false
     @AppStorage(Key.verboseDetectionLogging) var verboseDetectionLogging: Bool = false
     @AppStorage(Key.callEndGraceSeconds) var callEndGraceSeconds: Double = 15
+    /// Read the meeting window via Accessibility when a call is detected and
+    /// suggest its title/attendees. Requires the Accessibility permission.
+    @AppStorage(Key.metadataDiscoveryEnabled) var metadataDiscoveryEnabled: Bool = true
     /// Known conferencing apps (bundle IDs), one per line. A known app on the mic
     /// is a full trigger; an unknown app on the mic only notifies.
     @AppStorage(Key.conferencingBundleIDs) var conferencingBundleIDsRaw: String = AppSettings.defaultConferencingBundleIDs

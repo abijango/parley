@@ -52,6 +52,20 @@ final class RecordingController: ObservableObject {
     /// Manual notes jotted during a recording; merged into the saved transcript.
     @Published var manualNotes: String = ""
 
+    // Meeting-metadata discovery (Accessibility) — suggestions for the fields above.
+    /// Roster discovered for the current/last call; the UI offers these as chips
+    /// (never auto-added to `attendees` — conference-room entries etc. are the
+    /// user's call). Kept after stop so chips remain usable while assigning speakers.
+    @Published private(set) var suggestedAttendees: [SuggestedAttendee] = []
+    /// Title discovered via AX. Auto-applied only while the user hasn't edited
+    /// the field; otherwise surfaced as an accept chip.
+    @Published private(set) var discoveredTitle: String?
+    private var discoveredTitleSource: String?
+    /// Where the current title came from (persisted in the session manifest).
+    private(set) var titleSource: String?
+    /// Set on focused typing in the Title field; blocks auto-fill from then on.
+    private var titleWasUserEdited = false
+
     /// After a FluidAudio recording stops, the discovered speakers offered for naming
     /// in the "Assign speakers" sheet (nil when there's nothing to review).
     @Published var pendingSpeakerReview: SpeakerReview?
@@ -85,6 +99,7 @@ final class RecordingController: ObservableObject {
     /// Drives the background Claude summary → review → commit flow.
     private(set) lazy var summaryService = SummaryService(store: store)
     let callDetector = CallDetector()
+    let metadataResolver = MeetingMetadataResolver()
 
     private let settings = AppSettings.shared
 
@@ -188,6 +203,83 @@ final class RecordingController: ObservableObject {
         attendees = current.isEmpty ? name : attendees + ", " + name
     }
 
+    // MARK: Meeting-metadata discovery (title/attendee suggestions)
+
+    private func resetDiscovery() {
+        suggestedAttendees = []
+        discoveredTitle = nil
+        discoveredTitleSource = nil
+        titleSource = nil
+        titleWasUserEdited = false
+    }
+
+    /// Titles the app set itself ("Teams call", "Recorded call", empty) — safe
+    /// to replace with a discovered one. Anything the user typed is protected
+    /// separately by `titleWasUserEdited`.
+    private func isDefaultTitle(_ title: String) -> Bool {
+        let t = title.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty || t == "Recorded call" || t.hasSuffix(" call")
+    }
+
+    /// Union a roster snapshot into the suggestions, stamping `firstSeen` (the
+    /// join timestamp) only on first sighting; entries never disappear (someone
+    /// leaving the call keeps their chip).
+    private func mergeRoster(_ roster: [RosterEntry]) {
+        for entry in roster {
+            let name = entry.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            if let idx = suggestedAttendees.firstIndex(where: {
+                $0.name.caseInsensitiveCompare(name) == .orderedSame
+            }) {
+                if suggestedAttendees[idx].role == nil, let role = entry.role {
+                    suggestedAttendees[idx].role = role
+                }
+            } else {
+                AppLog.log("Roster: \(name)\(entry.role.map { " (\($0))" } ?? "") joined", category: "detect")
+                suggestedAttendees.append(SuggestedAttendee(name: name, role: entry.role, firstSeen: Date()))
+            }
+        }
+    }
+
+    /// Called by the Title field on focused (user) edits — from then on,
+    /// discovery offers instead of overwriting.
+    func userEditedTitle() {
+        titleWasUserEdited = true
+        titleSource = "user"
+    }
+
+    /// The title accept-chip action (shown when discovery found a title after
+    /// the user had already edited the field).
+    func acceptDiscoveredTitle() {
+        guard let title = discoveredTitle else { return }
+        meetingTitle = title
+        titleSource = discoveredTitleSource
+        scheduleMetadataSync()
+    }
+
+    func acceptSuggestion(_ name: String) {
+        guard let idx = suggestedAttendees.firstIndex(where: {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }) else { return }
+        suggestedAttendees[idx].accepted = true
+        suggestedAttendees[idx].dismissed = false
+        addAttendeeIfAbsent(suggestedAttendees[idx].name)
+        scheduleMetadataSync()
+    }
+
+    func acceptAllSuggestions() {
+        for s in suggestedAttendees where !s.accepted && !s.dismissed {
+            acceptSuggestion(s.name)
+        }
+    }
+
+    func dismissSuggestion(_ name: String) {
+        guard let idx = suggestedAttendees.firstIndex(where: {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }) else { return }
+        suggestedAttendees[idx].dismissed = true
+    }
+
     private var didWarmup = false
 
     /// One-time launch warmup: surface both permission prompts together up front
@@ -231,6 +323,22 @@ final class RecordingController: ObservableObject {
             AppLog.log("Call detection disabled in settings", category: "detect")
             return
         }
+        metadataResolver.onUpdate = { [weak self] meta in
+            guard let self else { return }
+            if let title = meta.title {
+                self.discoveredTitle = title
+                self.discoveredTitleSource = meta.titleSource
+                // Auto-fill only while the title is still an untouched default;
+                // after a manual edit, the chip UI offers it instead.
+                if !self.titleWasUserEdited, self.isDefaultTitle(self.meetingTitle) {
+                    AppLog.log("Discovered title (\(meta.titleSource ?? "?")): \(title)", category: "detect")
+                    self.meetingTitle = title
+                    self.titleSource = meta.titleSource
+                    self.scheduleMetadataSync()
+                }
+            }
+            self.mergeRoster(meta.roster)
+        }
         callDetector.onCallStart = { [weak self] call in
             guard let self else { return }
             guard !self.isRecording else {
@@ -243,6 +351,9 @@ final class RecordingController: ObservableObject {
             // loading/loaded, so transcription begins with little or no catch-up.
             self.cancelIdleUnload()
             self.preloadModel()
+            // New call context: reset the last call's discoveries, start fresh.
+            self.resetDiscovery()
+            self.metadataResolver.start(for: call)
             if call.known && self.settings.autoRecordEnabled {
                 AppLog.log("AUTO-RECORD starting for \(call.displayName)", category: "detect")
                 self.meetingTitle = "\(call.displayName) call"   // sensible default; user can edit
@@ -254,6 +365,9 @@ final class RecordingController: ObservableObject {
         }
         callDetector.onCallEnd = { [weak self] call in
             guard let self else { return }
+            // Freeze (don't clear) discovery — suggestion chips stay usable
+            // after the call for title/attendee/speaker matching.
+            self.metadataResolver.enterPreviewMode()
             if self.startedByDetection && self.isRecording {
                 AppLog.log("AUTO-STOP — call on \(call.displayName) ended", category: "detect")
                 self.stop()
@@ -291,6 +405,16 @@ final class RecordingController: ObservableObject {
         lastResult = nil
         lastTranscriptURL = nil
         manualNotes = ""
+        // Discovery context: a detected call already reset + started the
+        // resolver in onCallStart, and its pre-record findings (title, early
+        // roster) belong to this session — keep them. Only a pure manual start
+        // clears leftovers from the previous session.
+        if let call = callDetector.activeCall {
+            if !metadataResolver.isPolling { metadataResolver.start(for: call) }
+        } else {
+            resetDiscovery()
+            metadataResolver.stop()
+        }
         engine = makeEngine()
 
         guard await PermissionManager.requestMicrophone() else {
@@ -497,6 +621,8 @@ final class RecordingController: ObservableObject {
         recordingStarted = nil
         startedByDetection = false
         stopTimers()
+        // Freeze discovery; suggestions stay for the preview/speaker-assignment UI.
+        metadataResolver.enterPreviewMode()
 
         micCapture?.stop()
         systemCapture?.stop()
@@ -864,6 +990,8 @@ final class RecordingController: ObservableObject {
         m.attendees = attendees
         m.filing = destinationPath
         m.manualNotes = manualNotes
+        m.titleSource = titleSource
+        m.suggestedAttendees = suggestedAttendees.isEmpty ? nil : suggestedAttendees
         m.lastHeartbeat = Date()
         m.status = status
         manifest = m

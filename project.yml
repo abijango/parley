@@ -78,3 +78,35 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon   # Parley/Assets.xcassets/AppIcon.appiconset
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"
+
+  # Unit tests — currently the MeetingParsers suite, with fixtures captured
+  # from live conferencing apps by tools/MeetingProbe.
+  ParleyTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: ParleyTests
+    dependencies:
+      - target: Parley
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.naufalmir.parley.tests   # TODO(app-name)
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  Parley:                  # TODO(app-name)
+    build:
+      targets:
+        Parley: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - ParleyTests
+    profile:
+      config: Release
+    archive:
+      config: Release

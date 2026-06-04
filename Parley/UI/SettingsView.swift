@@ -18,6 +18,8 @@ struct SettingsView: View {
     @State private var pendingBulkDelete: [RecordingFolder]?
     @State private var storageStatus: String?
     @State private var pendingModelDelete: WhisperModel?
+    /// AX trust has no change notification — refreshed when the Detection tab appears.
+    @State private var axTrusted = PermissionManager.accessibilityAuthorized()
 
     /// Settings sections — rendered as a left sidebar (Cursor / System-Settings idiom)
     /// rather than top tabs.
@@ -225,6 +227,11 @@ struct SettingsView: View {
                     Toggle("", isOn: $settings.autoRecordEnabled).labelsHidden()
                         .disabled(!settings.callDetectionEnabled)
                 }
+                SettingRow("Suggest meeting title & attendees",
+                           description: "Reads the meeting window via Accessibility to discover the title and who joined; suggestions appear next to the recording's metadata fields.") {
+                    Toggle("", isOn: $settings.metadataDiscoveryEnabled).labelsHidden()
+                        .disabled(!settings.callDetectionEnabled)
+                }
             }
 
             Section("Permissions") {
@@ -233,7 +240,9 @@ struct SettingsView: View {
                 permissionRow("System-audio recording", ok: recording.systemAudioAvailable ?? true,
                               unknown: recording.systemAudioAvailable == nil,
                               fix: PermissionManager.openPrivacySettings)
-                helpText("Call detection watches which apps hold the microphone — both permissions must be granted for it to work reliably.")
+                permissionRow("Accessibility (meeting details)", ok: axTrusted,
+                              fix: PermissionManager.openAccessibilitySettings)
+                helpText("Call detection watches which apps hold the microphone. Accessibility is only needed for title/attendee suggestions — recording works without it.")
             }
 
             Section("Known conferencing apps") {
@@ -271,6 +280,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { axTrusted = PermissionManager.accessibilityAuthorized() }
     }
 
     /// A granted/denied status line with a one-tap "Open Settings" when denied.

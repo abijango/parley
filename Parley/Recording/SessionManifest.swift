@@ -27,6 +27,25 @@ struct SessionManifest: Codable, Equatable {
     var manualNotes: String
     /// Audio track files in this session, in capture order (resume appends one).
     var audioTracks: [String]
+    // Meeting-metadata discovery (Accessibility). Optional so manifests written
+    // before this feature still decode.
+    /// Where the title came from: "callWindow" | "calendar:teams" |
+    /// "calendar:outlook" | "zoomHome" | "user" | nil (default "(App) call").
+    var titleSource: String?
+    /// Roster discovered via AX — suggestions only; `accepted` marks the ones
+    /// the user moved into `attendees`.
+    var suggestedAttendees: [SuggestedAttendee]?
+}
+
+/// One person discovered in the meeting roster, with the join timestamp
+/// (first time the AX poller saw them).
+struct SuggestedAttendee: Codable, Equatable, Identifiable {
+    var name: String
+    var role: String?          // "Organizer" / "Host" / …
+    var firstSeen: Date
+    var accepted = false
+    var dismissed = false
+    var id: String { name.lowercased() }
 }
 
 /// A crashed session offered for recovery in the launch Recovery sheet.

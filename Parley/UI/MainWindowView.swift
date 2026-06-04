@@ -172,6 +172,10 @@ struct RecordDetailView: View {
     @State private var mode: WindowMode = .live
     @State private var pendingPerson: PendingPerson?
     @State private var showSpeakerReview = false
+    /// Distinguishes the user's typing in the Title field from programmatic
+    /// auto-fill (discovered titles): only focused changes count as user edits.
+    @FocusState private var titleFocused: Bool
+    @AppStorage("parley.axBannerDismissed") private var axBannerDismissed = false
 
     enum WindowMode: String, CaseIterable, Identifiable {
         case live = "Live", preview = "Preview"
@@ -346,6 +350,28 @@ struct RecordDetailView: View {
         if let advisory = models.memoryAdvisory {
             StatusBanner(.warning, advisory, symbol: "memorychip")
         }
+        // One-time nudge: meeting-detail suggestions are on but can't work
+        // without the Accessibility permission (recording is unaffected).
+        if settings.metadataDiscoveryEnabled, !axBannerDismissed,
+           !PermissionManager.accessibilityAuthorized() {
+            HStack(alignment: .top, spacing: Theme.Spacing.xSmall) {
+                StatusBanner(.info,
+                             "Grant Accessibility to auto-suggest meeting titles & attendees. Already granted? Quit and reopen Parley.",
+                             symbol: "person.text.rectangle",
+                             actionLabel: "Open Settings", action: {
+                                 // Registers the app in the Accessibility list
+                                 // (so the toggle exists) and deep-links to it.
+                                 PermissionManager.promptForAccessibility()
+                                 PermissionManager.openAccessibilitySettings()
+                             })
+                Button { axBannerDismissed = true } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Don't show again")
+            }
+        }
     }
 
     /// The model label shown beside the "Audio" disclosure. For WhisperKit, the live
@@ -442,7 +468,28 @@ struct RecordDetailView: View {
             railField("Title") {
                 TextField("Meeting title", text: $recording.meetingTitle)
                     .textFieldStyle(.roundedBorder)
-                    .onChange(of: recording.meetingTitle) { recording.scheduleMetadataSync() }
+                    .focused($titleFocused)
+                    .onChange(of: recording.meetingTitle) {
+                        if titleFocused { recording.userEditedTitle() }
+                        recording.scheduleMetadataSync()
+                    }
+                // Discovery found a (different) title after the user edited the
+                // field — offer it without overwriting.
+                if let discovered = recording.discoveredTitle,
+                   discovered != recording.meetingTitle {
+                    Button {
+                        recording.acceptDiscoveredTitle()
+                    } label: {
+                        HStack(spacing: Theme.Spacing.xSmall) {
+                            Image(systemName: "sparkles")
+                            Text("Use “\(discovered)”")
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    .buttonStyle(.chip)
+                    .help("Title discovered from the meeting window")
+                }
             }
             railField("Filing") {
                 DestinationField(path: $recording.destinationPath,
@@ -456,6 +503,7 @@ struct RecordDetailView: View {
                            placeholder: "Add attendees",
                            onCreateNew: { name in pendingPerson = PendingPerson(name: name) })
                     .onChange(of: recording.attendees) { recording.scheduleMetadataSync() }
+                SuggestionChips(recording: recording)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

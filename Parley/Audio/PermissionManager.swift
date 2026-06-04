@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AppKit
+import ApplicationServices
 
 /// Microphone permission helper. The system-audio (tap) permission has no
 /// pre-check API — it prompts on first tap creation — so only the mic is
@@ -44,6 +45,27 @@ enum PermissionManager {
     /// can find the audio-recording entry.
     static func openPrivacySettings() {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy")
+    }
+
+    // MARK: Accessibility (meeting-metadata discovery)
+
+    /// Accessibility (AX) trust — used to read meeting titles/rosters from
+    /// conferencing apps. Unlike the mic, AX has NO async request API: the OS
+    /// never prompts on use; the user must flip the toggle in System Settings.
+    static func accessibilityAuthorized() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    /// Shows the one-time system dialog that offers to open System Settings →
+    /// Accessibility (the closest thing AX has to a permission prompt).
+    static func promptForAccessibility() {
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+    }
+
+    /// Opens System Settings → Privacy & Security → Accessibility.
+    static func openAccessibilitySettings() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }
 
     private static func open(_ string: String) {
