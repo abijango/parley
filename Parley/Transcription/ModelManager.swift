@@ -94,6 +94,19 @@ final class ModelManager: ObservableObject {
         downloadProgress[model.rawValue] != nil
     }
 
+    /// Removes a downloaded variant from disk to free its space. It re-downloads
+    /// automatically the next time it's selected/used. No-op while it's downloading.
+    func delete(_ model: WhisperModel) {
+        guard downloadProgress[model.rawValue] == nil else { return }
+        do {
+            try FileManager.default.removeItem(at: localFolder(for: model))
+            AppLog.log("Deleted model \(model.rawValue) (\(model.approxSize))", category: "model")
+        } catch {
+            AppLog.log("Delete failed: \(model.rawValue): \(error.localizedDescription)", category: "model")
+        }
+        refreshDownloadedModels()
+    }
+
     /// Explicitly downloads a variant with progress, for Settings.
     func download(_ model: WhisperModel) async {
         guard downloadProgress[model.rawValue] == nil else { return }

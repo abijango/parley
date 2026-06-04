@@ -19,6 +19,11 @@ struct ParleyApp: App {
                 .environmentObject(recording.store)
         }
         .defaultSize(width: 560, height: 700)
+        // Standard (content-insetting) title bar so both columns align below it, but
+        // compact + with the title text hidden (see WindowConfigurator) and the sidebar
+        // toggle living in the toolbar — the Cursor/Finder idiom: one thin top bar with
+        // the traffic lights, columns beneath.
+        .windowToolbarStyle(.unifiedCompact)
 
         // Menu-bar companion: quick controls + status without opening the window.
         MenuBarExtra {

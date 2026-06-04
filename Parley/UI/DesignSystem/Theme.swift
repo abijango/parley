@@ -105,14 +105,23 @@ enum Theme {
 
     // MARK: Color
     //
-    // Semantic only. One accent — the system tint (`Color.accentColor`), which
-    // respects the user's macOS appearance and adapts to dark mode for free. No
-    // hardcoded hex. (There is no `AccentColor` asset today; adopting the system
-    // accent is intentional and the most native choice. A fixed brand accent, if
-    // ever wanted, is a one-asset follow-up.)
+    // Now **look-dependent**: values come from the active `ThemeTokens` (see
+    // `ThemeTokens.swift`) via the `ThemeStore`. The Native (Tahoe) look keeps the
+    // original stance — system accent + system semantic colors, no hardcoded hex. The
+    // Cursor look swaps in a warm-paper palette + clay accent (Asset color sets).
+    // These are computed (not `static let`) so flipping the store reskins live; the
+    // read is tracked by Observation when it happens inside a view's `body`.
 
     enum Palette {
-        static let accent = Color.accentColor
+        static var accent: Color      { ThemeStore.shared.tokens.accent }
+        static var accentText: Color  { ThemeStore.shared.tokens.accentText }
+        static var windowBg: Color    { ThemeStore.shared.tokens.windowBg }
+        static var panelBg: Color     { ThemeStore.shared.tokens.panelBg }
+        static var sidebarBg: Color   { ThemeStore.shared.tokens.sidebarBg }
+        static var divider: Color     { ThemeStore.shared.tokens.divider }
+        static var textPrimary: Color   { ThemeStore.shared.tokens.textPrimary }
+        static var textSecondary: Color { ThemeStore.shared.tokens.textSecondary }
+        static var textTertiary: Color  { ThemeStore.shared.tokens.textTertiary }
     }
 
     // MARK: Severity
@@ -156,30 +165,34 @@ enum Theme {
     // defaults so labels/captions read easily (the audit's "text too small"). Chrome
     // is SF Pro (the system font); reading text is New York (serif) for long-form
     // transcript/note reading — a deliberate content/chrome split.
+    // Now **look-dependent** (computed from the active `ThemeTokens`). Native (Tahoe)
+    // keeps SF Pro chrome + New York serif reading; Cursor swaps the whole scale to
+    // Geist (one family, weight-driven hierarchy). Sizes/roles are unchanged across
+    // looks — only the typeface differs — so layout stays stable when switching.
     enum Typography {
         /// Top-of-window / primary screen title.
-        static let screenTitle: Font = .title.weight(.semibold)        // ~22
+        static var screenTitle: Font { ThemeStore.shared.tokens.screenTitle }       // ~22
         /// Sheet & dialog titles.
-        static let sheetTitle: Font = .title2.weight(.semibold)        // ~17
+        static var sheetTitle: Font { ThemeStore.shared.tokens.sheetTitle }         // ~17
         /// In-pane section headers.
-        static let sectionHeader: Font = .title3.weight(.semibold)     // ~15
+        static var sectionHeader: Font { ThemeStore.shared.tokens.sectionHeader }   // ~15
         /// Default body / primary UI text.
-        static let body: Font = .body                                  // ~13
+        static var body: Font { ThemeStore.shared.tokens.body }                     // ~13
         /// Form-field labels (Title, Filing, …).
-        static let fieldLabel: Font = .body                            // ~13
+        static var fieldLabel: Font { ThemeStore.shared.tokens.fieldLabel }         // ~13
         /// Inline control / disclosure-group labels.
-        static let controlLabel: Font = .body.weight(.medium)          // ~13 medium
+        static var controlLabel: Font { ThemeStore.shared.tokens.controlLabel }     // ~13 medium
         /// Secondary controls / labels.
-        static let secondary: Font = .callout                          // ~12
+        static var secondary: Font { ThemeStore.shared.tokens.secondary }           // ~12
         /// Captions / helper text.
-        static let caption: Font = .callout                            // ~12 (was 10)
+        static var caption: Font { ThemeStore.shared.tokens.caption }               // ~12
         /// De-emphasized fine print.
-        static let captionSecondary: Font = .subheadline               // ~11 (was 10)
-        /// Reading text — transcript lines & rendered notes (New York serif).
-        static let reading: Font = .system(.title3, design: .serif)    // ~15 serif
+        static var captionSecondary: Font { ThemeStore.shared.tokens.captionSecondary } // ~11
+        /// Reading text — transcript lines & rendered notes (NY serif / Geist sans).
+        static var reading: Font { ThemeStore.shared.tokens.reading }               // ~15
         /// Timestamps, file paths, code, model ids.
-        static let mono: Font = .system(.callout, design: .monospaced) // ~12 (was 10)
+        static var mono: Font { ThemeStore.shared.tokens.mono }                     // ~12
         /// Prominent monospaced numerics (elapsed timers, large counts).
-        static let monoLarge: Font = .system(.title2, design: .monospaced) // ~17
+        static var monoLarge: Font { ThemeStore.shared.tokens.monoLarge }           // ~17
     }
 }

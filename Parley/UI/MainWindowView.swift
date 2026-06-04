@@ -49,6 +49,19 @@ struct MainWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 720, minHeight: 560)
+        // Sidebar collapse toggle lives in the toolbar (in the title bar, by the
+        // traffic lights) — the native placement, so it isn't floating in the column.
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    withAnimation(Theme.Motion.quick) { sidebarCollapsed.toggle() }
+                } label: {
+                    Image(systemName: "sidebar.left")
+                }
+                .help(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
+            }
+        }
+        .background(WindowConfigurator())   // hide the "Parley" title text
         .environmentObject(recording.store)
         // Crash recovery: offer any interrupted sessions on launch; auto-dismiss
         // once they're all handled (resumed / recovered / discarded).
@@ -68,20 +81,6 @@ struct MainWindowView: View {
     /// Collapses to a thin icon-only rail.
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-            // Collapse / expand toggle.
-            Button {
-                withAnimation(Theme.Motion.quick) { sidebarCollapsed.toggle() }
-            } label: {
-                Image(systemName: "sidebar.left")
-                    .font(Theme.Typography.body)
-                    .frame(maxWidth: .infinity, alignment: sidebarCollapsed ? .center : .trailing)
-                    .padding(.horizontal, Theme.Spacing.small).padding(.vertical, Theme.Spacing.xSmall)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
-
             ForEach(SidebarSection.allCases) { section in
                 navButton(section)
             }
@@ -131,15 +130,34 @@ struct MainWindowView: View {
                         }
                     }
             } else {
-                HStack(spacing: Theme.Spacing.small) {
-                    Label(title, systemImage: symbol)
-                    Spacer()
-                    if badge > 0 { CountBadge(count: badge) }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // Label centred across the row; icon pinned to the leading edge and
+                // the badge to the trailing edge (overlays, so they don't shift the
+                // centred text).
+                Text(title)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .overlay(alignment: .leading) { Image(systemName: symbol) }
+                    .overlay(alignment: .trailing) {
+                        if badge > 0 { CountBadge(count: badge) }
+                    }
             }
         }
         .font(Theme.Typography.body)
+    }
+}
+
+/// Hides the window's title text (so no "Parley" sits in the title bar) while keeping
+/// the standard, content-insetting title bar — so the columns align cleanly beneath it.
+private struct WindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { configure(view.window) }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { configure(nsView.window) }
+    }
+    private func configure(_ window: NSWindow?) {
+        window?.titleVisibility = .hidden
     }
 }
 
@@ -176,10 +194,14 @@ struct RecordDetailView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             offlinePassBar
+                // Scope the offline-pass animation to this bar only. Previously it sat
+                // on the whole VStack, so the footer's text swap (word count →
+                // "Transcript saved") rode the same transaction and crossfaded the two
+                // on top of each other. Confining it here keeps the footer swap instant.
+                .animation(Theme.Motion.gentle, value: recording.offlinePass)
             footer
         }
         .frame(minWidth: 480, minHeight: 520)
-        .animation(Theme.Motion.gentle, value: recording.offlinePass)
         .onAppear {
             apps = ProcessLister.capturableApps()
             recording.launchWarmup()   // warm the model + surface both permission prompts up front
@@ -259,34 +281,36 @@ struct RecordDetailView: View {
     /// metadata and audio controls. The transcript is the main pane to its left, so
     /// setup recedes and the transcript stays the star.
     private var inspector: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
-                recordButton
-                timerView
-                audioControls
+        // A VStack (not a ScrollView): the controls + metadata keep their natural
+        // size and the Notes editor fills the remaining height. (A ScrollView would
+        // give every child only its ideal height, so Notes could never grow.)
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            recordButton
+            timerView
+            audioControls
 
-                statusRow
+            statusRow
 
-                if let load = modelLoadingInfo {
-                    modelLoadingBar(stage: load.stage, fraction: load.fraction)
-                }
-
-                advisoryRows
-
-                if case .error(let message) = recording.state {
-                    StatusBanner(.danger, message,
-                                 actionLabel: message.localizedCaseInsensitiveContains("microphone") ? "Open Settings" : nil,
-                                 action: message.localizedCaseInsensitiveContains("microphone") ? PermissionManager.openMicrophoneSettings : nil)
-                }
-
-                Divider().padding(.vertical, Theme.Spacing.xSmall)
-
-                metadataFields   // editable during recording too (e.g. a mid-call joiner)
+            if let load = modelLoadingInfo {
+                modelLoadingBar(stage: load.stage, fraction: load.fraction)
             }
-            .padding(Theme.Spacing.large)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            advisoryRows
+
+            if case .error(let message) = recording.state {
+                StatusBanner(.danger, message,
+                             actionLabel: message.localizedCaseInsensitiveContains("microphone") ? "Open Settings" : nil,
+                             action: message.localizedCaseInsensitiveContains("microphone") ? PermissionManager.openMicrophoneSettings : nil)
+            }
+
+            Divider().padding(.vertical, Theme.Spacing.xSmall)
+
+            metadataFields   // editable during recording too (e.g. a mid-call joiner)
+            notesField       // fills the rest of the rail
         }
+        .padding(Theme.Spacing.large)
         .frame(width: 300)
+        .frame(maxHeight: .infinity, alignment: .top)
         .chromeSurface()
     }
 
@@ -333,35 +357,13 @@ struct RecordDetailView: View {
     }
 
     /// Audio capture controls, always visible directly under the record button:
-    /// the capture-mode picker (full width), the per-app picker when relevant, and
-    /// the live Me/Remote level meters while recording.
+    /// the capture-mode picker (full width) and the per-app picker when relevant.
     private var audioControls: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.small) {
             capturePicker
             if settings.captureMode == .perApp { appPicker }
-            if recording.isRecording {
-                levelMeters   // confirm both tracks are actually capturing
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var levelMeters: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
-            meter("Me", level: recording.micLevel, color: Theme.Palette.accent)
-            meter("Remote", level: recording.remoteLevel, color: .green)
-        }
-    }
-
-    private func meter(_ label: String, level: Float, color: Color) -> some View {
-        HStack(spacing: Theme.Spacing.small) {
-            Text(label).font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
-                .frame(width: 50, alignment: .trailing)
-            ZStack(alignment: .leading) {
-                Capsule().fill(.quaternary).frame(width: 130, height: 6)
-                Capsule().fill(color).frame(width: max(2, CGFloat(min(1, level)) * 130), height: 6)
-            }
-        }
     }
 
     private var recordButton: some View {
@@ -455,14 +457,21 @@ struct RecordDetailView: View {
                            onCreateNew: { name in pendingPerson = PendingPerson(name: name) })
                     .onChange(of: recording.attendees) { recording.scheduleMetadataSync() }
             }
-            railField("Notes") {
-                TextEditor(text: $recording.manualNotes)
-                    .font(Theme.Typography.body)
-                    .frame(height: 64)
-                    .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The Notes editor — the flexible last element of the inspector, so it grows to
+    /// fill the rail's remaining height (and grows further as the window does). The
+    /// `TextEditor` scrolls its own content internally once notes exceed the frame.
+    private var notesField: some View {
+        railField("Notes") {
+            TextEditor(text: $recording.manualNotes)
+                .font(Theme.Typography.body)
+                .frame(maxWidth: .infinity, minHeight: 140, maxHeight: .infinity)
+                .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
+        }
+        .frame(maxHeight: .infinity)
     }
 
     /// A stacked label-over-control field for the inspector rail.
@@ -546,12 +555,18 @@ struct RecordDetailView: View {
 
     private var footer: some View {
         HStack(spacing: Theme.Spacing.medium) {
-            if let result = recording.lastResult {
-                Text(result).font(Theme.Typography.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
-            } else {
+            // Word count is always shown; the saved-path line sits beneath it once a
+            // transcript has been written (own line, so the two never collide).
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+                // Word count matches the sidebar nav type (body) so the bottom row
+                // reads consistently with "Settings" beside it.
                 Text("\(wordCount) \(wordCount == 1 ? "word" : "words")")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    .font(Theme.Typography.body).foregroundStyle(.secondary)
+                if let result = recording.lastResult {
+                    Text(result)
+                        .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
             }
             Spacer()
             if let review = recording.pendingSpeakerReview, !review.speakers.isEmpty {

@@ -2,8 +2,11 @@ import SwiftUI
 
 // MARK: - Surface treatments
 //
-// Three layered surfaces for macOS 26 (Tahoe). Adopt via the `View` extensions
-// below; views should not hand-roll `.background(...)` for these roles.
+// Three layered surfaces. Adopt via the `View` extensions below; views should not
+// hand-roll `.background(...)` for these roles. Each branches on the active look
+// (`ThemeStore.shared.kind`):
+//   • Native (Tahoe) → macOS 26 materials / Liquid Glass.
+//   • Cursor          → flat warm panels with hairline borders (no translucency).
 //
 // Layering model (the brief's "content at base, chrome floats above"):
 //   • cardSurface  — grouped content sitting on the base layer.
@@ -13,23 +16,32 @@ import SwiftUI
 extension View {
 
     /// Grouped-content card: a low-chrome filled surface (settings groups, list
-    /// rows, file chips). Quaternary fill on a continuous rounded rect.
+    /// rows, file chips). Tahoe = quaternary fill; Cursor = flat panel + hairline.
     func cardSurface(radius: CGFloat = Theme.Radius.medium) -> some View {
         modifier(CardSurface(radius: radius))
     }
 
-    /// Floating navigation chrome (sidebar, toolbars, footers). `.regularMaterial`
-    /// today; the call site adds `glassSurface()` where a floating glass element is
-    /// wanted. Kept as a distinct role so chrome is consistent everywhere.
-    func chromeSurface() -> some View {
-        background(.regularMaterial)
+    /// Navigation chrome (sidebar, toolbars, footers). Tahoe = `.regularMaterial`;
+    /// Cursor = flat warm sidebar fill. Kept as a distinct role so chrome is
+    /// consistent everywhere.
+    @ViewBuilder func chromeSurface() -> some View {
+        if ThemeStore.shared.kind == .cursor {
+            background(Theme.Palette.sidebarBg)
+        } else {
+            background(.regularMaterial)
+        }
     }
 
-    /// Liquid Glass for elements that genuinely float over content (capsular
-    /// toolbars, action pods). Automatically falls back to opaque under the
-    /// *Reduce Transparency* accessibility setting — no manual handling needed.
-    func glassSurface<S: Shape>(in shape: S) -> some View {
-        glassEffect(.regular, in: shape)
+    /// Elements that genuinely float over content (capsular toolbars, action pods).
+    /// Tahoe = Liquid Glass (falls back to opaque under *Reduce Transparency*);
+    /// Cursor = flat panel fill + hairline, clipped to the shape.
+    @ViewBuilder func glassSurface<S: Shape>(in shape: S) -> some View {
+        if ThemeStore.shared.kind == .cursor {
+            background(shape.fill(Theme.Palette.panelBg))
+                .overlay(shape.stroke(Theme.Palette.divider, lineWidth: 1))
+        } else {
+            glassEffect(.regular, in: shape)
+        }
     }
 
     /// Capsule-shaped `glassSurface()` — the common floating-control case.
@@ -45,8 +57,14 @@ extension View {
 
 private struct CardSurface: ViewModifier {
     let radius: CGFloat
-    func body(content: Content) -> some View {
-        content.background(.quaternary.opacity(Theme.Opacity.surface),
-                           in: Theme.Radius.rect(radius))
+    @ViewBuilder func body(content: Content) -> some View {
+        let shape = Theme.Radius.rect(radius)
+        if ThemeStore.shared.kind == .cursor {
+            content
+                .background(shape.fill(Theme.Palette.panelBg))
+                .overlay(shape.strokeBorder(Theme.Palette.divider, lineWidth: 1))
+        } else {
+            content.background(.quaternary.opacity(Theme.Opacity.surface), in: shape)
+        }
     }
 }

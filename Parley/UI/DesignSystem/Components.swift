@@ -97,6 +97,45 @@ struct SectionHeader: View {
     }
 }
 
+/// A settings row in the Cursor idiom: a title with an optional secondary
+/// description on the leading edge, and its control (toggle / picker / button)
+/// trailing. Consolidates the old "Toggle + separate helpText below" pattern into
+/// one cohesive, consistently-spaced row. Built on `LabeledContent` so it adopts the
+/// grouped-Form card chrome and stays aligned with native rows. Theme-driven, so it
+/// reads correctly in both the Native and Cursor looks.
+///
+/// Example:
+/// `SettingRow("Menu bar icon", description: "Show Parley in the menu bar") { Toggle("", isOn: $x).labelsHidden() }`
+struct SettingRow<Control: View>: View {
+    let title: String
+    var description: String? = nil
+    @ViewBuilder var control: () -> Control
+
+    init(_ title: String, description: String? = nil,
+         @ViewBuilder control: @escaping () -> Control) {
+        self.title = title
+        self.description = description
+        self.control = control
+    }
+
+    var body: some View {
+        LabeledContent {
+            control()
+        } label: {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+                Text(title).font(Theme.Typography.body)
+                if let description {
+                    Text(description)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(.vertical, Theme.Spacing.xxSmall)
+    }
+}
+
 /// A solid count / notification badge for navigation items (e.g. a sidebar item
 /// count of things needing attention). Distinct from `StatusBadge` (a *tinted*
 /// status label) — this is a filled accent pill, the conventional count treatment.

@@ -17,29 +17,90 @@ struct SettingsView: View {
     @State private var purgeDays = 14
     @State private var pendingBulkDelete: [RecordingFolder]?
     @State private var storageStatus: String?
+    @State private var pendingModelDelete: WhisperModel?
+
+    /// Settings sections — rendered as a left sidebar (Cursor / System-Settings idiom)
+    /// rather than top tabs.
+    enum SettingsTab: String, CaseIterable, Identifiable {
+        case general, transcription, speakers, notes, summary, detection, storage, vault
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .general:       return "General"
+            case .transcription: return "Transcription"
+            case .speakers:      return "Speakers"
+            case .notes:         return "Notes"
+            case .summary:       return "Summary"
+            case .detection:     return "Detection"
+            case .storage:       return "Storage"
+            case .vault:         return "Vault"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .general:       return "gearshape"
+            case .transcription: return "waveform"
+            case .speakers:      return "person.2.wave.2"
+            case .notes:         return "doc.text"
+            case .summary:       return "rectangle.split.3x1"
+            case .detection:     return "dot.radiowaves.left.and.right"
+            case .storage:       return "internaldrive"
+            case .vault:         return "folder"
+            }
+        }
+    }
+
+    @State private var selection: SettingsTab? = .general
 
     var body: some View {
-        TabView {
-            generalTab
-                .tabItem { Label("General", systemImage: "gearshape") }
-            transcriptionTab
-                .tabItem { Label("Transcription", systemImage: "waveform") }
-            SpeakersSettingsView(store: recording.voiceprints,
-                                 diarizationThreshold: settings.diarizationThreshold)
-                .tabItem { Label("Speakers", systemImage: "person.2.wave.2") }
-            notesTab
-                .tabItem { Label("Notes", systemImage: "doc.text") }
-            summaryTab
-                .tabItem { Label("Summary", systemImage: "rectangle.split.3x1") }
-            detectionTab
-                .tabItem { Label("Detection", systemImage: "dot.radiowaves.left.and.right") }
-            storageTab
-                .tabItem { Label("Storage", systemImage: "internaldrive") }
-            vaultTab
-                .tabItem { Label("Vault", systemImage: "folder") }
+        NavigationSplitView {
+            List(SettingsTab.allCases, selection: $selection) { tab in
+                Label(tab.title, systemImage: tab.icon).tag(tab)
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 196, ideal: 212, max: 240)
+        } detail: {
+            detailContent
+                // Big inline title pinned at the top of the pane (Cursor places the
+                // section name here, not in the title bar). The opaque header
+                // background + divider mean content scrolls cleanly *under* it instead
+                // of bleeding through the title text.
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    HStack {
+                        Text((selection ?? .general).title)
+                            .font(Theme.Typography.screenTitle)
+                        Spacer()
+                    }
+                    .padding(.horizontal, Theme.Spacing.xLarge)
+                    .padding(.top, Theme.Spacing.large)
+                    .padding(.bottom, Theme.Spacing.small)
+                    .frame(maxWidth: .infinity)
+                    .background(.bar)
+                    .overlay(alignment: .bottom) { Divider() }
+                }
+                // macOS Form toggles default to a checkbox — force the switch (Cursor's
+                // look). An explicit .toggleStyle(.checkbox) elsewhere still overrides.
+                .toggleStyle(.switch)
+                .tint(Theme.Palette.accent)
         }
-        .frame(minWidth: 540, idealWidth: 600, maxWidth: .infinity,
-               minHeight: 440, idealHeight: 500, maxHeight: .infinity)
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 720, idealWidth: 820, maxWidth: .infinity,
+               minHeight: 520, idealHeight: 640, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        switch selection ?? .general {
+        case .general:       generalTab
+        case .transcription: transcriptionTab
+        case .speakers:      SpeakersSettingsView(store: recording.voiceprints,
+                                                  diarizationThreshold: settings.diarizationThreshold)
+        case .notes:         notesTab
+        case .summary:       summaryTab
+        case .detection:     detectionTab
+        case .storage:       storageTab
+        case .vault:         vaultTab
+        }
     }
 
     /// One consistent caption treatment for explanatory text under a control.
@@ -61,33 +122,49 @@ struct SettingsView: View {
 
     private var generalTab: some View {
         Form {
+            Section("Appearance") {
+                SettingRow("Theme",
+                           description: "Native is the macOS look — SF Pro, system accent, Liquid Glass. Cursor is a warm paper palette with Geist and flat surfaces. Switches instantly.") {
+                    Picker("", selection: Binding(
+                        get: { ThemeStore.shared.kind },
+                        set: { ThemeStore.shared.select($0) }
+                    )) {
+                        ForEach(ThemeKind.allCases) { Text($0.displayName).tag($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                }
+            }
             Section("Vault") {
-                TextField("Obsidian vault path", text: $settings.vaultPath)
-                LabeledContent("Transcripts folder") {
+                LabeledContent("Obsidian vault") {
+                    TextField("path to your vault", text: $settings.vaultPath)
+                        .textFieldStyle(.roundedBorder).frame(maxWidth: 280)
+                }
+                SettingRow("Transcripts folder") {
                     Text(AppPaths.unprocessedURL.path)
                         .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                        .textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                        .frame(maxWidth: 280, alignment: .trailing)
                 }
             }
             Section("Recording") {
-                Picker("Default other-audio capture", selection: Binding(
-                    get: { settings.captureMode }, set: { settings.captureMode = $0 }
-                )) {
-                    ForEach(CaptureMode.allCases) { Text($0.label).tag($0) }
+                SettingRow("Default other-audio capture",
+                           description: "How the far side of a call is captured when a recording starts.") {
+                    Picker("", selection: Binding(
+                        get: { settings.captureMode }, set: { settings.captureMode = $0 }
+                    )) {
+                        ForEach(CaptureMode.allCases) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden().fixedSize()
                 }
             }
             Section("Logs") {
-                HStack(spacing: Theme.Spacing.small) {
-                    Text(AppLog.fileURL.path)
-                        .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-                        .lineLimit(1).truncationMode(.middle)
-                        .textSelection(.enabled)
-                    Spacer()
-                    Button("Reveal Log") {
-                        NSWorkspace.shared.activateFileViewerSelecting([AppLog.fileURL])
+                SettingRow("Diagnostic log", description: AppLog.fileURL.path) {
+                    HStack(spacing: Theme.Spacing.small) {
+                        Button("Reveal") {
+                            NSWorkspace.shared.activateFileViewerSelecting([AppLog.fileURL])
+                        }
+                        Button("Clear") { AppLog.clear() }
                     }
-                    Button("Clear") { AppLog.clear() }
                 }
             }
         }
@@ -100,10 +177,14 @@ struct SettingsView: View {
         Form {
             Section("Meeting summaries") {
                 helpText("After a recording's speakers are assigned, Claude writes a summary in the background. When it's ready, review it in History → \"Review\", set where it's filed, then commit it to your vault.")
-                Toggle("Auto-summarize after speakers are assigned", isOn: $settings.autoRunClaude)
-                helpText("When off, summaries only run when you press Summarize on a transcript in History.")
-                Toggle("Delete the recording's audio after committing its summary", isOn: $settings.deleteAudioAfterFiling)
-                helpText("Once a summary is filed you have the raw transcript + the note, so the audio is redundant. Frees significant disk.")
+                SettingRow("Auto-summarize after speakers are assigned",
+                           description: "When off, summaries only run when you press Summarize on a transcript in History.") {
+                    Toggle("", isOn: $settings.autoRunClaude).labelsHidden()
+                }
+                SettingRow("Delete audio after committing its summary",
+                           description: "Once a summary is filed you have the raw transcript + the note, so the audio is redundant. Frees significant disk.") {
+                    Toggle("", isOn: $settings.deleteAudioAfterFiling).labelsHidden()
+                }
             }
 
             Section("Claude") {
@@ -136,10 +217,14 @@ struct SettingsView: View {
     private var detectionTab: some View {
         Form {
             Section("Call detection") {
-                Toggle("Detect calls automatically", isOn: $settings.callDetectionEnabled)
-                Toggle("Auto-record when a known app starts a call", isOn: $settings.autoRecordEnabled)
-                    .disabled(!settings.callDetectionEnabled)
-                helpText("When auto-record is off, a notification with a Start button appears instead.")
+                SettingRow("Detect calls automatically") {
+                    Toggle("", isOn: $settings.callDetectionEnabled).labelsHidden()
+                }
+                SettingRow("Auto-record when a known app starts a call",
+                           description: "When off, a notification with a Start button appears instead.") {
+                    Toggle("", isOn: $settings.autoRecordEnabled).labelsHidden()
+                        .disabled(!settings.callDetectionEnabled)
+                }
             }
 
             Section("Permissions") {
@@ -157,12 +242,11 @@ struct SettingsView: View {
             }
 
             Section("Logging") {
-                Toggle("Verbose detection logging", isOn: $settings.verboseDetectionLogging)
-                HStack {
-                    Text("Detection log")
-                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Reveal Log") { NSWorkspace.shared.activateFileViewerSelecting([AppLog.fileURL]) }
+                SettingRow("Verbose detection logging") {
+                    Toggle("", isOn: $settings.verboseDetectionLogging).labelsHidden()
+                }
+                SettingRow("Detection log") {
+                    Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([AppLog.fileURL]) }
                 }
             }
 
@@ -430,36 +514,36 @@ struct SettingsView: View {
 
             if settings.transcriptionEngine == .whisperKit {
                 Section("Live transcript") {
-                    Toggle("Show a live transcript while recording", isOn: $settings.liveTranscriptEnabled)
-                        .disabled(recording.isRecording)
-                    helpText("Off = offline-only: capture audio silently and generate the full, speaker-attributed transcript in one fast pass when you stop. Turn on to also see streaming text during the call (uses the live model below) — at the cost of continuous live decoding.")
+                    SettingRow("Show a live transcript while recording",
+                               description: "Off = offline-only: capture audio silently and generate the full, speaker-attributed transcript in one fast pass when you stop. On also streams text during the call (uses the live model) — at the cost of continuous live decoding.") {
+                        Toggle("", isOn: $settings.liveTranscriptEnabled).labelsHidden()
+                            .disabled(recording.isRecording)
+                    }
                 }
 
-                Section("Live model") {
-                    Picker("Live model", selection: Binding(
-                        get: { settings.liveModel }, set: { settings.liveModel = $0 }
-                    )) {
-                        ForEach(WhisperModel.allCases) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.menu).labelsHidden().frame(maxWidth: 260)
-                    .disabled(recording.isRecording || !settings.liveTranscriptEnabled)
-                    .opacity(settings.liveTranscriptEnabled ? 1 : 0.5)
-                    helpText(settings.liveTranscriptEnabled
-                             ? "Used for the fast LIVE transcript during a call. Pick a small/fast model so it keeps real-time — if you see \"OVERLOADED — skipped audio\" in the logs, choose a smaller one. (Speakers are labelled at stop regardless.)"
-                             : "Only used when Live transcript is on.")
-                }
+                // Live + final models share one dropdown idiom (with an inline
+                // download / progress / delete control next to each), so the two
+                // read as one coherent group rather than two unrelated controls.
+                Section("Models") {
+                    modelPickerRow(
+                        title: "Live model",
+                        description: settings.liveTranscriptEnabled
+                            ? "The fast LIVE transcript during a call. Pick a small/fast model so it keeps real-time — if the logs show \"OVERLOADED — skipped audio\", choose a smaller one. (Speakers are labelled at stop regardless.)"
+                            : "Only used when Live transcript is on.",
+                        selection: $settings.liveModel,
+                        enabled: !recording.isRecording && settings.liveTranscriptEnabled)
 
-                Section("Final model (at stop)") {
-                    helpText("Re-transcribes the whole recording when you stop — this is the SAVED transcript. Use the most accurate model you can; it only runs once and isn't real-time. Can be the same as the live model.")
-                    ForEach(WhisperModel.allCases) { model in
-                        modelRow(model)
-                    }
-                    .disabled(recording.isRecording)   // never swap the model out from under a live recording
+                    modelPickerRow(
+                        title: "Final model (at stop)",
+                        description: "Re-transcribes the whole recording when you stop — the SAVED transcript. Use the most accurate model you can; it runs once and isn't real-time. Can match the live model.",
+                        selection: finalModelBinding,
+                        enabled: !recording.isRecording)
+
                     Text("Stored in \(AppPaths.modelsDirectory.path)")
                         .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
                         .lineLimit(1).truncationMode(.middle)
                     if recording.isRecording {
-                        Text("Model and compute can't be changed while recording.")
+                        Text("Models can't be changed while recording.")
                             .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
                     }
                 }
@@ -479,19 +563,20 @@ struct SettingsView: View {
                 }
 
                 Section("Memory") {
-                    Toggle("Unload the model when idle to free memory", isOn: $settings.idleUnloadEnabled)
-                    if settings.idleUnloadEnabled {
-                        Stepper("Unload after \(Int(settings.idleUnloadMinutes)) min idle",
-                                value: $settings.idleUnloadMinutes, in: 1...60, step: 1)
-                            .fixedSize()
+                    SettingRow("Unload the model when idle",
+                               description: "Reclaims the model's memory after inactivity. It reloads on the next detected call or recording — capture starts immediately and the transcript catches up once the model finishes loading.") {
+                        Toggle("", isOn: $settings.idleUnloadEnabled).labelsHidden()
                     }
-                    helpText("Reclaims the model's memory after inactivity. It reloads on the next detected call or recording — capture starts immediately and the transcript catches up once the model finishes loading.")
-                    HStack {
-                        Text("If transcription crashes on load, the compiled-model cache may be corrupt.")
-                            .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer()
-                        Button("Reset model cache") {
+                    if settings.idleUnloadEnabled {
+                        SettingRow("Unload after idle") {
+                            Stepper("\(Int(settings.idleUnloadMinutes)) min",
+                                    value: $settings.idleUnloadMinutes, in: 1...60, step: 1)
+                                .fixedSize()
+                        }
+                    }
+                    SettingRow("Reset model cache",
+                               description: "If transcription crashes on load, the compiled-model cache may be corrupt. Resetting rebuilds it on the next load.") {
+                        Button("Reset") {
                             ModelManager.clearCompiledCache()
                             Task { await models.prepare(settings.model) }
                         }
@@ -534,52 +619,77 @@ struct SettingsView: View {
             guard !recording.isRecording else { return }
             Task { await models.prepare(settings.model) }
         }
+        .confirmationDialog(
+            "Delete the \(pendingModelDelete?.label ?? "") model?",
+            isPresented: Binding(get: { pendingModelDelete != nil },
+                                 set: { if !$0 { pendingModelDelete = nil } }),
+            presenting: pendingModelDelete
+        ) { model in
+            Button("Delete \(model.approxSize)", role: .destructive) {
+                models.delete(model); pendingModelDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingModelDelete = nil }
+        } message: { model in
+            Text("Frees \(model.approxSize) from disk. \(model.label) re-downloads automatically the next time it's used.")
+        }
     }
 
-    @ViewBuilder
-    private func modelRow(_ model: WhisperModel) -> some View {
-        let isActive = settings.model == model
-        let isDownloaded = models.downloadedModels.contains(model.rawValue)
-        let progress = models.downloadProgress[model.rawValue]
-
-        HStack(spacing: Theme.Spacing.medium) {
-            Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
-                .foregroundStyle(isActive ? Theme.Palette.accent : .secondary)
-                .onTapGesture { if isDownloaded { select(model) } }
-
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                HStack(spacing: Theme.Spacing.small) {
-                    Text(model.label).fontWeight(isActive ? .semibold : .regular)
-                    Text(model.approxSize)
-                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+    /// Final-model selection: set it, and warm it in the background only if it's
+    /// already downloaded (so picking an undownloaded model surfaces the inline
+    /// Download button rather than silently kicking off a load).
+    private var finalModelBinding: Binding<WhisperModel> {
+        Binding(
+            get: { settings.model },
+            set: { newModel in
+                settings.model = newModel
+                if models.downloadedModels.contains(newModel.rawValue) {
+                    Task { await models.prepare(newModel) }
                 }
-                Text(model.blurb)
-                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
             }
+        )
+    }
 
-            Spacer()
-
-            if let progress {
-                HStack(spacing: Theme.Spacing.small) {
-                    ProgressView(value: progress).frame(width: 80)
-                    Text("\(Int(progress * 100))%")
-                        .font(Theme.Typography.captionSecondary).monospacedDigit()
+    /// A model dropdown row in the shared idiom: a labelled `Picker` with an inline
+    /// state control (download progress / Download button / delete icon) right beside
+    /// the dropdown. Used for both the live and final models so they read as a set.
+    @ViewBuilder
+    private func modelPickerRow(title: String, description: String,
+                                selection: Binding<WhisperModel>, enabled: Bool) -> some View {
+        SettingRow(title, description: description) {
+            HStack(spacing: Theme.Spacing.small) {
+                modelStateControl(for: selection.wrappedValue)
+                Picker("", selection: selection) {
+                    ForEach(WhisperModel.allCases) { m in
+                        Text("\(m.label) · \(m.approxSize)").tag(m)
+                    }
                 }
-            } else if isDownloaded {
-                if isActive {
-                    Label("Active", systemImage: "checkmark.circle.fill")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Severity.success.color)
-                        .labelStyle(.titleAndIcon)
-                } else {
-                    Button("Use") { select(model) }
-                }
-            } else {
-                Button("Download") { Task { await models.download(model) } }
+                .labelsHidden().fixedSize()
             }
         }
-        .padding(.vertical, Theme.Spacing.xxSmall)
-        .contentShape(Rectangle())
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
+    }
+
+    /// The affordance shown next to a model dropdown, by state:
+    /// downloading → progress + %, not downloaded → Download, downloaded → delete icon.
+    @ViewBuilder
+    private func modelStateControl(for model: WhisperModel) -> some View {
+        if let progress = models.downloadProgress[model.rawValue] {
+            HStack(spacing: Theme.Spacing.xSmall) {
+                ProgressView(value: progress).frame(width: 80)
+                Text("\(Int(progress * 100))%")
+                    .font(Theme.Typography.captionSecondary).monospacedDigit()
+            }
+        } else if !models.downloadedModels.contains(model.rawValue) {
+            Button("Download") { Task { await models.download(model) } }
+                .controlSize(.small)
+        } else {
+            Button(role: .destructive) { pendingModelDelete = model } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Delete \(model.label) (\(model.approxSize)) from disk")
+        }
     }
 
     // MARK: Vault reconciliation
@@ -669,24 +779,26 @@ struct SettingsView: View {
         }
     }
 
-    /// Make a model active and immediately warm it in the background, so it's
-    /// loaded by the time the user starts a recording.
-    private func select(_ model: WhisperModel) {
-        settings.model = model
-        Task { await models.prepare(model) }
-    }
-
     // MARK: Notes
 
     private var notesTab: some View {
         Form {
             Section("Notes generation") {
-                Toggle("Automatically generate notes when a recording finishes", isOn: $settings.autoRunClaude)
-                helpText("When off, use the “Generate meeting notes” button on the Preview after a recording.")
+                SettingRow("Automatically generate notes when a recording finishes",
+                           description: "When off, use the “Generate meeting notes” button on the Preview after a recording.") {
+                    Toggle("", isOn: $settings.autoRunClaude).labelsHidden()
+                }
             }
             Section("Claude") {
-                TextField("claude binary path", text: $settings.claudeBinaryPath)
-                TextField("Claude model", text: $settings.claudeModel)
+                LabeledContent("CLI") {
+                    TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
+                        .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                }
+                LabeledContent("Model") {
+                    TextField("sonnet", text: $settings.claudeModel)
+                        .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                        .frame(maxWidth: 220)
+                }
             }
             Section("Prompt template") {
                 editorStyle(TextEditor(text: $settings.claudePromptTemplate), height: 120)

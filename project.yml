@@ -36,6 +36,13 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Parley
+        excludes:
+          - "Resources/Fonts/**"   # added as a folder reference below (kept out of the main glob)
+      # Bundled Geist + Geist Mono (OFL). Folder reference so the "Fonts" directory is
+      # preserved inside Contents/Resources, where ATSApplicationFontsPath points.
+      - path: Parley/Resources/Fonts
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: ArgmaxOSS
         product: WhisperKit
@@ -52,6 +59,7 @@ targets:
         NSMicrophoneUsageDescription: "Records your microphone so meetings can be transcribed locally."
         NSAudioCaptureUsageDescription: "Captures system and app audio so the other side of meetings can be transcribed locally."
         NSHumanReadableCopyright: ""
+        ATSApplicationFontsPath: "Fonts"   # registers bundled Geist faces at launch (Resources/Fonts)
     entitlements:
       path: Parley/App/Parley.entitlements
       properties:

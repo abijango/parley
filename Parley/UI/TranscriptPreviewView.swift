@@ -13,13 +13,25 @@ struct TranscriptPreviewView: View {
     @State private var content: String?
     @State private var loadError: String?
 
+    /// Reading / code font families for the rendered note, matched to the active look.
+    private var readingFamily: FontProperties.Family {
+        ThemeStore.shared.kind == .cursor ? .custom("Geist") : .system(.serif)
+    }
+    private var codeFamily: FontProperties.Family {
+        ThemeStore.shared.kind == .cursor ? .custom("GeistMono") : .system(.monospaced)
+    }
+
     var body: some View {
         Group {
             if let content {
                 ScrollView {
                     Markdown(content)
-                        .markdownTextStyle(\.text) { FontFamily(.system(.serif)) }   // New York serif for reading
-                        .markdownTextStyle(\.code) { FontFamilyVariant(.monospaced) }
+                        // Reading font follows the active look (Geist in Cursor, New
+                        // York serif in Native) so the rendered note matches the rest
+                        // of the UI. Larger base size for comfortable reading; headings
+                        // scale relative to it.
+                        .markdownTextStyle(\.text) { FontFamily(readingFamily); FontSize(16) }
+                        .markdownTextStyle(\.code) { FontFamily(codeFamily) }
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(Theme.Spacing.large)

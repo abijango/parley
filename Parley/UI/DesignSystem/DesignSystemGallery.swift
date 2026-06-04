@@ -6,9 +6,20 @@ import SwiftUI
 /// without touching any real screen. Wrapped in `#if DEBUG`; never built into
 /// Release.
 private struct DesignSystemGallery: View {
+    @State private var kind: ThemeKind = ThemeStore.shared.kind
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.xLarge) {
+
+                // Live look switch. Flipping calls ThemeStore.select(...) — the body
+                // below reads Theme.* tokens, so the whole gallery reskins via
+                // Observation (the real-app proof of the Step 1 spike).
+                Picker("Look", selection: $kind) {
+                    ForEach(ThemeKind.allCases) { Text($0.displayName).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: kind) { _, newKind in ThemeStore.shared.select(newKind) }
 
                 section("Type roles") {
                     Text("Screen title").font(Theme.Typography.screenTitle)
@@ -18,7 +29,7 @@ private struct DesignSystemGallery: View {
                     Text("Field label").font(Theme.Typography.fieldLabel).foregroundStyle(.secondary)
                     Text("Secondary").font(Theme.Typography.secondary).foregroundStyle(.secondary)
                     Text("Caption").font(Theme.Typography.caption).foregroundStyle(.secondary)
-                    Text("Reading — transcript & notes (New York serif)").font(Theme.Typography.reading)
+                    Text("Reading — transcript & notes").font(Theme.Typography.reading)
                     Text("00:42 · path/to/file").font(Theme.Typography.mono).foregroundStyle(.tertiary)
                 }
 
@@ -74,6 +85,7 @@ private struct DesignSystemGallery: View {
             .padding(Theme.Spacing.large)
         }
         .frame(width: 440, height: 760)
+        .background(Theme.Palette.windowBg)   // shows each look's base surface
     }
 
     @ViewBuilder
