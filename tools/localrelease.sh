@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # localrelease.sh — build a Release version of the app and install it into
-# ~/Applications, replacing any previous copy.
+# /Applications, replacing any previous copy.
 #
 # Signing: every build is signed with a STABLE, self-signed code-signing
 # certificate named after the app ("<PRODUCT_NAME> Local Codesign"). A stable
@@ -41,7 +41,7 @@ PRODUCT_NAME="${PRODUCT_NAME:-Parley}"
 APP_NAME="${PRODUCT_NAME}.app"
 DERIVED="$REPO_ROOT/.build-xcode"
 BUILT_APP="$DERIVED/Build/Products/Release/$APP_NAME"
-DEST_DIR="$HOME/Applications"
+DEST_DIR="/Applications"
 DEST_APP="$DEST_DIR/$APP_NAME"
 
 # Set to 1 if we quit a running instance, so we relaunch the fresh build at the end.
