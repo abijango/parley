@@ -56,9 +56,22 @@ enum AudioMix {
         }
         for i in 0..<n { out[i] = max(-1, min(1, out[i])) }
         guard let buffer = makeBuffer(out),
-              let file = try? AVAudioFile(forWriting: output, settings: format.settings) else { return false }
+              let file = try? AVAudioFile(forWriting: output, settings: mixFileSettings) else { return false }
         do { try file.write(from: buffer); return true } catch { return false }
     }
+
+    /// `mixed.caf` on-disk format: Int16 LPCM (half the Float32 size, inaudible for
+    /// speech). The in-memory pipeline stays Float32 (`format`); AVAudioFile converts
+    /// on write. `AudioCompactor` later re-encodes the file to ALAC in place.
+    private static let mixFileSettings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatLinearPCM,
+        AVSampleRateKey: 16_000.0,
+        AVNumberOfChannelsKey: 1,
+        AVLinearPCMBitDepthKey: 16,
+        AVLinearPCMIsFloatKey: false,
+        AVLinearPCMIsBigEndianKey: false,
+        AVLinearPCMIsNonInterleaved: false,
+    ]
 
     static func makeBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
         guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return nil }

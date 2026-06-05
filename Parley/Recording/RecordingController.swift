@@ -663,6 +663,12 @@ final class RecordingController: ObservableObject {
                     }
                 }
             }
+            // The raw LPCM archives have served their crash-safety purpose now the
+            // offline pass is done with them — re-encode to ALAC in place (lossless,
+            // same filenames, ~half the size). Detached: blocking file transcode.
+            if let dir = self?.sessionDirectory {
+                await Task.detached(priority: .utility) { AudioCompactor.compactSession(dir) }.value
+            }
         }
         clock = nil
 
@@ -797,6 +803,9 @@ final class RecordingController: ObservableObject {
             } else {
                 self.pendingSpeakerReview = SpeakerReview(speakers: speakers, mixedCaf: eng.mixedAudioURL)
             }
+            // The re-run rebuilt `mixed.caf` as LPCM — compact it again (the mic/
+            // system archives are already ALAC and get skipped).
+            await Task.detached(priority: .utility) { AudioCompactor.compactSession(dir) }.value
         }
     }
 
