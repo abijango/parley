@@ -29,16 +29,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         completionHandler([.banner, .sound])
     }
 
-    // Start recording when the user taps the notification or its Start action.
+    // Start recording when the user taps the call-detected notification or its
+    // Start action. Gated on the notification's category: the app posts other
+    // notifications too (e.g. "Summary ready to review"), and a default-action
+    // click on those must NOT kick off a phantom recording — it just brings the
+    // app forward so the user can get to History.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let id = response.actionIdentifier
-        if id == CallNotifier.startActionID || id == UNNotificationDefaultActionIdentifier {
+        let category = response.notification.request.content.categoryIdentifier
+        if category == CallNotifier.categoryID,
+           id == CallNotifier.startActionID || id == UNNotificationDefaultActionIdentifier {
             Task { @MainActor in
                 AppLog.log("Notification action — starting recording", category: "detect")
                 await RecordingController.shared.start(detectionInitiated: true)
             }
+        } else if id == UNNotificationDefaultActionIdentifier {
+            NSApp.activate(ignoringOtherApps: true)
         }
         completionHandler()
     }
