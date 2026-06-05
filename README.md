@@ -11,17 +11,13 @@ labels who said what ("Me" vs "Remote") with no diarization ML, and it fixes the
 
 ## How it works
 
-```
-Mic (AVAudioEngine)  ─┐                         ┌─ "Me" pipeline ─┐
-                      ├─ ring buffers ─ 16kHz ──┤                 ├─ merge ─→ live UI
-System / per-app  ───┘  (Core Audio taps)       └─ "Remote" pipe ─┘    │
-  (CATapDescription, no Screen Recording perm)                          │ on stop
-                                                                        ▼
-   ~/ObsidianVault/Unsorted Transcripts/YYYY-MM-DD-HHMM - <title>.md  + raw audio
-                                                                        │ (optional)
-                                                                        ▼
-   claude -p "/process-meeting-transcript …"  → polished note in Internal/Customers/…
-```
+[![Parley architecture — transit map](docs/architecture.png)](docs/architecture.html)
+
+> The map reads left to right: the **"Me"** and **"Remote"** lines (mic + system audio,
+> captured separately) interchange into the **engine line**, the red **offline pass**
+> loop runs once at stop, and everything terminates on the **vault line** in Obsidian.
+> Open [`docs/architecture.html`](docs/architecture.html) locally for the animated,
+> interactive version.
 
 Both transcription pipelines share **one** WhisperKit model behind a serializing actor
 (lower memory + no Neural Engine contention); the per-track labeling comes from the

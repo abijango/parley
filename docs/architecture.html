@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parley Transit — from meeting to note</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Jost:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f8f5ee;
+    --ink: #1d1d22;
+    --mic: #1f5fa8;
+    --sys: #e08a00;
+    --eng: #0e7c66;
+    --stop: #d8431f;
+    --vault: #4b3a8c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: 'Jost', sans-serif;
+    padding: 2.5rem 1.25rem 3rem;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .map { width: 100%; max-width: 1040px; }
+
+  .authority {
+    display: flex; align-items: center; gap: 1rem;
+    border-bottom: 5px solid var(--ink); padding-bottom: 0.9rem; margin-bottom: 0.4rem;
+  }
+  .roundel {
+    width: 52px; height: 52px; border-radius: 50%; border: 6px solid var(--stop);
+    position: relative; flex: 0 0 auto;
+  }
+  .roundel::before {
+    content: ''; position: absolute; left: -10px; right: -10px; top: 50%;
+    height: 16px; transform: translateY(-50%); background: var(--ink); border-radius: 2px;
+  }
+  .roundel::after {
+    content: 'P'; position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 1.05rem; color: #fff; letter-spacing: 0.02em;
+  }
+  .authority h1 { font-size: 1.7rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+  .authority h1 span { color: var(--stop); }
+
+  svg.network { width: 100%; height: auto; display: block; margin-top: 0.6rem; }
+  svg.network text { font-family: 'Jost', sans-serif; fill: var(--ink); }
+  .lbl { font-size: 13.5px; font-weight: 600; }
+  .sub { font-size: 11px; font-weight: 400; fill: #6b6a66; }
+  .linename { font-size: 10.5px; font-weight: 700; letter-spacing: 0.18em; }
+  path.line { fill: none; stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+  circle.stn { fill: #fff; stroke-width: 3.5; }
+  circle.xc-outer { fill: #fff; stroke: var(--ink); stroke-width: 3.5; }
+
+  .legend {
+    margin-top: 1.5rem; border-top: 2px solid var(--ink); padding-top: 1rem;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.9rem 1.6rem;
+    font-size: 0.74rem; line-height: 1.55;
+  }
+  .legend .key { display: flex; gap: 0.6rem; }
+  .legend .chip { flex: 0 0 26px; height: 8px; border-radius: 4px; margin-top: 0.42em; }
+  .legend b { font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.68rem; }
+  .legend p { color: #61605e; }
+  .legend .dashedchip { background: repeating-linear-gradient(90deg, var(--vault) 0 5px, transparent 5px 9px); }
+</style>
+</head>
+<body>
+<div class="map">
+
+  <div class="authority">
+    <div class="roundel"></div>
+    <h1>Parley <span>transit</span></h1>
+  </div>
+
+  <svg class="network" viewBox="0 0 1020 612" role="img" aria-label="Parley architecture as a transit map">
+    <!-- ===================== LINES ===================== -->
+    <!-- Mic line -->
+    <path class="line" stroke="var(--mic)" d="M70,90 H400 Q465,90 480,135 L488,158 Q500,205 545,205 H560"/>
+    <!-- System line -->
+    <path class="line" stroke="var(--sys)" d="M70,320 H400 Q465,320 480,275 L488,252 Q500,205 545,205 H560"/>
+    <!-- Engine line: two parallel services that rejoin -->
+    <path class="line" stroke="var(--eng)" d="M545,205 H575 Q600,205 615,185 Q633,150 660,150 H720 Q747,150 765,185 Q780,205 805,205 H950"/>
+    <path class="line" stroke="var(--eng)" d="M575,205 Q600,205 615,225 Q633,260 660,260 H720 Q747,260 765,225 Q780,205 805,205"/>
+    <!-- Offline loop (at stop) -->
+    <path class="line" stroke="var(--stop)" d="M950,205 Q990,205 990,245 V400 Q990,440 950,440 H240 Q200,440 200,480 V500"/>
+    <!-- Vault line -->
+    <path class="line" stroke="var(--vault)" d="M200,500 Q200,540 240,540 H470"/>
+    <path class="line" stroke="var(--vault)" stroke-dasharray="2 14" d="M470,540 H872"/>
+
+    <!-- moving "train" on the live path -->
+    <circle r="4.5" fill="#fff" stroke="var(--ink)" stroke-width="2">
+      <animateMotion dur="7s" repeatCount="indefinite"
+        path="M70,90 H400 Q465,90 480,135 L488,158 Q500,205 545,205 H575 Q600,205 615,185 Q633,150 660,150 H720 Q747,150 765,185 Q780,205 805,205 H950"/>
+    </circle>
+
+    <!-- ===================== LINE NAMES ===================== -->
+    <text class="linename" x="70" y="64" fill="var(--mic)">“ME” LINE — MICROPHONE</text>
+    <text class="linename" x="70" y="352" fill="var(--sys)">“REMOTE” LINE — SYSTEM AUDIO</text>
+    <text class="linename" x="747" y="86" fill="var(--eng)" text-anchor="middle">ENGINE LINE</text>
+    <text class="linename" x="595" y="386" fill="var(--stop)" text-anchor="middle">OFFLINE PASS — RUNS ONCE, AT STOP</text>
+    <text class="linename" x="70" y="586" fill="var(--vault)">VAULT LINE</text>
+
+    <!-- ===================== MIC LINE STATIONS ===================== -->
+    <circle class="stn" cx="105" cy="90" stroke="var(--mic)" r="7"/>
+    <text class="lbl" x="105" y="116" text-anchor="middle">Microphone</text>
+    <text class="sub" x="105" y="131" text-anchor="middle">your side of the call</text>
+
+    <circle class="stn" cx="245" cy="90" stroke="var(--mic)" r="7"/>
+    <text class="lbl" x="245" y="116" text-anchor="middle">Raw archive</text>
+    <text class="sub" x="245" y="131" text-anchor="middle">crash-safe mic.caf</text>
+
+    <circle class="stn" cx="385" cy="90" stroke="var(--mic)" r="7"/>
+    <text class="lbl" x="385" y="116" text-anchor="middle">Live buffer</text>
+    <text class="sub" x="385" y="131" text-anchor="middle">last 30 s, ready for the engine</text>
+
+    <!-- ===================== SYSTEM LINE STATIONS ===================== -->
+    <circle class="stn" cx="105" cy="320" stroke="var(--sys)" r="7"/>
+    <text class="lbl" x="105" y="288" text-anchor="middle">System audio</text>
+    <text class="sub" x="105" y="303" text-anchor="middle">the other side of the call</text>
+
+    <circle class="stn" cx="245" cy="320" stroke="var(--sys)" r="7"/>
+    <text class="lbl" x="245" y="296" text-anchor="middle">Raw archive</text>
+
+    <circle class="stn" cx="385" cy="320" stroke="var(--sys)" r="7"/>
+    <text class="lbl" x="385" y="296" text-anchor="middle">Live buffer</text>
+
+    <!-- ===================== INTERCHANGE: ENGINE ===================== -->
+    <circle class="xc-outer" cx="545" cy="205" r="12"/>
+    <circle class="stn" cx="545" cy="205" stroke="var(--eng)" r="6"/>
+    <text class="lbl" x="538" y="248" text-anchor="middle">Transcription engine</text>
+    <text class="sub" x="538" y="263" text-anchor="middle">both tracks merge</text>
+    <text class="sub" x="538" y="277" text-anchor="middle">one shared clock</text>
+
+    <!-- engine services -->
+    <circle class="stn" cx="690" cy="150" stroke="var(--eng)" r="7"/>
+    <text class="lbl" x="690" y="128" text-anchor="middle">FluidAudio · default</text>
+    <text class="sub" x="690" y="111" text-anchor="middle">live text in ~11 s · live speaker labels</text>
+
+    <circle class="stn" cx="690" cy="260" stroke="var(--eng)" r="7"/>
+    <text class="lbl" x="690" y="290" text-anchor="middle">WhisperKit + SpeakerKit</text>
+    <text class="sub" x="690" y="305" text-anchor="middle">live text in ~1 s · speakers at stop</text>
+
+    <circle class="stn" cx="868" cy="205" stroke="var(--eng)" r="7"/>
+    <text class="lbl" x="868" y="180" text-anchor="middle">Live transcript</text>
+    <text class="sub" x="868" y="164" text-anchor="middle">in the app, as you talk</text>
+
+    <!-- ===================== INTERCHANGE: STOP ===================== -->
+    <circle class="xc-outer" cx="950" cy="205" r="12"/>
+    <circle class="stn" cx="950" cy="205" stroke="var(--stop)" r="6"/>
+    <text class="lbl" x="950" y="180" text-anchor="middle">Stop</text>
+
+    <!-- ===================== OFFLINE LOOP STATIONS ===================== -->
+    <circle class="stn" cx="865" cy="440" stroke="var(--stop)" r="7"/>
+    <text class="lbl" x="865" y="418" text-anchor="middle">Clean mix</text>
+    <text class="sub" x="865" y="468" text-anchor="middle">both tracks become one file</text>
+
+    <circle class="stn" cx="715" cy="440" stroke="var(--stop)" r="7"/>
+    <text class="lbl" x="715" y="418" text-anchor="middle">Re-detect speakers</text>
+    <text class="sub" x="715" y="468" text-anchor="middle">whole call, sharper text</text>
+
+    <circle class="stn" cx="565" cy="440" stroke="var(--stop)" r="7"/>
+    <text class="lbl" x="565" y="418" text-anchor="middle">Recognise voices</text>
+    <text class="sub" x="565" y="468" text-anchor="middle">encrypted voiceprints</text>
+
+    <circle class="stn" cx="430" cy="440" stroke="var(--stop)" r="7"/>
+    <text class="lbl" x="430" y="418" text-anchor="middle">Name the speakers</text>
+    <text class="sub" x="430" y="468" text-anchor="middle">quick review</text>
+
+    <circle class="stn" cx="290" cy="440" stroke="var(--stop)" r="7"/>
+    <text class="lbl" x="290" y="418" text-anchor="middle">Shrink the audio</text>
+    <text class="sub" x="290" y="468" text-anchor="middle">lossless · ~4–6× smaller</text>
+
+    <!-- ===================== VAULT LINE STATIONS ===================== -->
+    <circle class="xc-outer" cx="200" cy="502" r="12"/>
+    <circle class="stn" cx="200" cy="502" stroke="var(--vault)" r="6"/>
+
+    <circle class="stn" cx="350" cy="540" stroke="var(--vault)" r="7"/>
+    <text class="lbl" x="350" y="519" text-anchor="middle">Transcript</text>
+    <text class="sub" x="350" y="568" text-anchor="middle">Markdown, into your Obsidian vault</text>
+
+    <circle class="stn" cx="610" cy="540" stroke="var(--vault)" r="7"/>
+    <text class="lbl" x="610" y="519" text-anchor="middle">Claude</text>
+    <text class="sub" x="610" y="568" text-anchor="middle">writes the polished note · optional</text>
+
+    <!-- terminus -->
+    <rect x="864" y="524" width="32" height="32" rx="6" fill="var(--vault)"/>
+    <text x="880" y="546" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">▣</text>
+    <text class="lbl" x="880" y="513" text-anchor="middle">Polished note</text>
+    <text class="sub" x="880" y="575" text-anchor="middle">filed in your vault</text>
+  </svg>
+
+  <div class="legend">
+    <div class="key"><span class="chip" style="background:var(--mic)"></span>
+      <div><b>“Me” line</b><p>Mic via AVAudioEngine, archived + resampled per buffer.</p></div></div>
+    <div class="key"><span class="chip" style="background:var(--sys)"></span>
+      <div><b>“Remote” line</b><p>System / per-app audio — CATapDescription, no Screen-Recording permission.</p></div></div>
+    <div class="key"><span class="chip" style="background:var(--eng)"></span>
+      <div><b>Engine line</b><p>Two services, one protocol — pick in Settings; applies to the next recording.</p></div></div>
+    <div class="key"><span class="chip" style="background:var(--stop)"></span>
+      <div><b>Offline pass</b><p>Runs once at stop; rewrites the transcript with a consistent speaker set.</p></div></div>
+    <div class="key"><span class="chip dashedchip"></span>
+      <div><b>Vault line</b><p>Dashed = optional Claude service. History can re-ride the loop anytime (“Detect speakers”).</p></div></div>
+  </div>
+
+</div>
+</body>
+</html>
