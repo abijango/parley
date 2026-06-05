@@ -18,6 +18,20 @@ enum RecordingState: Equatable {
 final class RecordingController: ObservableObject {
     static let shared = RecordingController()
 
+    private init() {
+        // Re-evaluate the auto-clear arming whenever a "busy" gate clears: the
+        // countdown is suppressed (and cancelled) while a summary is running or the
+        // speaker-review sheet is open, so when either settles we may now be free to
+        // start (or restart) a full-delay countdown. `dropFirst` skips the initial
+        // publish at construction; `armClearIfReady` is self-gating, so a no-op is cheap.
+        notes.$state.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.armClearIfReady() }
+            .store(in: &cancellables)
+        $pendingSpeakerReview.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.armClearIfReady() }
+            .store(in: &cancellables)
+    }
+
     @Published private(set) var state: RecordingState = .idle
     @Published private(set) var segments: [Segment] = []
 
@@ -78,6 +92,27 @@ final class RecordingController: ObservableObject {
         case done(String)
     }
     @Published private(set) var offlinePass: OfflinePass = .idle
+
+    /// A pending auto-clear of the Record view back to a blank slate. Surfaced as
+    /// a footer chip ("Clearing in Ns — Keep") that counts down once the
+    /// post-meeting pipeline has settled; any user edit cancels it (implicit Keep).
+    struct PendingClear: Equatable { var remaining: Int }   // seconds left, drives the footer chip
+    @Published private(set) var pendingClear: PendingClear?
+    private var clearTimer: Timer?
+    private var clearToken = 0        // a new session invalidates a stale timer
+    private var clearArmable = false  // true only after a live recording finishes
+    private var cancellables = Set<AnyCancellable>()
+
+    /// The post-meeting work that should defer (and later re-arm) the auto-clear
+    /// countdown: an open speaker-review sheet, a running Claude summary, or the
+    /// offline diarization pass still chewing through the recording.
+    private var clearIsBusy: Bool {
+        pendingSpeakerReview != nil || notes.isRunning || offlinePassIsRunning
+    }
+    /// `offlinePass == .running` without making the enum's `.done` payload matter.
+    private var offlinePassIsRunning: Bool {
+        if case .running = offlinePass { return true } else { return false }
+    }
 
     /// Bumped whenever a saved transcript's body is rewritten (offline pass, speaker
     /// review, add-attendee). The History/preview pane watches this to re-read the
@@ -399,6 +434,7 @@ final class RecordingController: ObservableObject {
             meetingTitle = "Recorded call"   // fallback for the notification-Start path
         }
         state = .preparing
+        cancelPendingClear(); clearArmable = false   // a new recording supersedes any pending auto-clear
         offlinePass = .idle
         autoRunAfterReview = false
         segments = []
@@ -451,6 +487,7 @@ final class RecordingController: ObservableObject {
         let m = session.manifest
         startedByDetection = false          // user-driven resume → manual stop
         state = .preparing
+        cancelPendingClear(); clearArmable = false   // a resumed recording supersedes any pending auto-clear
         meetingTitle = m.title
         attendees = m.attendees
         destinationPath = m.filing
@@ -662,6 +699,12 @@ final class RecordingController: ObservableObject {
                         self.autoRunAfterReview = true
                     }
                 }
+                // The post-meeting pipeline for a speaker engine has now landed
+                // (offline pass done, review offered or skipped) — let the Record
+                // view arm its auto-clear. The busy gate inside still defers it while
+                // the review sheet is open or a summary is running; the sinks re-arm.
+                self.clearArmable = true
+                self.armClearIfReady()
             }
             // The raw LPCM archives have served their crash-safety purpose now the
             // offline pass is done with them — re-encode to ALAC in place (lossless,
@@ -728,6 +771,14 @@ final class RecordingController: ObservableObject {
                 if settings.autoRunClaude && !segments.isEmpty && !(engine is SpeakerCapableEngine) {
                     maybeAutoRunClaude()
                 }
+                // The transcript is on disk — eligible for auto-clear. Speaker
+                // engines arm from stop()'s Task instead: this Task can win the race
+                // before that one even sets `offlinePass = .running` (it's suspended
+                // in engine.stop()), so the busy gate alone can't be trusted here.
+                if !(engine is SpeakerCapableEngine) {
+                    clearArmable = true
+                    armClearIfReady()
+                }
             } catch {
                 AppLog.log("Finalize failed: \(error.localizedDescription)", category: "record")
                 lastResult = "Finalize failed: \(error.localizedDescription)"
@@ -766,6 +817,12 @@ final class RecordingController: ObservableObject {
         guard FileManager.default.fileExists(atPath: micURL.path) else {
             lastResult = "The audio for this recording was deleted — can't detect speakers."; return
         }
+        // History re-processing reuses pendingSpeakerReview / offlinePass /
+        // lastTranscriptURL while idle — it must never arm an auto-clear of the
+        // (unrelated) Record view, so keep arming firmly off for this flow and
+        // drop any countdown left over from a just-finished recording.
+        cancelPendingClear()
+        clearArmable = false
 
         // Build a transient speaker-capable engine matching the current setting.
         let eng: SpeakerCapableEngine
@@ -861,6 +918,97 @@ final class RecordingController: ObservableObject {
             autoRunAfterReview = false
             maybeAutoRunClaude()
         }
+        // The review sheet just closed — that busy gate is now clear, so arm the
+        // auto-clear (deferred at stop while the sheet was open). If a summary is
+        // still running its own busy gate keeps deferring; the notes sink re-arms.
+        armClearIfReady()
+    }
+
+    // MARK: Auto-clear after meeting
+
+    /// Start the auto-clear countdown if the Record view is genuinely settled on a
+    /// finished meeting. Called from several anchors (stop / finalize / review end,
+    /// and the busy-state sinks), so it is deliberately idempotent and self-gating:
+    /// every precondition is re-checked here, and a no-op return is the common case.
+    func armClearIfReady() {
+        guard pendingClear == nil else { return }            // never restart a live countdown
+        guard clearArmable else { return }                   // only after a live recording finished
+        guard settings.autoClearSeconds > 0 else { return }  // 0 = feature off
+        guard state == .idle else { return }
+        guard lastTranscriptURL != nil else { return }       // nothing was saved → nothing to clear
+        guard !clearIsBusy else { return }                   // a busy gate will re-arm us later
+        startClearCountdown(seconds: Int(settings.autoClearSeconds))
+    }
+
+    /// Begin (or restart) the 1-second-tick countdown to a full wipe. A fresh
+    /// `clearToken` invalidates any in-flight timer's ticks, so overlapping arms
+    /// can't double-count.
+    private func startClearCountdown(seconds: Int) {
+        clearToken += 1
+        let token = clearToken
+        pendingClear = PendingClear(remaining: seconds)
+        clearTimer?.invalidate()
+        clearTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // A newer session/arm (or an explicit cancel) has superseded us.
+                guard token == self.clearToken, var pending = self.pendingClear else { return }
+                // A busy gate re-appeared mid-countdown (e.g. the user reopened the
+                // review). Stand down — the busy-state sinks will re-arm a full delay.
+                if self.clearIsBusy {
+                    self.clearTimer?.invalidate(); self.clearTimer = nil
+                    self.pendingClear = nil
+                    return
+                }
+                pending.remaining -= 1
+                if pending.remaining <= 0 {
+                    self.clearForNextMeeting(token: token)
+                } else {
+                    self.pendingClear = pending
+                }
+            }
+        }
+    }
+
+    /// Cancel any pending auto-clear (the explicit "Keep" on the chip, or a
+    /// superseding event). Leaves `clearArmable` untouched.
+    func cancelPendingClear() {
+        clearTimer?.invalidate(); clearTimer = nil
+        pendingClear = nil
+    }
+
+    /// A metadata-field edit while the countdown is visibly ticking is an implicit
+    /// "Keep": stop the countdown AND disarm, so a later busy-clear sink can't
+    /// quietly re-arm and wipe data the user just signalled they want to retain.
+    /// Gated on a live countdown deliberately — naming speakers in the review sheet
+    /// appends to `attendees` programmatically, and without the gate that onChange
+    /// would disarm the auto-clear before finishSpeakerReview() ever got to arm it.
+    func userInteracted() {
+        guard pendingClear != nil else { return }
+        cancelPendingClear()
+        clearArmable = false
+    }
+
+    /// The countdown fired: wipe the Record view back to a blank slate for the next
+    /// call. Re-guards the token + idle state so a stale timer or a recording that
+    /// started in the meantime can't clobber live state.
+    private func clearForNextMeeting(token: Int) {
+        guard token == clearToken, state == .idle else { return }
+        clearTimer?.invalidate(); clearTimer = nil
+        pendingClear = nil
+        segments = []
+        meetingTitle = ""
+        attendees = ""
+        destinationPath = ""
+        manualNotes = ""
+        lastResult = nil
+        lastTranscriptURL = nil
+        offlinePass = .idle
+        autoRunAfterReview = false
+        clearArmable = false
+        resetDiscovery()
+        notes.reset()
+        AppLog.log("Auto-cleared Record view for the next meeting", category: "record")
     }
 
     /// Queue a background Claude summary for the just-saved recording, if auto-summarize

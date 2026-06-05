@@ -232,6 +232,30 @@ struct SettingsView: View {
                     Toggle("", isOn: $settings.metadataDiscoveryEnabled).labelsHidden()
                         .disabled(!settings.callDetectionEnabled)
                 }
+                SettingRow("Call-end grace",
+                           description: "How long after the app releases the microphone before the call is treated as ended and recording stops.") {
+                    HStack(spacing: Theme.Spacing.medium) {
+                        Slider(value: $settings.callEndGraceSeconds, in: 5...60, step: 1)
+                            .frame(maxWidth: 260)
+                        Text("\(Int(settings.callEndGraceSeconds))s")
+                            .font(Theme.Typography.mono).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    .disabled(!settings.callDetectionEnabled)
+                }
+            }
+
+            Section("After a meeting") {
+                SettingRow("Clear for the next call",
+                           description: "Once the recording and speaker pass finish, reset the title, attendees, filing, notes and transcript. Pauses during speaker review or a running summary; any edit cancels it.") {
+                    Picker("", selection: $settings.autoClearSeconds) {
+                        Text("Off").tag(0.0)
+                        Text("15s").tag(15.0)
+                        Text("30s").tag(30.0)
+                        Text("1m").tag(60.0)
+                        Text("2m").tag(120.0)
+                    }
+                    .labelsHidden().fixedSize()
+                }
             }
 
             Section("Permissions") {

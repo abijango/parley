@@ -472,6 +472,7 @@ struct RecordDetailView: View {
                     .onChange(of: recording.meetingTitle) {
                         if titleFocused { recording.userEditedTitle() }
                         recording.scheduleMetadataSync()
+                        recording.userInteracted()
                     }
                 // Discovery found a (different) title after the user edited the
                 // field — offer it without overwriting.
@@ -495,14 +496,20 @@ struct RecordDetailView: View {
                 DestinationField(path: $recording.destinationPath,
                                  destinations: vault.destinations,
                                  firstRoot: settings.scanRoots.first ?? "Internal")
-                    .onChange(of: recording.destinationPath) { recording.scheduleMetadataSync() }
+                    .onChange(of: recording.destinationPath) {
+                        recording.scheduleMetadataSync()
+                        recording.userInteracted()
+                    }
             }
             railField("Attendees") {
                 TokenField(tokens: attendeesBinding,
                            completions: vault.people,
                            placeholder: "Add attendees",
                            onCreateNew: { name in pendingPerson = PendingPerson(name: name) })
-                    .onChange(of: recording.attendees) { recording.scheduleMetadataSync() }
+                    .onChange(of: recording.attendees) {
+                        recording.scheduleMetadataSync()
+                        recording.userInteracted()
+                    }
                 SuggestionChips(recording: recording)
             }
         }
@@ -518,6 +525,7 @@ struct RecordDetailView: View {
                 .font(Theme.Typography.body)
                 .frame(maxWidth: .infinity, minHeight: 140, maxHeight: .infinity)
                 .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
+                .onChange(of: recording.manualNotes) { recording.userInteracted() }
         }
         .frame(maxHeight: .infinity)
     }
@@ -617,6 +625,19 @@ struct RecordDetailView: View {
                 }
             }
             Spacer()
+            // Escape hatch for the post-meeting auto-clear: while the countdown
+            // ticks, surface the remaining seconds and a Keep button that cancels
+            // it, so a finished recording is never discarded out from under the user.
+            if let pc = recording.pendingClear {
+                HStack(spacing: Theme.Spacing.xSmall) {
+                    Image(systemName: "clock.arrow.circlepath")
+                    Text("Clearing in \(pc.remaining)s").monospacedDigit()
+                    Button("Keep") { recording.cancelPendingClear() }
+                        .buttonStyle(.chip)
+                }
+                .font(Theme.Typography.caption)
+                .foregroundStyle(.secondary)
+            }
             if let review = recording.pendingSpeakerReview, !review.speakers.isEmpty {
                 Button {
                     showSpeakerReview = true

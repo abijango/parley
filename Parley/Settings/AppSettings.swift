@@ -128,6 +128,7 @@ final class AppSettings: ObservableObject {
         static let verboseDetectionLogging = "parley.verboseDetectionLogging"
         static let metadataDiscoveryEnabled = "parley.metadataDiscoveryEnabled"
         static let callEndGraceSeconds = "parley.callEndGraceSeconds"
+        static let autoClearSeconds = "parley.autoClearSeconds"
         static let idleUnloadEnabled = "parley.idleUnloadEnabled"
         static let idleUnloadMinutes = "parley.idleUnloadMinutes"
         static let transcriptionEngine = "parley.transcriptionEngine"
@@ -152,6 +153,9 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.autoRecordEnabled) var autoRecordEnabled: Bool = false
     @AppStorage(Key.verboseDetectionLogging) var verboseDetectionLogging: Bool = false
     @AppStorage(Key.callEndGraceSeconds) var callEndGraceSeconds: Double = 15
+    /// Seconds after the post-meeting pipeline completes before the Record view
+    /// auto-clears itself back to a blank slate for the next call; 0 = off.
+    @AppStorage(Key.autoClearSeconds) var autoClearSeconds: Double = 30
     /// Read the meeting window via Accessibility when a call is detected and
     /// suggest its title/attendees. Requires the Accessibility permission.
     @AppStorage(Key.metadataDiscoveryEnabled) var metadataDiscoveryEnabled: Bool = true
