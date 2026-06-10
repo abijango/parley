@@ -131,6 +131,37 @@ enum ClaudeRunner {
         return (process, stdout, stderr)
     }
 
+    /// Builds (does not start) a streaming `claude -p` process for the summary path,
+    /// identical to `makeRawSummaryProcess` except it adds `--output-format stream-json
+    /// --verbose --include-partial-messages` so callers can parse NDJSON events and drive
+    /// a live-activity ticker. The text builder is kept for fallback / testing.
+    static func makeRawSummaryStreamProcess(
+        binaryPath: String,
+        prompt: String,
+        model: String
+    ) throws -> (process: Process, stdout: Pipe, stderr: Pipe) {
+        guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
+            throw RunError.binaryNotFound(binaryPath)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = [
+            "-p", prompt,
+            "--model", model,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        process.standardInput = FileHandle.nullDevice
+        return (process, stdout, stderr)
+    }
+
     /// Finds the last line that looks like an absolute path to a `.md` file.
     static func notePath(in text: String) -> String? {
         for line in text.split(separator: "\n").reversed() {
