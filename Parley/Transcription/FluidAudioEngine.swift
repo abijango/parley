@@ -477,24 +477,46 @@ final class FluidAudioEngine: TranscriptionEngine {
 
     /// Match each not-yet-named speaker (with enough clean speech) against saved
     /// voiceprints; on a confident match, set the name and notify (for auto-add).
-    private func autoIdentify() {
+    ///
+    /// `verbose` emits a per-speaker diagnostic — why each speaker did or didn't
+    /// match (gating, best candidate + score vs threshold, or no comparable print).
+    /// Passed `true` only from the offline finalize pass (one-shot, the
+    /// authoritative identification) so the live path doesn't spam the log each
+    /// 10s chunk. Matching behavior is unchanged: `match(threshold: 0)` returns the
+    /// best comparable print and we apply `identificationThreshold` ourselves.
+    private func autoIdentify(verbose: Bool = false) {
         guard let store = voiceprints else { return }
         for (id, embs) in speakerEmbeddings where resolvedNames[id] == nil {
-            guard (speakerGatedSeconds[id] ?? 0) >= settings.minSpeechToIdentify, embs.count >= 2 else { continue }
+            let gated = speakerGatedSeconds[id] ?? 0
+            guard gated >= settings.minSpeechToIdentify, embs.count >= 2 else {
+                if verbose {
+                    AppLog.log("FluidAudio id-skip speaker \(id): \(String(format: "%.1f", gated))s gated, \(embs.count) quality emb (need ≥\(String(format: "%.0f", settings.minSpeechToIdentify))s & ≥2 emb)", category: "record")
+                }
+                continue
+            }
             let centroid = VoiceprintStore.normalized(VoiceprintStore.mean(embs))
-            if let m = store.match(centroid, threshold: identificationThreshold) {
-                resolvedNames[id] = m.voiceprint.name
-                AppLog.log("FluidAudio auto-identified a speaker as \(m.voiceprint.name) (score \(String(format: "%.2f", m.score)))", category: "record")
-                onSpeakerIdentified?(m.voiceprint.name)
-                // Backfill a retained clip for a known voice that has none yet
-                // (works at the end-of-call pass, when mixed.caf is readable).
-                if m.voiceprint.audioSample == nil {
-                    let vpId = m.voiceprint.id
-                    let sid = id
-                    Task { [weak self] in
-                        guard let self, let clip = await self.repAudioSample(for: sid) else { return }
-                        self.voiceprints?.attachAudioSample(to: vpId, samples: clip)
-                    }
+            guard let best = store.match(centroid, threshold: 0) else {
+                if verbose {
+                    AppLog.log("FluidAudio id-try speaker \(id) (\(String(format: "%.1f", gated))s): no comparable voiceprint to score against (none enrolled in the wespeaker_v2 space)", category: "record")
+                }
+                continue
+            }
+            if verbose {
+                let pass = best.score >= identificationThreshold
+                AppLog.log("FluidAudio id-try speaker \(id) (\(String(format: "%.1f", gated))s, \(embs.count) emb): best=\(best.voiceprint.name) \(String(format: "%.2f", best.score)) vs threshold \(String(format: "%.2f", identificationThreshold)) → \(pass ? "MATCH" : "below threshold")", category: "record")
+            }
+            guard best.score >= identificationThreshold else { continue }
+            resolvedNames[id] = best.voiceprint.name
+            AppLog.log("FluidAudio auto-identified a speaker as \(best.voiceprint.name) (score \(String(format: "%.2f", best.score)))", category: "record")
+            onSpeakerIdentified?(best.voiceprint.name)
+            // Backfill a retained clip for a known voice that has none yet
+            // (works at the end-of-call pass, when mixed.caf is readable).
+            if best.voiceprint.audioSample == nil {
+                let vpId = best.voiceprint.id
+                let sid = id
+                Task { [weak self] in
+                    guard let self, let clip = await self.repAudioSample(for: sid) else { return }
+                    self.voiceprints?.attachAudioSample(to: vpId, samples: clip)
                 }
             }
         }
@@ -585,7 +607,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         }
         speakerEmbeddings = emb
         speakerGatedSeconds = secs
-        autoIdentify()   // re-applies known names by voice (ids may differ from the live pass)
+        autoIdentify(verbose: true)   // re-applies known names by voice (ids may differ from the live pass)
         publish()        // re-renders the transcript with the cleaned-up speaker labels
         await backfillClips()
         let n = Set(segs.map(\.id)).count
