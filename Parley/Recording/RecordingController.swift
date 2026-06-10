@@ -84,14 +84,12 @@ final class RecordingController: ObservableObject {
     /// in the "Assign speakers" sheet (nil when there's nothing to review).
     @Published var pendingSpeakerReview: SpeakerReview?
 
-    /// Progress of the post-stop whole-recording diarization pass (FluidAudio only),
-    /// surfaced as a strip at the bottom of the record screen.
-    enum OfflinePass: Equatable {
-        case idle
-        case running
-        case done(String)
-    }
-    @Published private(set) var offlinePass: OfflinePass = .idle
+    /// `true` when the pending review should auto-present itself (the History
+    /// "Detect speakers" flow), as opposed to the live at-stop flow, which is
+    /// opt-in via a footer button. Hosted at the always-mounted window root so the
+    /// review survives switching tabs / notes instead of being torn down with the
+    /// History view (which used to silently discard it, forcing a full re-run).
+    @Published var autoPresentSpeakerReview = false
 
     /// A pending auto-clear of the Record view back to a blank slate. Surfaced as
     /// a footer chip ("Clearing in Ns — Keep") that counts down once the
@@ -104,25 +102,18 @@ final class RecordingController: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     /// The post-meeting work that should defer (and later re-arm) the auto-clear
-    /// countdown: an open speaker-review sheet, a running Claude summary, or the
-    /// offline diarization pass still chewing through the recording.
+    /// countdown: an open speaker-review sheet, or a running Claude summary. The
+    /// offline pass no longer gates this — it runs on a background queue against an
+    /// older session's data, so it must not pin the Record view (which could otherwise
+    /// stay un-clearable indefinitely under a queue backlog).
     private var clearIsBusy: Bool {
-        pendingSpeakerReview != nil || notes.isRunning || offlinePassIsRunning
-    }
-    /// `offlinePass == .running` without making the enum's `.done` payload matter.
-    private var offlinePassIsRunning: Bool {
-        if case .running = offlinePass { return true } else { return false }
+        pendingSpeakerReview != nil || notes.isRunning
     }
 
     /// Bumped whenever a saved transcript's body is rewritten (offline pass, speaker
     /// review, add-attendee). The History/preview pane watches this to re-read the
     /// file — the URL is unchanged on a rewrite, so it wouldn't reload otherwise.
     @Published private(set) var transcriptRevision = 0
-
-    /// Auto-run was deferred at stop because the FluidAudio recording still has
-    /// unassigned speakers — finishing the speaker review will trigger it, so the
-    /// summary is generated from the attributed transcript.
-    private var autoRunAfterReview = false
 
     let models = ModelManager()
     let fluidModels = FluidModelManager()
@@ -133,6 +124,10 @@ final class RecordingController: ObservableObject {
     /// Holds the local MLX summary model across compare runs (download/load/unload).
     /// Drives the background Claude summary → review → commit flow.
     private(set) lazy var summaryService = SummaryService(store: store)
+    /// Background offline pass (ASR + speaker detect + compaction) for finalized
+    /// recordings — serialized and idle-gated so it never competes with live recording.
+    private(set) lazy var offlineService = OfflineProcessingService(
+        models: models, voiceprints: voiceprints, store: store, vault: vault, summaryService: summaryService)
     let callDetector = CallDetector()
     let metadataResolver = MeetingMetadataResolver()
 
@@ -204,20 +199,27 @@ final class RecordingController: ObservableObject {
     /// voiceprint (so future sessions recognise them), and add them to attendees.
     func nameSpeaker(_ speakerId: String, as rawName: String) {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, let eng = engine as? SpeakerCapableEngine else { return }
-        let model = eng.embeddingModelId
-        let centroid = eng.setSpeakerName(speakerId, as: name)
-        if let centroid {
-            let vpId: UUID
-            // Match an existing print of the SAME name AND embedding model (different
-            // engines use non-comparable embedding spaces, so keep them separate).
-            if let existing = voiceprints.voiceprints.first(where: {
-                $0.name.caseInsensitiveCompare(name) == .orderedSame && $0.embeddingModel == model
-            }) {
-                voiceprints.addSample(to: existing.id, embedding: centroid); vpId = existing.id
+        guard !name.isEmpty else { return }
+
+        // Cache-backed review (no live engine): enrol the voiceprint from the persisted
+        // centroid and record the assignment — the transcript is relabeled on Done.
+        if let review = pendingSpeakerReview, let cache = review.cache {
+            if let c = cache.speakers.first(where: { $0.id == speakerId })?.centroid, !c.isEmpty {
+                enrollVoiceprint(name: name, centroid: c, model: cache.embeddingModelID)
             } else {
-                vpId = voiceprints.enroll(name: name, embedding: centroid, model: model).id
+                AppLog.log("Named speaker \(speakerId) as \(name) (cache) — no centroid, labeled only", category: "record")
             }
+            pendingSpeakerReview?.assignments[speakerId] = name
+            pendingSpeakerReview?.attendees = OfflineProcessingService.merge(review.attendees, with: [name])
+            return
+        }
+
+        // Prefer the review's own engine (History "Detect speakers" runs on a transient
+        // engine via the offline queue); fall back to the live engine for any other path.
+        guard let eng = pendingSpeakerReview?.engine ?? (engine as? SpeakerCapableEngine) else { return }
+        let model = eng.embeddingModelId
+        if let centroid = eng.setSpeakerName(speakerId, as: name) {
+            let vpId = enrollVoiceprint(name: name, centroid: centroid, model: model)
             // Retain a short enrollment clip for re-enrollment (off-main, best-effort).
             Task { [weak self] in
                 guard let self, let audio = await eng.repAudioSample(for: speakerId) else { return }
@@ -226,7 +228,30 @@ final class RecordingController: ObservableObject {
         } else {
             AppLog.log("Named speaker \(speakerId) as \(name) but not enough clean audio — labeled, not enrolled", category: "record")
         }
-        addAttendeeIfAbsent(name)
+        // Add to the right attendee target: the review's own snapshot (queued/History
+        // flow), or the live Record field when naming during a live session.
+        if pendingSpeakerReview != nil {
+            pendingSpeakerReview?.attendees = OfflineProcessingService.merge(
+                pendingSpeakerReview?.attendees ?? "", with: [name])
+        } else {
+            addAttendeeIfAbsent(name)
+        }
+    }
+
+    /// Enrol (or refine) a voiceprint for `name` from a centroid embedding, keyed by the
+    /// embedding model. Returns the voiceprint id. Shared by the live-engine and
+    /// cache-backed naming paths.
+    @discardableResult
+    private func enrollVoiceprint(name: String, centroid: [Float], model: String) -> UUID {
+        // Match an existing print of the SAME name AND embedding model (different engines
+        // use non-comparable embedding spaces, so keep them separate).
+        if let existing = voiceprints.voiceprints.first(where: {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame && $0.embeddingModel == model
+        }) {
+            voiceprints.addSample(to: existing.id, embedding: centroid)
+            return existing.id
+        }
+        return voiceprints.enroll(name: name, embedding: centroid, model: model).id
     }
 
     /// Append a name to the comma-separated attendees list if not already present.
@@ -334,6 +359,9 @@ final class RecordingController: ObservableObject {
         recoverOrphanedPartials() // legacy crashed sessions (no manifest) → auto-salvage
         vault.refresh()
         store.refresh()
+        wireBackgroundQueues()    // offline + summary services gate on idle, host reviews
+        offlineService.enqueuePendingFromDisk()   // resume offline passes interrupted by a quit/crash
+        summaryService.enqueuePendingFromDisk()   // resume queued summaries (bulk-confirmed, not a burst)
         preloadModel()
         scheduleIdleUnload()   // if nothing happens for a while, free the model's RAM
         startCallDetection()
@@ -348,6 +376,26 @@ final class RecordingController: ObservableObject {
                 AppLog.log("System-audio capture unavailable after prime — remote-track capture and call detection by mic-signal may not work until the audio-recording permission is granted", category: "audio")
             }
         }
+    }
+
+    /// Wire the offline + summary queues to the controller: both gate on "idle" (no
+    /// live recording) so live recording always wins, and the offline queue hands any
+    /// History "Detect speakers" review back to the controller to host the sheet.
+    private func wireBackgroundQueues() {
+        let idle: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.state == .idle && !self.isRecording
+        }
+        offlineService.isIdle = idle
+        summaryService.isIdle = idle
+        offlineService.presentReview = { [weak self] review in self?.presentQueuedReview(review) }
+        summaryService.onSessionAudioDeleted = { [weak self] dir in self?.offlineService.cancel(sessionDir: dir) }
+    }
+
+    /// Host a speaker-review produced by the offline queue (History "Detect speakers").
+    private func presentQueuedReview(_ review: SpeakerReview) {
+        pendingSpeakerReview = review
+        autoPresentSpeakerReview = true
     }
 
     /// Starts background call detection. This increment is detection + logging
@@ -389,7 +437,22 @@ final class RecordingController: ObservableObject {
             // New call context: reset the last call's discoveries, start fresh.
             self.resetDiscovery()
             self.metadataResolver.start(for: call)
-            if call.known && self.settings.autoRecordEnabled {
+            // If the app crashed mid-call and that same call is the one now live,
+            // resume INTO that note rather than starting a competing new recording
+            // (which would fragment one meeting across two notes and grey out the
+            // recovery sheet's Resume). The recovery is removed inside resume(),
+            // which auto-dismisses the recovery sheet.
+            if let recovery = self.matchingLiveRecovery(for: call) {
+                if self.settings.autoRecordEnabled {
+                    AppLog.log("AUTO-RESUME — continuing crashed session \(recovery.id) for live call \(call.displayName)", category: "detect")
+                    Task { await self.resume(recovery) }
+                } else {
+                    // Auto-record off: don't start anything, just surface the call.
+                    // The recovery sheet is already up for a manual Resume.
+                    AppLog.log("Crashed session \(recovery.id) matches live \(call.displayName); leaving Recovery sheet for manual resume", category: "detect")
+                    CallNotifier.shared.notifyCallDetected(call)
+                }
+            } else if call.known && self.settings.autoRecordEnabled {
                 AppLog.log("AUTO-RECORD starting for \(call.displayName)", category: "detect")
                 self.meetingTitle = "\(call.displayName) call"   // sensible default; user can edit
                 Task { await self.start(detectionInitiated: true) }
@@ -435,8 +498,6 @@ final class RecordingController: ObservableObject {
         }
         state = .preparing
         cancelPendingClear(); clearArmable = false   // a new recording supersedes any pending auto-clear
-        offlinePass = .idle
-        autoRunAfterReview = false
         segments = []
         lastResult = nil
         lastTranscriptURL = nil
@@ -666,53 +727,14 @@ final class RecordingController: ObservableObject {
         micCapture = nil
         systemCapture = nil
 
-        // Tear down the engine off the main actor; finalize() below reads the
-        // already-populated timeline synchronously, so it needn't wait on this.
-        // For a speaker-capable engine, then run one authoritative whole-recording
-        // pass and offer the speaker-review sheet with the cleaned-up speakers.
+        // Tear down the engine off the main actor; finalize() reads the
+        // already-populated timeline synchronously, so it needn't wait on this. The
+        // offline pass (ASR re-pass + speaker detect + compaction) is NOT run here
+        // anymore — finalize() enqueues it on the idle-gated offline queue, so a new
+        // recording starting immediately can never be blocked by, or corrupted by, the
+        // previous call's offline work.
         let engine = self.engine
-        Task { [weak self] in
-            await engine?.stop()
-            if let eng = engine as? SpeakerCapableEngine {
-                self?.offlinePass = .running
-                let summary = await eng.runOfflinePass()
-                guard let self else { return }
-                self.offlinePass = .done(summary.note)
-                // Persist the offline result (corrected labels + higher-accuracy
-                // transcript) to the saved file — finalize() wrote the streaming
-                // version synchronously before this pass completed.
-                self.rewriteLastTranscript(reason: "offline pass")
-                let speakers = eng.speakerSummaries()
-                if !speakers.isEmpty {
-                    self.pendingSpeakerReview = SpeakerReview(
-                        speakers: speakers,
-                        mixedCaf: self.sessionDirectory?.appendingPathComponent("mixed.caf"))
-                }
-                // Auto-run (if enabled): summarize now when every speaker is already
-                // identified (or none were found); otherwise wait until the user
-                // assigns names in the review, so the summary is correctly attributed.
-                if self.settings.autoRunClaude {
-                    let hasUnnamed = speakers.contains { $0.resolvedName == nil }
-                    if speakers.isEmpty || !hasUnnamed {
-                        self.maybeAutoRunClaude()
-                    } else {
-                        self.autoRunAfterReview = true
-                    }
-                }
-                // The post-meeting pipeline for a speaker engine has now landed
-                // (offline pass done, review offered or skipped) — let the Record
-                // view arm its auto-clear. The busy gate inside still defers it while
-                // the review sheet is open or a summary is running; the sinks re-arm.
-                self.clearArmable = true
-                self.armClearIfReady()
-            }
-            // The raw LPCM archives have served their crash-safety purpose now the
-            // offline pass is done with them — re-encode to ALAC in place (lossless,
-            // same filenames, ~half the size). Detached: blocking file transcode.
-            if let dir = self?.sessionDirectory {
-                await Task.detached(priority: .utility) { AudioCompactor.compactSession(dir) }.value
-            }
-        }
+        Task { await engine?.stop() }
         clock = nil
 
         finalize()
@@ -741,8 +763,14 @@ final class RecordingController: ObservableObject {
         let destination = destinationPath
         let attendees = self.attendees
         let manual = manualNotes
+        // Snapshot session identity into LOCALS before the async Task, so a new recording
+        // starting immediately (which reassigns `sessionDirectory`/`engine`) can never
+        // redirect this session's offline job — the root cause of the data-loss bug.
+        let sessionDir = sessionDirectory
+        let isSpeakerEngine = engine is SpeakerCapableEngine
+        let autoSummarize = settings.autoRunClaude
         // Link to the session audio (mic track) if it was archived.
-        let audioPath = sessionDirectory.map { $0.appendingPathComponent("mic.caf").path }
+        let audioPath = sessionDir.map { $0.appendingPathComponent("mic.caf").path }
 
         Task {
             do {
@@ -755,7 +783,7 @@ final class RecordingController: ObservableObject {
                 )
                 AppLog.log("Transcript written: \(result.url.path)\(segments.isEmpty ? " (no speech — saved for the record + audio link)" : "")", category: "record")
                 if let p = partialURL() { try? FileManager.default.removeItem(at: p) }   // clean recovery files
-                if let dir = sessionDirectory {
+                if let dir = sessionDir {
                     try? FileManager.default.removeItem(at: dir.appendingPathComponent("segments.jsonl"))
                 }
                 lastTranscriptURL = result.url
@@ -764,21 +792,30 @@ final class RecordingController: ObservableObject {
                     : "Transcript saved: \(result.url.lastPathComponent)"
                 notes.reset()
                 store.refresh()
-                // Auto-run is opt-in; skip it when there's nothing to summarise. For
-                // ANY speaker-capable engine, DON'T run here — defer until speakers are
-                // assigned (after the offline pass / review) so the summary uses the
-                // attributed transcript. stop()'s Task / finishSpeakerReview trigger it.
-                if settings.autoRunClaude && !segments.isEmpty && !(engine is SpeakerCapableEngine) {
+                // Auto-run is opt-in; skip it when there's nothing to summarise. For a
+                // speaker-capable engine, the OFFLINE QUEUE chains the summary after its
+                // pass (so the note uses the attributed transcript) — so only non-speaker
+                // engines summarize here.
+                if autoSummarize && !segments.isEmpty && !isSpeakerEngine {
                     maybeAutoRunClaude()
                 }
-                // The transcript is on disk — eligible for auto-clear. Speaker
-                // engines arm from stop()'s Task instead: this Task can win the race
-                // before that one even sets `offlinePass = .running` (it's suspended
-                // in engine.stop()), so the busy gate alone can't be trusted here.
-                if !(engine is SpeakerCapableEngine) {
-                    clearArmable = true
-                    armClearIfReady()
+                // Hand the finalized session to the idle-gated offline queue: ASR re-pass
+                // + speaker detect + compaction, run when nothing is recording. The job is
+                // a self-contained snapshot, so it's safe even if a new recording starts.
+                if isSpeakerEngine, let dir = sessionDir, !segments.isEmpty {
+                    SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: result.url.path,
+                                                  presentReviewWhenDone: false, in: dir)
+                    offlineService.enqueue(OfflineJob(
+                        sessionDir: dir, transcriptURL: result.url, title: title,
+                        attendees: attendees, filing: destination,
+                        presentReviewWhenDone: false, autoSummarize: autoSummarize))
+                    offlineService.runNextIfIdle()
                 }
+                // The transcript is on disk — the Record view is settled and eligible for
+                // auto-clear regardless of engine (the offline pass is decoupled now and
+                // runs on a background queue against the saved file).
+                clearArmable = true
+                armClearIfReady()
             } catch {
                 AppLog.log("Finalize failed: \(error.localizedDescription)", category: "record")
                 lastResult = "Finalize failed: \(error.localizedDescription)"
@@ -787,28 +824,97 @@ final class RecordingController: ObservableObject {
 
         finalizeManifest()   // mark the session cleanly finished (not a crash)
         state = .idle
+        // Now idle again — drain any work that was waiting for a live recording to end.
+        offlineService.runNextIfIdle()
+        summaryService.runNextIfIdle()
         scheduleIdleUnload()   // free the model's RAM if we sit idle after this
-        // The "Assign speakers" review is presented from stop() after the final
-        // whole-recording diarization pass completes.
     }
 
     // MARK: At-stop speaker review (FluidAudio)
 
-    /// Discovered speakers offered for naming after a FluidAudio recording stops.
+    /// Discovered speakers offered for naming. Produced by the offline queue (History
+    /// "Detect speakers"), so it carries its OWN context — the transient engine that
+    /// found these speakers, the transcript to rewrite, and the metadata snapshot — and
+    /// never depends on the controller's live `engine`/`lastTranscriptURL`/`attendees`,
+    /// which may already belong to a newer recording.
     struct SpeakerReview: Identifiable {
         let id = UUID()
         var speakers: [CallSpeakerSummary]
         let mixedCaf: URL?
+        /// The transient engine that produced these speakers (used to enroll voiceprints
+        /// + relabel on naming). Optional only for resilience; the queue always sets it.
+        let engine: SpeakerCapableEngine?
+        /// The transcript file to (guardedly) rewrite when the review is finished.
+        let transcriptURL: URL?
+        let title: String
+        let filing: String
+        /// Attendees accumulated for this review (job snapshot + names assigned in-sheet).
+        var attendees: String
+        /// Chain a Claude summary after the review is committed.
+        var autoSummarize: Bool
+        /// Cache-backed review (opened from a persisted pass — no live engine). When set,
+        /// naming enrols from the cached centroid and finishing relabels the transcript by
+        /// text substitution, so assignment needs no re-run of the offline pass.
+        let cache: SpeakerCache?
+        let sessionDir: URL?
+        /// speakerId → assigned name, accumulated during a cache-backed review.
+        var assignments: [String: String] = [:]
+
+        init(speakers: [CallSpeakerSummary], mixedCaf: URL?,
+             engine: SpeakerCapableEngine? = nil, transcriptURL: URL? = nil,
+             title: String = "", filing: String = "", attendees: String = "", autoSummarize: Bool = false,
+             cache: SpeakerCache? = nil, sessionDir: URL? = nil) {
+            self.speakers = speakers
+            self.mixedCaf = mixedCaf
+            self.engine = engine
+            self.transcriptURL = transcriptURL
+            self.title = title
+            self.filing = filing
+            self.attendees = attendees
+            self.autoSummarize = autoSummarize
+            self.cache = cache
+            self.sessionDir = sessionDir
+        }
+    }
+
+    /// Open the assign-speakers review for a History note. Prefers the persisted speaker
+    /// cache (instant — no re-run); falls back to re-running the offline pass only when no
+    /// cache exists (older recordings) or its audio is gone.
+    func assignSpeakers(forAudioPath audioPath: String?, transcript: URL,
+                        attendees: String, title: String, filing: String) {
+        guard let audioPath, !audioPath.isEmpty else {
+            lastResult = "No saved audio for this recording — can't detect speakers."; return
+        }
+        let dir = URL(fileURLWithPath: audioPath).deletingLastPathComponent()
+        let mixed = dir.appendingPathComponent("mixed.caf")
+        if let cache = SpeakerCache.read(dir),
+           !cache.speakers.isEmpty,
+           FileManager.default.fileExists(atPath: mixed.path) {
+            let summaries = cache.speakers.map {
+                CallSpeakerSummary(id: $0.id, resolvedName: $0.resolvedName, talkSeconds: $0.talkSeconds,
+                                   sampleStart: $0.sampleStart, sampleEnd: $0.sampleEnd, firstLine: $0.firstLine)
+            }
+            pendingSpeakerReview = SpeakerReview(
+                speakers: summaries, mixedCaf: mixed, engine: nil, transcriptURL: transcript,
+                title: title, filing: filing, attendees: attendees,
+                autoSummarize: settings.autoRunClaude, cache: cache, sessionDir: dir)
+            autoPresentSpeakerReview = true
+            AppLog.log("Assign speakers from cache (\(cache.speakers.count)) — \(transcript.lastPathComponent)", category: "record")
+        } else {
+            // No cache (or audio gone) → fall back to a full re-run that opens the review.
+            reprocessSpeakers(forAudioPath: audioPath, transcript: transcript,
+                              attendees: attendees, title: title, filing: filing)
+        }
     }
 
     /// On-demand speaker detection for an already-recorded call (from History).
-    /// Re-runs the offline diarization + batch-ASR pass on the session's saved audio,
-    /// rewrites the transcript with attributed text, and opens the assign-speakers
-    /// review. Reuses the live review machinery by pointing `engine`/`lastTranscriptURL`
-    /// at this item (safe — we're idle, not recording).
+    /// Enqueues an on-demand offline pass for an already-recorded call (History "Detect
+    /// speakers"). Routes through the same idle-gated queue as the automatic post-stop
+    /// pass — so it can't interfere with a live recording (it defers until idle) and
+    /// can't corrupt anything (self-contained job). When done it opens the assign-speakers
+    /// review (`presentReviewWhenDone`).
     func reprocessSpeakers(forAudioPath audioPath: String?, transcript: URL,
                            attendees: String, title: String, filing: String) {
-        guard !isRecording else { return }
         guard let audioPath, !audioPath.isEmpty else {
             lastResult = "No saved audio for this recording — can't detect speakers."; return
         }
@@ -817,53 +923,16 @@ final class RecordingController: ObservableObject {
         guard FileManager.default.fileExists(atPath: micURL.path) else {
             lastResult = "The audio for this recording was deleted — can't detect speakers."; return
         }
-        // History re-processing reuses pendingSpeakerReview / offlinePass /
-        // lastTranscriptURL while idle — it must never arm an auto-clear of the
-        // (unrelated) Record view, so keep arming firmly off for this flow and
-        // drop any countdown left over from a just-finished recording.
-        cancelPendingClear()
-        clearArmable = false
-
-        // Build a transient speaker-capable engine matching the current setting.
-        let eng: SpeakerCapableEngine
-        switch settings.transcriptionEngine {
-        case .whisperKit:
-            eng = WhisperKitSpeakerKitEngine(models: models, settings: settings, voiceprints: voiceprints,
-                                             identificationThreshold: settings.identificationThreshold)
-        case .fluidAudio:
-            eng = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
-                                   identificationThreshold: settings.identificationThreshold)
-        }
-        eng.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
-        eng.mixedAudioURL = dir.appendingPathComponent("mixed.caf")
-        eng.micArchiveURL = micURL
-        eng.systemArchiveURL = dir.appendingPathComponent("system.caf")
-        eng.forceOfflineAsr = true   // no streaming units exist for a saved call
-
-        // Point the review/rewrite machinery at this item.
-        engine = eng
-        lastTranscriptURL = transcript
-        self.attendees = attendees
-        meetingTitle = title
-        destinationPath = filing
-        offlinePass = .running
-
-        Task { [weak self] in
-            guard let self else { return }
-            let summary = await eng.runOfflinePass()
-            self.offlinePass = .done(summary.note)
-            self.rewriteLastTranscript(reason: "history speaker detection")
-            self.store.refresh()
-            let speakers = eng.speakerSummaries()
-            if speakers.isEmpty {
-                self.lastResult = "No speakers detected in this recording."
-            } else {
-                self.pendingSpeakerReview = SpeakerReview(speakers: speakers, mixedCaf: eng.mixedAudioURL)
-            }
-            // The re-run rebuilt `mixed.caf` as LPCM — compact it again (the mic/
-            // system archives are already ALAC and get skipped).
-            await Task.detached(priority: .utility) { AudioCompactor.compactSession(dir) }.value
-        }
+        SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: transcript.path,
+                                      presentReviewWhenDone: true, in: dir)
+        offlineService.enqueue(OfflineJob(
+            sessionDir: dir, transcriptURL: transcript, title: title,
+            attendees: attendees, filing: filing,
+            presentReviewWhenDone: true, autoSummarize: false))
+        offlineService.runNextIfIdle()
+        lastResult = isRecording
+            ? "Speaker detection queued — runs when the current recording stops."
+            : "Detecting speakers…"
     }
 
     /// Add an attendee to an already-saved transcript — e.g. someone present who
@@ -907,21 +976,65 @@ final class RecordingController: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    /// Finish the review: clear the sheet and rewrite the just-written transcript
-    /// with the (possibly newly-named) speakers + updated attendees.
+    /// Finish the review: rewrite the review's transcript with the (possibly newly-named)
+    /// speakers + attendees, then clear the sheet. The review carries its OWN engine +
+    /// target file (it came from the offline queue / History), so this never touches the
+    /// live Record session.
     func finishSpeakerReview() {
+        let review = pendingSpeakerReview
         pendingSpeakerReview = nil
-        rewriteLastTranscript(reason: "reviewed speakers")
-        // If auto-run was deferred at stop pending speaker assignment, run it now —
-        // on the freshly-attributed transcript.
-        if autoRunAfterReview {
-            autoRunAfterReview = false
-            maybeAutoRunClaude()
+        autoPresentSpeakerReview = false
+
+        if let review, review.cache != nil, let url = review.transcriptURL {
+            // Cache-backed: relabel the transcript by substituting "Speaker N" → name
+            // (no engine, no re-run). Voiceprints were already enrolled in nameSpeaker.
+            if !review.assignments.isEmpty,
+               let body = try? String(contentsOf: url, encoding: .utf8) {
+                let relabeled = SpeakerCache.relabel(body, assignments: review.assignments)
+                if relabeled != body { try? relabeled.write(to: url, atomically: true, encoding: .utf8) }
+            }
+            TranscriptWriter.updateFrontmatter(at: url) {
+                $0.attendees = TranscriptWriter.splitAttendees(review.attendees)
+            }
+            vault.addPeople(TranscriptWriter.splitAttendees(review.attendees))
+            store.refresh()
+            transcriptRevision += 1
+            AppLog.log("Assigned speakers from cache: \(url.lastPathComponent)", category: "record")
+            if !TranscriptStore.bodyHasGenericLabels(at: url),
+               let item = store.items.first(where: { $0.url == url })
+                ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) {
+                summaryService.enqueueIfPolicyAllows(item, trigger: .speakerReviewCompleted)
+            }
+        } else if let review, let url = review.transcriptURL, let eng = review.engine {
+            let segs = eng.finalTimeline()
+            let audioDuration = SessionStore.audioDuration(url.deletingLastPathComponent()
+                .appendingPathComponent("mic.caf"))
+            if TranscriptCoverage.isSafeReplacement(offline: segs, existingFile: url, audioDuration: audioDuration) {
+                TranscriptWriter.rewriteTranscriptFile(at: url, segments: segs, title: review.title,
+                                                       filing: review.filing, attendees: review.attendees)
+            } else {
+                // Keep the existing (longer) transcript; still record the named attendees.
+                TranscriptWriter.updateFrontmatter(at: url) { $0.attendees = TranscriptWriter.splitAttendees(review.attendees) }
+            }
+            vault.addPeople(TranscriptWriter.splitAttendees(review.attendees))
+            store.refresh()
+            transcriptRevision += 1
+            AppLog.log("Rewrote transcript (reviewed speakers): \(url.lastPathComponent)", category: "record")
+            // Becoming fully-named is the moment a note is summary-ready — enqueue it
+            // (policy-gated), unless generic labels remain after a coverage-kept rewrite.
+            if !TranscriptStore.bodyHasGenericLabels(at: url),
+               let item = store.items.first(where: { $0.url == url })
+                ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) {
+                summaryService.enqueueIfPolicyAllows(item, trigger: .speakerReviewCompleted)
+            }
+        } else {
+            // Fallback (no decoupled context): rewrite the live transcript.
+            rewriteLastTranscript(reason: "reviewed speakers")
         }
-        // The review sheet just closed — that busy gate is now clear, so arm the
-        // auto-clear (deferred at stop while the sheet was open). If a summary is
-        // still running its own busy gate keeps deferring; the notes sink re-arms.
+        // The review closed — re-arm the Record-view auto-clear (if it was deferred) and
+        // pump the offline queue in case a job was waiting behind the open sheet.
         armClearIfReady()
+        offlineService.runNextIfIdle()
     }
 
     // MARK: Auto-clear after meeting
@@ -1003,8 +1116,7 @@ final class RecordingController: ObservableObject {
         manualNotes = ""
         lastResult = nil
         lastTranscriptURL = nil
-        offlinePass = .idle
-        autoRunAfterReview = false
+        autoPresentSpeakerReview = false
         clearArmable = false
         resetDiscovery()
         notes.reset()
@@ -1020,7 +1132,7 @@ final class RecordingController: ObservableObject {
         store.refresh()
         guard let item = store.items.first(where: { $0.url == url })
             ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) else { return }
-        summaryService.summarize(item)
+        summaryService.enqueueIfPolicyAllows(item, trigger: .freshRecording)
     }
 
     /// Rewrite the saved transcript from the engine's current (post-offline-pass)
@@ -1088,6 +1200,12 @@ final class RecordingController: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, self.settings.idleUnloadEnabled,
                       self.state == .idle, !self.isRecording else { return }
+                // Don't unload while the offline queue has work — it needs the heavier
+                // batch model and would just have to reload it immediately.
+                if self.offlineService.hasWork {
+                    self.scheduleIdleUnload()   // re-arm; try again after another idle stretch
+                    return
+                }
                 AppLog.log("Idle \(Int(interval / 60))min — unloading model to free memory", category: "model")
                 Task { await self.models.unload() }
             }
@@ -1126,8 +1244,16 @@ final class RecordingController: ObservableObject {
         }
         m.status = .active
         m.lastHeartbeat = Date()
+        // Resuming makes this a live recording again — clear any offline-queue state so
+        // it isn't picked up while recording or double-enqueued (it'll be re-enqueued
+        // when this resumed session finally finalizes).
+        m.offlineStatus = nil
+        m.offlineAttempts = nil
+        m.transcriptPath = nil
+        m.presentReviewWhenDone = nil
         manifest = m
         SessionStore.write(m, to: dir)
+        offlineService.cancel(sessionDir: dir)
         AppLog.log("Session manifest reactivated (resume) — \(dir.lastPathComponent)", category: "record")
         startHeartbeat()
     }
@@ -1204,6 +1330,17 @@ final class RecordingController: ObservableObject {
                 lastResult = "Recovered “\(m.title)” → \(result.url.lastPathComponent)"
                 AppLog.log("Recovered \(session.id) (\(reTranscribe ? "re-transcribed" : "from journal"); \(segs.count) segments) → \(result.url.lastPathComponent)", category: "record")
                 store.refresh()
+                // Give the recovered session the same background offline pass a normal
+                // stop gets (speaker detect + attributed rewrite), when next idle.
+                if !segs.isEmpty {
+                    SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: result.url.path,
+                                                  presentReviewWhenDone: false, in: dir)
+                    offlineService.enqueue(OfflineJob(
+                        sessionDir: dir, transcriptURL: result.url, title: m.title,
+                        attendees: m.attendees, filing: m.filing,
+                        presentReviewWhenDone: false, autoSummarize: settings.autoRunClaude))
+                    offlineService.runNextIfIdle()
+                }
             } catch {
                 lastResult = "Recovery failed: \(error.localizedDescription)"
                 AppLog.log("Recovery failed for \(session.id): \(error.localizedDescription)", category: "record")
@@ -1219,6 +1356,22 @@ final class RecordingController: ObservableObject {
         guard let bid = session.manifest.callBundleID else { return false }
         return callDetector.activeCall?.bundleID == bid
             || callDetector.capturing.contains { $0.bundleID?.lowercased() == bid }
+    }
+
+    /// How recently a crashed session must have been beating to be treated as "the
+    /// same meeting that's now live" — so a stale, never-handled recovery from hours
+    /// ago can't be auto-resumed into an unrelated new call on the same app.
+    private static let resumeMatchWindow: TimeInterval = 30 * 60   // 30 minutes
+
+    /// A pending crash recovery that belongs to the call now starting: same
+    /// conferencing app (bundle id) AND a recent-enough last heartbeat. Most recent
+    /// match wins. Drives auto-resume in `onCallStart` (Option B).
+    private func matchingLiveRecovery(for call: DetectedCall) -> RecoverableSession? {
+        let now = Date()
+        return pendingRecoveries
+            .filter { $0.manifest.callBundleID == call.bundleID }
+            .filter { now.timeIntervalSince($0.manifest.lastHeartbeat) < Self.resumeMatchWindow }
+            .max { $0.manifest.lastHeartbeat < $1.manifest.lastHeartbeat }
     }
 
     /// Discard a crashed session entirely (audio + state).
