@@ -78,6 +78,90 @@ enum TranscriptWriter {
         return out.joined(separator: "\n") + "\n"
     }
 
+    // MARK: Combining
+
+    /// One source recording feeding into a combined transcript.
+    struct CombinePart {
+        let title: String
+        let date: Date
+        let manualNotes: String?
+        let transcript: String
+    }
+
+    /// Splits a transcript document's body into its manual-notes and transcript
+    /// sections, so several can be stitched into one combined note. Lenient: a file
+    /// with no `## Transcript` (e.g. a manual note) yields an empty transcript.
+    static func extractBodySections(text: String) -> (manualNotes: String?, transcript: String) {
+        let lines = text.components(separatedBy: "\n")
+
+        // Transcript: everything after the "## Transcript" header to EOF.
+        var transcript = ""
+        if let tIdx = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "## Transcript" }) {
+            transcript = lines[(tIdx + 1)...].joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // Manual notes: between a "## Notes…" header and the next "## " header (or EOF).
+        var notes: String?
+        if let nIdx = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("## Notes") }) {
+            var end = lines.count
+            var j = nIdx + 1
+            while j < lines.count {
+                if lines[j].trimmingCharacters(in: .whitespaces).hasPrefix("## ") { end = j; break }
+                j += 1
+            }
+            let body = lines[(nIdx + 1)..<end].joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            notes = body.isEmpty ? nil : body
+        }
+        return (notes, transcript)
+    }
+
+    /// Assembles one combined document from several source recordings, ordered as
+    /// given. Each part's transcript sits under a `### Part N` header carrying its
+    /// real start time (timelines restart at 00:00:00 per recording, so they're kept
+    /// per-part rather than re-based). Manual notes, if any, are gathered up front.
+    static func makeCombinedBody(meta: TranscriptMeta, parts: [CombinePart]) -> String {
+        var out: [String] = []
+        out.append(renderFrontmatter(meta))
+
+        var headerMeta = ["**Date:** \(isoDate(meta.date))"]
+        if !meta.filing.trimmingCharacters(in: .whitespaces).isEmpty {
+            headerMeta.append("**Filing:** \(meta.filing)")
+        }
+        if !meta.attendees.isEmpty {
+            headerMeta.append("**Attendees:** \(meta.attendees.joined(separator: ", "))")
+        }
+        out.append("# \(meta.title)")
+        out.append("")
+        out.append(headerMeta.joined(separator: "  \n"))
+        out.append("")
+        out.append("> Combined from \(parts.count) recordings.")
+        out.append("")
+
+        let noted = parts.filter { !($0.manualNotes ?? "").isEmpty }
+        if !noted.isEmpty {
+            out.append("## Notes (manual)")
+            out.append("")
+            for p in noted {
+                out.append("### \(p.title) — \(sectionStamp(p.date))")
+                out.append("")
+                out.append(p.manualNotes ?? "")
+                out.append("")
+            }
+        }
+
+        out.append("## Transcript")
+        out.append("")
+        for (i, p) in parts.enumerated() {
+            out.append("### Part \(i + 1): \(p.title) — \(sectionStamp(p.date))")
+            out.append("")
+            out.append(p.transcript.isEmpty ? "_(no transcript text)_" : p.transcript)
+            out.append("")
+        }
+        return out.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"
+    }
+
     /// Builds a manual-only document (no recorded segments).
     static func makeManualBody(meta: TranscriptMeta, notes: String) -> String {
         var out: [String] = []
@@ -128,6 +212,37 @@ enum TranscriptWriter {
                             manualNotes: manualNotes, meta: meta)
         try body.write(to: url, atomically: true, encoding: .utf8)
         return Result(url: url)
+    }
+
+    /// Snapshot-based transcript rewrite for the offline queue and speaker review —
+    /// the `self`-free sibling of `RecordingController.rewriteLastTranscript`. Takes its
+    /// metadata explicitly (never reads live controller state), preserves any manual
+    /// notes already in the file, and regenerates the body from `segments`. Callers MUST
+    /// gate this with `TranscriptCoverage.isSafeReplacement` so a thin offline pass can
+    /// never overwrite a fuller transcript.
+    static func rewriteTranscriptFile(at url: URL, segments: [Segment],
+                                      title: String, filing: String, attendees: String) {
+        guard var meta = parseFrontmatter(url) else { return }
+        let t = title.trimmingCharacters(in: .whitespaces)
+        if !t.isEmpty { meta.title = t }
+        let f = filing.trimmingCharacters(in: .whitespaces)
+        if !f.isEmpty { meta.filing = f }
+        meta.attendees = splitAttendees(attendees)
+
+        if segments.isEmpty {
+            // Metadata-only re-stamp (no body to regenerate).
+            updateFrontmatter(at: url) { m in
+                m.title = meta.title; m.filing = meta.filing; m.attendees = meta.attendees
+            }
+            return
+        }
+        // Keep any manual notes the file already carries (they're not in `segments`).
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let (notes, _) = extractBodySections(text: existing)
+        let body = makeBody(title: meta.title, date: meta.date, attendees: attendees,
+                            destination: meta.filing, segments: segments,
+                            manualNotes: notes, meta: meta)
+        try? body.write(to: url, atomically: true, encoding: .utf8)
     }
 
     // MARK: Frontmatter — render / parse / update
@@ -298,6 +413,15 @@ enum TranscriptWriter {
         return f.string(from: date)
     }
 
+    /// Date + time for a combined transcript's per-part header (so each part shows
+    /// the real wall-clock time it was recorded).
+    static func sectionStamp(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f.string(from: date)
+    }
+
     /// Full timestamp for the frontmatter `date:` field, so the History tab shows the
     /// real recording time and sorts same-day items correctly. The human-readable
     /// `**Date:**` header line stays date-only via `isoDate`.
@@ -325,5 +449,57 @@ enum TranscriptWriter {
     static func sanitize(_ title: String) -> String {
         let illegal = CharacterSet(charactersIn: "/:\\?%*|\"<>")
         return title.components(separatedBy: illegal).joined(separator: "-")
+    }
+}
+
+/// Decides whether an offline-pass result is a *safe* replacement for an already-saved
+/// transcript. The offline batch ASR can silently truncate (e.g. a long recording under
+/// memory pressure, or audio that was itself truncated) and return only the first couple
+/// of minutes. Without this guard, that thin result overwrites a complete transcript —
+/// the 2026-06-08 incident where a 3-minute pass destroyed a 43-minute meeting. The rule:
+/// only replace when the offline result covers most of the recording AND has a comparable
+/// number of lines to what's already there.
+enum TranscriptCoverage {
+    /// Latest segment end time across a timeline (seconds).
+    static func span(_ segments: [Segment]) -> TimeInterval { segments.map(\.end).max() ?? 0 }
+
+    /// Parse a saved transcript's body for its last `[HH:MM:SS]` timestamp and the number
+    /// of timestamped speaker lines — the baseline to compare an offline result against.
+    static func spanFromTranscriptFile(_ url: URL) -> (span: TimeInterval, lines: Int) {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return (0, 0) }
+        return spanFromText(text)
+    }
+
+    static func spanFromText(_ text: String) -> (span: TimeInterval, lines: Int) {
+        var maxSec: TimeInterval = 0
+        var lines = 0
+        for raw in text.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("**[") || line.hasPrefix("[") else { continue }
+            guard let open = line.firstIndex(of: "["),
+                  let close = line[open...].firstIndex(of: "]") else { continue }
+            let stamp = line[line.index(after: open)..<close]
+            let parts = stamp.split(separator: ":").compactMap { Int($0) }
+            guard parts.count == 3 else { continue }
+            maxSec = max(maxSec, TimeInterval(parts[0] * 3600 + parts[1] * 60 + parts[2]))
+            lines += 1
+        }
+        return (maxSec, lines)
+    }
+
+    /// True when `offline` may safely overwrite the transcript at `existingFile`.
+    /// Coverage is measured by **span** (how many seconds of the recording the offline
+    /// pass spans), NOT segment count: live-streaming ASR and batch ASR chunk audio at
+    /// very different granularities, so comparing counts spuriously rejects a perfectly
+    /// good — just coarser — offline result and strands the diarized speaker names. Span
+    /// still catches the real failure mode (a truncated pass, e.g. 3 min of a 43-min
+    /// call → 7% span). An empty result is always rejected (handled upstream too).
+    static func isSafeReplacement(offline: [Segment], existingFile: URL,
+                                  audioDuration: TimeInterval, minRatio: Double = 0.8) -> Bool {
+        guard !offline.isEmpty else { return false }
+        let (existingSpan, _) = spanFromTranscriptFile(existingFile)
+        let reference = max(audioDuration, existingSpan)
+        guard reference > 0 else { return true }   // no baseline to compare → accept
+        return span(offline) >= minRatio * reference
     }
 }

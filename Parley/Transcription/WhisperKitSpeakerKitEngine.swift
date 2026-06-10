@@ -41,12 +41,21 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
     // MARK: SpeakerCapableEngine surface
     var onSegmentsChanged: (([Segment]) -> Void)?
     var onSpeakerIdentified: ((String) -> Void)?
+    /// Optional per-stage progress sink. Set by `OfflineProcessingService` before
+    /// `runOfflinePass()`; cleared after. The relay handles its own throttling.
+    var onOfflineProgress: (@Sendable (EngineProgressEvent) -> Void)?
     var mixedAudioURL: URL?
     var micArchiveURL: URL?
     var systemArchiveURL: URL?
     var forceOfflineAsr = false   // this engine always offline-transcribes; kept for protocol parity
     var embeddingModelId: String { VoiceprintStore.speakerKitEmbeddingModel }
     var embeddingDim: Int { 256 }
+
+    /// Clustering hint forwarded to diarize() in runOfflinePass().
+    var speakerCountHint: Int? = nil
+
+    /// Raw turns from the last offline pass (empty if diarization didn't run).
+    func diarizedTurns() -> [DiarizationAttribution.Turn] { turns }
 
     init(models: ModelManager, settings: AppSettings,
          voiceprints: VoiceprintStore? = nil, identificationThreshold: Double = 0.6) {
@@ -127,23 +136,62 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
     func runOfflinePass() async -> OfflinePassSummary {
         let started = Date()
         AppLog.log("SpeakerKit offline pass started…", category: "record")
+
+        // Capture the callback once so the rest of the method uses a consistent ref,
+        // and closures below capture only this Sendable value, not engine state.
+        let progressCB = onOfflineProgress
+        progressCB?(.mixStarted)
+
         guard let url = mixedAudioURL else {
             return OfflinePassSummary(speakerCount: callSpeakerIds().count, relabeled: false,
                                       note: "Offline pass skipped — no audio")
         }
+
+        // Reuse an already-valid mix rather than rebuilding it every pass. A truncated
+        // mix from a crashed earlier run fails the duration check and gets rebuilt.
         let mic = micArchiveURL, sys = systemArchiveURL
-        let built = await Task.detached { AudioMix.buildCleanMix(mic: mic, system: sys, output: url) }.value
-        guard let samples = AudioMix.loadMono16k(url), !samples.isEmpty else {
-            AppLog.log("SpeakerKit offline pass: couldn't read clean mix (built=\(built))", category: "record")
-            return OfflinePassSummary(speakerCount: 0, relabeled: false, note: "Offline pass: no audio")
+        let shouldRebuild: Bool = {
+            guard FileManager.default.fileExists(atPath: url.path),
+                  let mixFile = try? AVAudioFile(forReading: url),
+                  let micFile = mic.flatMap({ try? AVAudioFile(forReading: $0) }) else { return true }
+            let mixDur = Double(mixFile.length) / mixFile.fileFormat.sampleRate
+            let micDur = Double(micFile.length) / micFile.fileFormat.sampleRate
+            return abs(mixDur - micDur) > 1.0
+        }()
+        if shouldRebuild {
+            let built = await Task.detached { AudioMix.buildCleanMix(mic: mic, system: sys, output: url) }.value
+            AppLog.log("SpeakerKit offline pass: rebuilt clean mix (built=\(built))", category: "record")
+        } else {
+            AppLog.log("SpeakerKit offline pass: reusing existing clean mix (duration matched)", category: "record")
         }
 
-        offlineWords = await transcribeWords(samples)
+        guard let samples = AudioMix.loadMono16k(url), !samples.isEmpty else {
+            AppLog.log("SpeakerKit offline pass: couldn't read clean mix", category: "record")
+            return OfflinePassSummary(speakerCount: 0, relabeled: false, note: "Offline pass: no audio")
+        }
+        progressCB?(.mixDone)
+
+        // ASR and diarization both only READ samples — run them concurrently to cut the
+        // ~3-4 min sequential wall time for a 1h call roughly in half.
+        let concurrentStart = Date()
+        let hint = speakerCountHint
+        let threshold = settings.diarizationThreshold
+
+        async let asrTask = transcribeWords(samples, progressCB: progressCB)
+        async let diarTask = diarizeLogged(samples, clusterThreshold: threshold,
+                                           expectedSpeakers: hint, progressCB: progressCB)
+
+        let (words, diarResult) = await (asrTask, diarTask)
+
+        let bothElapsed = Date().timeIntervalSince(concurrentStart)
+        AppLog.log("SpeakerKit offline pass: concurrent ASR+diar finished in \(String(format: "%.1fs", bothElapsed))", category: "record")
+
+        offlineWords = words
         if offlineWords.isEmpty {
             AppLog.log("SpeakerKit offline pass: WhisperKit produced no word timings — keeping live transcript", category: "record")
         }
 
-        if let out = try? await diarizer.diarize(samples) {
+        if let out = diarResult {
             turns = out.turns
             speakerCentroids = out.centroids
             var g: [String: TimeInterval] = [:]
@@ -154,9 +202,11 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
             AppLog.log("SpeakerKit diarization failed — keeping unattributed transcript", category: "record")
         }
 
+        progressCB?(.attributeStarted)
         autoIdentify()
         rederive()
         publish()
+        progressCB?(.attributeDone)
 
         // The offline transcribe loaded the heavier `model`; if live transcription is on,
         // swap the fast live model back in (background, non-blocking) so the NEXT recording
@@ -173,14 +223,72 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
                                   note: "Speaker detection complete · \(n) speaker\(n == 1 ? "" : "s") · \(String(format: "%.1fs", elapsed))\(suffix)")
     }
 
+    /// Call the diarizer and return its output, absorbing any thrown error into a log line
+    /// so it can be used as an `async let` binding that returns an optional.
+    /// Emits `.diarizationDone` in BOTH the success and catch paths so the relay's
+    /// "done-side counts as 1.0" rule keeps the bar moving even on failure.
+    private func diarizeLogged(_ samples: [Float],
+                               clusterThreshold: Double?,
+                               expectedSpeakers: Int?,
+                               progressCB: (@Sendable (EngineProgressEvent) -> Void)?) async -> SpeakerKitDiarizer.Output? {
+        let t = Date()
+        do {
+            let out = try await diarizer.diarize(
+                samples,
+                clusterThreshold: clusterThreshold,
+                expectedSpeakers: expectedSpeakers,
+                progress: progressCB.map { cb in { f in cb(.diarization(f)) } })
+            progressCB?(.diarizationDone)
+            AppLog.log("SpeakerKit diar stage: \(String(format: "%.1fs", Date().timeIntervalSince(t)))", category: "record")
+            return out
+        } catch {
+            progressCB?(.diarizationDone)   // failure counts as completion so the bar can advance
+            AppLog.log("SpeakerKit diarization failed: \(error.localizedDescription) (\(String(format: "%.1fs", Date().timeIntervalSince(t))))", category: "record")
+            return nil
+        }
+    }
+
     /// Re-transcribe the clean mix with WhisperKit word timestamps → attribution tokens.
-    private func transcribeWords(_ samples: [Float]) async -> [DiarizationAttribution.Token] {
-        guard let kit = await models.prepare(settings.model) else { return [] }
+    /// Errors from `kit.transcribe` are logged rather than swallowed so a failing pass
+    /// is diagnosable in the log (previously `try?` discarded the error silently).
+    ///
+    /// Hooks `kit.segmentDiscoveryCallback` to emit `.asr` fraction events. The callback
+    /// is cleared with `defer` — WhisperKit's kit instance is shared via `ModelManager`
+    /// and a stale closure must not leak into the next live session.
+    private func transcribeWords(_ samples: [Float],
+                                 progressCB: (@Sendable (EngineProgressEvent) -> Void)?) async -> [DiarizationAttribution.Token] {
+        guard let kit = await models.prepare(settings.model) else {
+            progressCB?(.asrDone)
+            return []
+        }
+        // Capture as locals so the closure captures only Sendable values, not `self`.
+        let cb = progressCB
+        let duration = Double(samples.count) / 16_000
+
+        // Map WhisperKit segment discoveries to an ASR fraction. The last segment's end
+        // time relative to total audio duration gives a monotone 0…1 progress signal.
+        // `defer` clears the callback so no reference to this offline pass leaks into the
+        // next recording's live transcription (the kit is reused via ModelManager).
+        defer { kit.segmentDiscoveryCallback = nil }
+        if let cb {
+            kit.segmentDiscoveryCallback = { segments in
+                guard let maxEnd = segments.map({ Double($0.end) }).max() else { return }
+                cb(.asr(min(1.0, maxEnd / max(duration, 1.0))))
+            }
+        }
+
         var opts = DecodingOptions()
         opts.wordTimestamps = true
         opts.withoutTimestamps = false
         opts.skipSpecialTokens = true
-        guard let results = try? await kit.transcribe(audioArray: samples, decodeOptions: opts) else { return [] }
+        let results: [TranscriptionResult]
+        do {
+            results = try await kit.transcribe(audioArray: samples, decodeOptions: opts)
+        } catch {
+            progressCB?(.asrDone)
+            AppLog.log("Offline ASR failed: \(error.localizedDescription)", category: "record")
+            return []
+        }
         var toks: [DiarizationAttribution.Token] = []
         for r in results {
             for seg in r.segments {
@@ -189,6 +297,12 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
                 }
             }
         }
+        // Log token count and end time so coverage-guard rejections are diagnosable.
+        if !toks.isEmpty {
+            let span = toks.last.map { String(format: "%.1fs", $0.end) } ?? "?"
+            AppLog.log("Offline ASR: \(toks.count) tokens, span \(span)", category: "record")
+        }
+        progressCB?(.asrDone)
         return toks
     }
 
@@ -201,24 +315,41 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
     private func publish() { onSegmentsChanged?(finalTimeline()) }
 
     /// Match each unnamed speaker (with enough speech) against saved voiceprints.
+    /// On a near-miss (enough speech but no match), log the best-scoring candidate so
+    /// over-clustering failures are diagnosable without changing matching behavior.
     private func autoIdentify() {
         guard let store = voiceprints else { return }
         for (id, centroid) in speakerCentroids where resolvedNames[id] == nil && !centroid.isEmpty {
             guard (gated[id] ?? 0) >= settings.minSpeechToIdentify else { continue }
             if let m = store.match(centroid, threshold: identificationThreshold, model: embeddingModelId) {
                 resolvedNames[id] = m.voiceprint.name
-                AppLog.log("SpeakerKit auto-identified a speaker as \(m.voiceprint.name) (score \(String(format: "%.2f", m.score)))", category: "record")
+                AppLog.log("SpeakerKit auto-identified Speaker \(id) as \(m.voiceprint.name) (score \(String(format: "%.2f", m.score)))", category: "record")
                 onSpeakerIdentified?(m.voiceprint.name)
+            } else {
+                // Threshold of -1 returns the best candidate regardless of score, letting
+                // us report near-misses without changing the actual match gate.
+                if let best = store.match(centroid, threshold: -1, model: embeddingModelId) {
+                    AppLog.log("Speaker \(id): no voiceprint match (best: \(best.voiceprint.name) at \(String(format: "%.2f", best.score)), threshold \(String(format: "%.2f", identificationThreshold)))", category: "record")
+                } else {
+                    AppLog.log("Speaker \(id): no voiceprint match (no enrolled prints for model \(embeddingModelId))", category: "record")
+                }
             }
         }
     }
 
     // MARK: Review surface
-    // Derive the speaker set from the ATTRIBUTED segments (same source as
-    // speakerSummaries) so the review count never lists a turn that won no words.
-    func callSpeakerIds() -> [String] { Array(Set((offlineSegments ?? []).compactMap { $0.speakerId })).sorted() }
+
+    /// Speaker ids from attributed segments when available; falls back to the diarized
+    /// turns so a failed ASR pass doesn't hide speakers from the review panel.
+    func callSpeakerIds() -> [String] {
+        let fromSegs = (offlineSegments ?? []).compactMap { $0.speakerId }
+        if !fromSegs.isEmpty { return Array(Set(fromSegs)).sorted() }
+        return Array(Set(turns.map { $0.speakerId })).sorted()
+    }
     func resolvedName(for id: String) -> String? { resolvedNames[id] }
     func gatedSeconds(for id: String) -> TimeInterval { gated[id] ?? 0 }
+
+    func centroidsByID() -> [String: [Float]] { speakerCentroids }
 
     @discardableResult
     func setSpeakerName(_ speakerId: String, as name: String) -> [Float]? {
@@ -235,11 +366,21 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
         guard let url = mixedAudioURL else {
             AppLog.log("repAudioSample: no mixed.caf", category: "record"); return nil
         }
+        // Prefer the longest attributed segment; fall back to the longest diarized turn
+        // when ASR failed so voiceprint enrolment still works after a failed ASR pass.
+        let start: TimeInterval
+        let end: TimeInterval
         let segs = (offlineSegments ?? []).filter { $0.speakerId == speakerId }
-        guard let rep = segs.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else {
-            AppLog.log("repAudioSample: no segments for speaker \(speakerId)", category: "record"); return nil
+        if let rep = segs.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) {
+            start = max(0, rep.start)
+            end = min(rep.end, start + 4)
+        } else if let rep = turns.filter({ $0.speakerId == speakerId })
+                                  .max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) {
+            start = max(0, rep.start)
+            end = min(rep.end, start + 4)
+        } else {
+            AppLog.log("repAudioSample: no segments or turns for speaker \(speakerId)", category: "record"); return nil
         }
-        let start = max(0, rep.start), end = min(rep.end, start + 4)
         return await Task.detached {
             guard let all = AudioMix.loadMono16k(url) else { return nil }
             let s = Int(start * 16_000), e = min(all.count, Int(end * 16_000))
@@ -249,19 +390,40 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
     }
 
     func speakerSummaries() -> [CallSpeakerSummary] {
-        var byId: [String: [Segment]] = [:]
-        for s in (offlineSegments ?? []) where s.speakerId != nil {
-            byId[s.speakerId!, default: []].append(s)
+        // Segment-based path: attributed segments exist → use them (full text + accurate timing).
+        let segments = offlineSegments ?? []
+        if !segments.isEmpty {
+            var byId: [String: [Segment]] = [:]
+            for s in segments where s.speakerId != nil {
+                byId[s.speakerId!, default: []].append(s)
+            }
+            return byId.keys.sorted().map { id in
+                let segs = byId[id] ?? []
+                let talk = segs.reduce(0.0) { $0 + max(0, $1.end - $1.start) }
+                let rep = segs.max(by: { ($0.end - $0.start) < ($1.end - $1.start) })
+                return CallSpeakerSummary(
+                    id: id, resolvedName: resolvedNames[id], talkSeconds: talk,
+                    sampleStart: rep?.start ?? 0,
+                    sampleEnd: rep.map { min($0.end, $0.start + 8) } ?? 0,
+                    firstLine: String((rep?.text ?? "").prefix(100)))
+            }
         }
-        return byId.keys.sorted().map { id in
-            let segs = byId[id] ?? []
-            let talk = segs.reduce(0.0) { $0 + max(0, $1.end - $1.start) }
-            let rep = segs.max(by: { ($0.end - $0.start) < ($1.end - $1.start) })
+
+        // Turn-based fallback: ASR failed but diarization succeeded. Derive talk time
+        // from the gated dict and the sample window from the speaker's longest turn so
+        // voiceprint enrolment and the review panel still work. firstLine is empty
+        // (no transcribed text is available for this path).
+        guard !turns.isEmpty else { return [] }
+        let speakerIds = Array(Set(turns.map { $0.speakerId })).sorted()
+        return speakerIds.map { id in
+            let talk = gated[id] ?? 0
+            let rep = turns.filter { $0.speakerId == id }
+                           .max(by: { ($0.end - $0.start) < ($1.end - $1.start) })
             return CallSpeakerSummary(
                 id: id, resolvedName: resolvedNames[id], talkSeconds: talk,
                 sampleStart: rep?.start ?? 0,
                 sampleEnd: rep.map { min($0.end, $0.start + 8) } ?? 0,
-                firstLine: String((rep?.text ?? "").prefix(100)))
+                firstLine: "")
         }
     }
 }

@@ -42,6 +42,20 @@ enum MeetingParsers {
         return title.isEmpty ? nil : title
     }
 
+    /// Teams bakes presence/relationship badges ("External", "unfamiliar", "Unverified",
+    /// "Guest") into the SAME accessibility segment as the name (no comma), so a parsed
+    /// name reads "Farhang Mehregani External unfamiliar". Strip those trailing badge
+    /// words so the attendee is just the person's name. Only trims from the END and only
+    /// known badge words, so real names are untouched.
+    static func stripStatusBadges(_ name: String) -> String {
+        let badges: Set<String> = ["external", "unfamiliar", "unverified", "guest"]
+        var words = name.split(separator: " ").map(String.init)
+        while let last = words.last, badges.contains(last.lowercased()), words.count > 1 {
+            words.removeLast()
+        }
+        return words.joined(separator: " ")
+    }
+
     // MARK: Teams roster (People pane open)
 
     /// Rows under `AXOutline desc="Attendees"`, e.g.
@@ -56,7 +70,7 @@ enum MeetingParsers {
             let parts = text.components(separatedBy: ", ")
             guard let menuIdx = parts.firstIndex(of: "Has context menu"), menuIdx > 0 else { continue }
             // Names containing ", " keep their commas: everything before the marker.
-            let name = parts[..<menuIdx].joined(separator: ", ")
+            let name = stripStatusBadges(parts[..<menuIdx].joined(separator: ", "))
             let role = parts[(menuIdx + 1)...].first(where: roles.contains)
             entries.append(RosterEntry(name: name, role: role))
         }

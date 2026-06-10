@@ -155,6 +155,75 @@ final class TranscriptStore: ObservableObject {
         return url
     }
 
+    /// Combines several transcripts into one cohesive note (newest-first lists are
+    /// reordered chronologically), so a call that got split across recordings —
+    /// e.g. a crash mid-meeting, or an auto-stop/restart — can be re-summarized as a
+    /// single coherent transcript. Unions attendees, keeps each part's own timeline
+    /// under a `### Part N` header, and writes a fresh `unprocessed` note. Audio links
+    /// are intentionally dropped (a combined note spans multiple sessions, so a single
+    /// `audio:` would mislead "Detect speakers"); the originals keep theirs. Returns
+    /// the new transcript's URL, or nil on failure.
+    @discardableResult
+    func combine(_ items: [TranscriptItem], title rawTitle: String, trashOriginals: Bool) -> URL? {
+        let ordered = items.sorted {
+            $0.meta.date != $1.meta.date
+                ? $0.meta.date < $1.meta.date
+                : $0.url.lastPathComponent < $1.url.lastPathComponent
+        }
+        guard ordered.count >= 2 else { return nil }
+
+        let date = ordered[0].meta.date
+        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ordered[0].meta.title
+            : rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Union attendees case-insensitively, preserving first-seen order.
+        var attendees: [String] = []
+        for it in ordered {
+            for a in it.meta.attendees
+            where !attendees.contains(where: { $0.caseInsensitiveCompare(a) == .orderedSame }) {
+                attendees.append(a)
+            }
+        }
+        let filing = ordered.compactMap {
+            let f = $0.meta.filing.trimmingCharacters(in: .whitespaces); return f.isEmpty ? nil : f
+        }.first ?? ""
+
+        let parts: [TranscriptWriter.CombinePart] = ordered.map { it in
+            let text = (try? String(contentsOf: it.url, encoding: .utf8)) ?? ""
+            let (notes, transcript) = TranscriptWriter.extractBodySections(text: text)
+            return .init(title: it.meta.title, date: it.meta.date,
+                         manualNotes: notes, transcript: transcript)
+        }
+
+        let meta = TranscriptMeta(title: title, date: date, attendees: attendees,
+                                  filing: filing, status: "unprocessed",
+                                  note: nil, audio: nil, type: "recording")
+        let body = TranscriptWriter.makeCombinedBody(meta: meta, parts: parts)
+        let url = uniqueDestination(for: TranscriptWriter.filename(title: title, date: date),
+                                    in: AppPaths.unprocessedURL)
+        do {
+            AppPaths.ensureVaultFolders()
+            try body.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            AppLog.log("Combine failed: \(error.localizedDescription)", category: "history")
+            return nil
+        }
+        AppLog.log("Combined \(ordered.count) transcript(s) → \(url.lastPathComponent)", category: "history")
+
+        // Optional cleanup: trash the originals' transcript + any staged summary, but
+        // never their audio or filed notes — combining is non-destructive to recorded
+        // media by default.
+        if trashOriginals {
+            for it in ordered {
+                if let staged = links(for: it).staging { MeetingFiles.trash(staged) }
+                MeetingFiles.trash(it.url)
+            }
+        }
+        refresh()
+        return url
+    }
+
     // MARK: File management (delete / rename / refile)
 
     /// Resolves a meeting's linked artifacts (audio session, filed note, staged summary).
@@ -315,8 +384,16 @@ final class TranscriptStore: ObservableObject {
     }
 
     /// Whether a transcript body still carries generic (unassigned) speaker labels.
-    private static func hasGenericSpeakerLabels(_ text: String) -> Bool {
+    static func hasGenericSpeakerLabels(_ text: String) -> Bool {
         text.contains("] Speaker ") || text.contains("] Me:") || text.contains("] Remote:")
+    }
+
+    /// Re-read a transcript file and report whether it still has generic speaker labels.
+    /// Used after a speaker review to decide if the note is now fully-named (and thus
+    /// summary-ready). Returns true (assume unnamed) if the file can't be read.
+    static func bodyHasGenericLabels(at url: URL) -> Bool {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return true }
+        return hasGenericSpeakerLabels(text)
     }
 
     // MARK: Helpers

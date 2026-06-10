@@ -40,6 +40,9 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// re-processing an already-recorded call from History (there are no streaming
     /// units, so the batch pass is the only source of transcript text + timings).
     var forceOfflineAsr = false
+    /// Accepted for SpeakerCapableEngine conformance; not forwarded to FluidAudio's
+    /// DiarizerManager (which uses its own clusteringThreshold from settings).
+    var speakerCountHint: Int? = nil
     // `.streaming` (11s chunks, low latency) — `.default` uses 15s chunks and
     // won't emit anything until ~15s of audio, which reads as "no transcript".
     private let asr = SlidingWindowAsrManager(config: .streaming)
@@ -748,6 +751,17 @@ final class FluidAudioEngine: TranscriptionEngine {
     }
     func resolvedName(for id: String) -> String? { resolvedNames[id] }
     func gatedSeconds(for id: String) -> TimeInterval { speakerGatedSeconds[id] ?? 0 }
+
+    /// Per-speaker centroids built from quality-gated embeddings (same rule as
+    /// `setSpeakerName`), for persisting a review cache so assignment needs no re-run.
+    func centroidsByID() -> [String: [Float]] {
+        var out: [String: [Float]] = [:]
+        for (id, embs) in speakerEmbeddings
+        where !embs.isEmpty && (speakerGatedSeconds[id] ?? 0) >= minSecondsToEnroll {
+            out[id] = VoiceprintStore.normalized(VoiceprintStore.mean(embs))
+        }
+        return out
+    }
 
     /// Manually assign a name to a speaker: relabel their lines (via re-derive) and
     /// return the speaker's centroid embedding for the caller to enroll (nil if no

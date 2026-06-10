@@ -90,7 +90,9 @@ struct AssignSpeakersView: View {
     // affordance reads identically wherever a speaker is named.
     private func namer(for s: CallSpeakerSummary) -> some View {
         let d = draft.trimmingCharacters(in: .whitespaces)
-        let attendees = TranscriptWriter.splitAttendees(recording.attendees)
+        // The review carries its own attendee snapshot (it may be for a History note,
+        // not the live Record session) — use it rather than the live `recording.attendees`.
+        let attendees = TranscriptWriter.splitAttendees(review.attendees)
         let attendeeSet = Set(attendees.map { $0.lowercased() })
         let matches: [String] = d.isEmpty ? [] : vault.people.filter {
             $0.lowercased().contains(d.lowercased())

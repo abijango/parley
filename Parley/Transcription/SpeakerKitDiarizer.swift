@@ -31,10 +31,46 @@ final class SpeakerKitDiarizer {
     }
 
     /// Diarize 16 kHz mono samples → normalized turns + centroid embeddings.
-    func diarize(_ samples: [Float]) async throws -> Output {
+    ///
+    /// - Parameters:
+    ///   - clusterThreshold: Maps to `PyannoteDiarizationOptions.clusterDistanceThreshold`.
+    ///     Lower values split clusters more aggressively (more speakers); higher values merge
+    ///     similar voices. SpeakerKit's internal default is 0.6 — passing `nil` preserves
+    ///     that exact behavior.
+    ///   - expectedSpeakers: Maps to `PyannoteDiarizationOptions.numberOfSpeakers`.
+    ///     **Hard constraint** — SpeakerKit will produce exactly this many clusters, which
+    ///     can suppress genuine variation or force artificial splits if wrong. Only pass this
+    ///     when the attendee count comes from user-accepted meeting metadata; never infer it.
+    ///   - progress: Optional callback receiving 0…1 progress fractions from SpeakerKit's
+    ///     `Progress.fractionCompleted`. Fires at high rate; callers throttle downstream.
+    func diarize(_ samples: [Float],
+                 clusterThreshold: Double? = nil,
+                 expectedSpeakers: Int? = nil,
+                 progress: (@Sendable (Double) -> Void)? = nil) async throws -> Output {
         try await ensureLoaded()
         guard let sk = speakerKit else { throw SpeakerKitDiarizerError.notLoaded }
-        let result = try await sk.diarize(audioArray: samples)
+
+        let options: PyannoteDiarizationOptions? = (clusterThreshold != nil || expectedSpeakers != nil)
+            ? PyannoteDiarizationOptions(
+                numberOfSpeakers: expectedSpeakers,
+                clusterDistanceThreshold: clusterThreshold.map { Float($0) })
+            : nil
+
+        if let opts = options {
+            let threshStr = opts.clusterDistanceThreshold.map { String(format: "%.2f", $0) } ?? "default"
+            let speakersStr = opts.numberOfSpeakers.map { String($0) } ?? "default"
+            AppLog.log("SpeakerKit diarize: threshold=\(threshStr), expectedSpeakers=\(speakersStr)", category: "record")
+        } else {
+            AppLog.log("SpeakerKit diarize: defaults", category: "record")
+        }
+
+        // SpeakerKit's progressCallback delivers a Foundation `Progress` object; extract
+        // `fractionCompleted` and forward it as a plain Double to stay framework-agnostic.
+        let progressCallback: (@Sendable (Progress) -> Void)? = progress.map { cb in
+            { p in cb(p.fractionCompleted) }
+        }
+        let result = try await sk.diarize(audioArray: samples, options: options,
+                                          progressCallback: progressCallback)
 
         let turns: [DiarizationAttribution.Turn] = result.segments.compactMap { seg in
             guard let id = seg.speaker.speakerId else { return nil }
