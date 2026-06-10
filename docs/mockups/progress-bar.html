@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Parley — segmented stage bar mockup</title>
+<style>
+  /* ── Theme tokens (mirrors Parley/UI/DesignSystem/Theme.swift) ─────────────
+     Spacing: xxs 2 / xs 4 / s 8 / m 12 / l 16 / xl 24   Radius: s 6 / m 10
+     Severity: info=accent, warning orange, danger red, success green.
+     Shimmer maps to SwiftUI as an offset-animated gradient mask; under
+     Reduce Motion it degrades to a static accent fill at tintFill (0.15). */
+  :root {
+    --space-xxs: 2px; --space-xs: 4px; --space-s: 8px; --space-m: 12px;
+    --space-l: 16px; --space-xl: 24px;
+    --radius-s: 6px; --radius-m: 10px;
+    --danger: #e5484d; --success: #46a758; --warning: #f5a623;
+    --bar-h: 16px; --bar-mini-h: 5px;
+  }
+  body.tahoe {
+    --accent: #0a84ff;
+    --window-bg: #1e1e23; --panel-bg: rgba(255,255,255,.055);
+    --panel-border: rgba(255,255,255,.09);
+    --text-1: rgba(255,255,255,.92); --text-2: rgba(255,255,255,.55);
+    --text-3: rgba(255,255,255,.35);
+    --track: rgba(255,255,255,.12);
+    --font: -apple-system, "SF Pro Text", system-ui, sans-serif;
+    background: linear-gradient(160deg, #1a1a20, #232330);
+  }
+  body.cursor {
+    --accent: #c0573a;                 /* clay */
+    --window-bg: #f6f1e7; --panel-bg: #fbf7ef;
+    --panel-border: rgba(60,45,30,.14);
+    --text-1: #2c241b; --text-2: rgba(44,36,27,.6); --text-3: rgba(44,36,27,.38);
+    --track: rgba(60,45,30,.12);
+    --font: "Geist", -apple-system, system-ui, sans-serif;
+    background: #efe8da;
+  }
+  body {
+    margin: 0; padding: var(--space-xl);
+    font-family: var(--font); color: var(--text-1);
+    transition: background .25s;
+  }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  h2 { font-size: 13px; color: var(--text-2); font-weight: 600;
+       text-transform: uppercase; letter-spacing: .06em; margin: 28px 0 10px; }
+  .note { font-size: 12px; color: var(--text-3); margin: 0 0 12px; }
+  .toggle { position: fixed; top: var(--space-l); right: var(--space-l); }
+  .toggle button {
+    font: 12px var(--font); padding: 6px 14px; border-radius: 999px;
+    border: 1px solid var(--panel-border); background: var(--panel-bg);
+    color: var(--text-1); cursor: pointer;
+  }
+  .panel {
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    border-radius: var(--radius-m); padding: var(--space-m) var(--space-l);
+    margin-bottom: var(--space-m); max-width: 660px;
+    backdrop-filter: blur(20px);
+  }
+  .caption { font-size: 11px; color: var(--text-3); margin-top: var(--space-s); }
+
+  /* ── The segmented stage bar ── */
+  .stagebar { display: flex; gap: var(--space-xxs); height: var(--bar-h);
+              border-radius: 3px; overflow: hidden; }
+  .stagebar.mini { height: var(--bar-mini-h); border-radius: 1px; }
+  .seg { flex: 1; background: var(--track); position: relative; overflow: hidden; }
+  .seg.done   { background: var(--accent); }
+  .seg.failed { background: var(--danger); }
+  .seg .fill  { position: absolute; inset: 0 auto 0 0; background: var(--accent); }
+  .seg.indet .fill {
+    width: 100%; opacity: .85;
+    background: linear-gradient(90deg, transparent 15%, var(--accent) 50%, transparent 85%);
+    animation: shimmer 1.2s linear infinite;
+  }
+  @keyframes shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+  .labelrow { display: flex; justify-content: space-between; align-items: baseline;
+              margin-top: var(--space-s); font-size: 12px; }
+  .labelrow .status { color: var(--text-2); }
+  .labelrow .status b { color: var(--text-1); font-weight: 600; }
+  .labelrow .sub { color: var(--text-3); font-size: 11px;
+                   font-variant-numeric: tabular-nums; }
+  .labelrow .danger { color: var(--danger); }
+  .stagenames { display: flex; gap: var(--space-xxs); margin-top: var(--space-xs); }
+  .stagenames span { flex: 1; text-align: center; font-size: 10px; color: var(--text-3); }
+  .stagenames span.current { color: var(--text-1); font-weight: 600; }
+
+  /* ── Record-screen strip chrome ── */
+  .strip { display: flex; align-items: center; gap: var(--space-m);
+           padding: var(--space-s) var(--space-l);
+           background: var(--panel-bg); border: 1px solid var(--panel-border);
+           border-radius: var(--radius-s); max-width: 660px; margin-bottom: var(--space-s); }
+  .strip .barwrap { flex: 1; }
+  .strip .queued { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .strip .labelrow { margin-top: var(--space-xs); }
+
+  /* ── History row chrome ── */
+  .row { display: flex; flex-direction: column; gap: var(--space-xs);
+         padding: var(--space-s) var(--space-m);
+         border-radius: var(--radius-s); max-width: 660px;
+         border: 1px solid var(--panel-border); background: var(--panel-bg);
+         margin-bottom: var(--space-s); }
+  .row .top { display: flex; align-items: center; gap: var(--space-s); }
+  .row .title { font-size: 13px; font-weight: 500; flex: 1; }
+  .row .badge { font-size: 10px; padding: 2px 8px; border-radius: 999px;
+                background: color-mix(in srgb, var(--accent) 15%, transparent);
+                color: var(--accent); }
+  .row .badge.warn { background: color-mix(in srgb, var(--warning) 15%, transparent);
+                     color: var(--warning); }
+  .row .badge.fail { background: color-mix(in srgb, var(--danger) 15%, transparent);
+                     color: var(--danger); }
+  .row .date { font-size: 11px; color: var(--text-3); }
+</style>
+</head>
+<body class="tahoe">
+<div class="toggle"><button onclick="document.body.className =
+  document.body.className === 'tahoe' ? 'cursor' : 'tahoe'">Toggle look: Tahoe ⇄ Cursor</button></div>
+
+<h1>Segmented stage bar — design mockup</h1>
+<p class="note">Five equal segments: Mix → Transcribe &amp; diarize → Attribute → Compact → Summarize.
+Done = solid accent · running = live fill · indeterminate = shimmer · failed = red, persists.</p>
+
+<h2>Live simulation (loops ~25s)</h2>
+<div class="panel">
+  <div class="stagebar" id="sim-bar"></div>
+  <div class="stagenames" id="sim-names"></div>
+  <div class="labelrow"><span class="status" id="sim-status"></span>
+    <span class="sub" id="sim-sub"></span></div>
+</div>
+
+<h2>1 · Record screen strip (post-meeting)</h2>
+<div class="strip">
+  <div class="barwrap">
+    <div class="stagebar">
+      <div class="seg done"></div>
+      <div class="seg"><div class="fill" style="width:52%"></div></div>
+      <div class="seg"></div><div class="seg"></div><div class="seg"></div>
+    </div>
+    <div class="labelrow">
+      <span class="status"><b>Transcribing &amp; detecting speakers</b> — 52% · Engine AI Tech Deep Dive</span>
+      <span class="sub">transcribe 52% · speakers 74%</span>
+    </div>
+  </div>
+  <span class="queued">+2 queued</span>
+</div>
+<div class="strip">
+  <div class="barwrap">
+    <div class="stagebar">
+      <div class="seg done"></div><div class="seg done"></div><div class="seg done"></div>
+      <div class="seg"><div class="fill" style="width:80%"></div></div>
+      <div class="seg"></div>
+    </div>
+    <div class="labelrow">
+      <span class="status"><b>Compacting audio</b> — 80% · Monthly FSI sync</span>
+      <span class="sub">1.19 GB → 334 MB</span>
+    </div>
+  </div>
+</div>
+
+<h2>2 · History detail pane</h2>
+<div class="panel">
+  <div class="stagebar">
+    <div class="seg"></div><div class="seg"></div><div class="seg"></div>
+    <div class="seg"></div><div class="seg"></div>
+  </div>
+  <div class="labelrow"><span class="status">Queued for speaker detection — runs when idle</span></div>
+</div>
+<div class="panel">
+  <div class="stagebar">
+    <div class="seg done"></div>
+    <div class="seg"><div class="fill" style="width:52%"></div></div>
+    <div class="seg"></div><div class="seg"></div><div class="seg"></div>
+  </div>
+  <div class="stagenames">
+    <span>Mix ✓</span><span class="current">Transcribe &amp; diarize</span>
+    <span>Attribute</span><span>Compact</span><span>Summarize</span>
+  </div>
+  <div class="labelrow"><span class="status"><b>Transcribing &amp; detecting speakers</b> — 52%</span>
+    <span class="sub">transcribe 52% · speakers 74%</span></div>
+</div>
+<div class="panel">
+  <div class="stagebar">
+    <div class="seg done"></div><div class="seg done"></div>
+    <div class="seg indet"><div class="fill"></div></div>
+    <div class="seg"></div><div class="seg"></div>
+  </div>
+  <div class="labelrow"><span class="status"><b>Attributing words to speakers</b></span></div>
+</div>
+<div class="panel">
+  <div class="stagebar">
+    <div class="seg done"></div><div class="seg done"></div><div class="seg done"></div>
+    <div class="seg done"></div>
+    <div class="seg indet"><div class="fill"></div></div>
+  </div>
+  <div class="labelrow"><span class="status"><b>Summarizing with Claude</b></span>
+    <span class="sub" id="ticker">Writing Key Topics…</span></div>
+</div>
+<div class="panel">
+  <div class="stagebar">
+    <div class="seg done"></div><div class="seg failed"></div>
+    <div class="seg"></div><div class="seg"></div><div class="seg"></div>
+  </div>
+  <div class="labelrow"><span class="status danger">Speaker detection failed — audio unreadable</span></div>
+</div>
+<div class="panel">
+  <div class="stagebar">
+    <div class="seg done"></div><div class="seg done"></div><div class="seg done"></div>
+    <div class="seg done"></div><div class="seg done"></div>
+  </div>
+  <div class="labelrow"><span class="status">Processed ✓ — filed to Work/Partners</span></div>
+  <div class="caption">Completed bars fade out after a beat (SwiftUI transition).</div>
+</div>
+
+<h2>3 · History row mini-bar (2px underline)</h2>
+<div class="row">
+  <div class="top"><span class="title">Engine AI Tech Deep Dive</span>
+    <span class="badge">Detecting</span><span class="date">17:46</span></div>
+  <div class="stagebar mini">
+    <div class="seg done"></div>
+    <div class="seg"><div class="fill" style="width:52%"></div></div>
+    <div class="seg"></div><div class="seg"></div><div class="seg"></div>
+  </div>
+</div>
+<div class="row">
+  <div class="top"><span class="title">Monthly FSI x Partnership sync</span>
+    <span class="badge warn">Queued</span><span class="date">15:00</span></div>
+  <div class="stagebar mini">
+    <div class="seg"></div><div class="seg"></div><div class="seg"></div>
+    <div class="seg"></div><div class="seg"></div>
+  </div>
+</div>
+<div class="row">
+  <div class="top"><span class="title">Andre &lt;&gt; Naufal Catchup</span>
+    <span class="badge fail">Failed</span><span class="date">09:17</span></div>
+  <div class="stagebar mini">
+    <div class="seg done"></div><div class="seg failed"></div>
+    <div class="seg"></div><div class="seg"></div><div class="seg"></div>
+  </div>
+</div>
+
+<script>
+  // Summarize activity ticker
+  const sections = ["Writing Executive Summary…", "Writing Key Topics…",
+    "Writing Decisions…", "Writing Action Items…", "Writing Next Steps…"];
+  let ti = 0;
+  setInterval(() => {
+    document.getElementById("ticker").textContent = sections[ti = (ti + 1) % sections.length];
+  }, 1800);
+
+  // Live pipeline simulation: walks all five stages on a loop.
+  const STAGES = [
+    { name: "Mix",                  dur: 1.5,  label: "Building clean mix",
+      indet: true },
+    { name: "Transcribe & diarize", dur: 10,   label: "Transcribing & detecting speakers",
+      concurrent: true },
+    { name: "Attribute",            dur: 1.5,  label: "Attributing words to speakers",
+      indet: true },
+    { name: "Compact",              dur: 5,    label: "Compacting audio" },
+    { name: "Summarize",            dur: 7,    label: "Summarizing with Claude",
+      indet: true, ticker: true },
+  ];
+  const bar = document.getElementById("sim-bar"),
+        names = document.getElementById("sim-names"),
+        status = document.getElementById("sim-status"),
+        sub = document.getElementById("sim-sub");
+  STAGES.forEach(s => {
+    const seg = document.createElement("div"); seg.className = "seg";
+    seg.innerHTML = '<div class="fill" style="width:0%"></div>'; bar.appendChild(seg);
+    const n = document.createElement("span"); n.textContent = s.name; names.appendChild(n);
+  });
+  let stage = 0, t0 = performance.now();
+  function tick(now) {
+    const segs = bar.children, labels = names.children;
+    const s = STAGES[stage], el = (now - t0) / 1000, f = Math.min(1, el / s.dur);
+    for (let i = 0; i < STAGES.length; i++) {
+      segs[i].className = i < stage ? "seg done" : "seg";
+      labels[i].className = i === stage ? "current" : "";
+    }
+    const cur = segs[stage];
+    if (s.indet) { cur.className = "seg indet"; cur.firstChild.style.width = "100%"; }
+    else { cur.firstChild.style.width = (f * 100).toFixed(0) + "%"; }
+    if (s.concurrent) {
+      const asr = f, diar = Math.min(1, f * 1.4);   // diar finishes first, fill = min
+      cur.firstChild.style.width = (Math.min(asr, diar) * 100).toFixed(0) + "%";
+      sub.textContent = `transcribe ${(asr*100).toFixed(0)}% · speakers ${(diar*100).toFixed(0)}%`;
+    } else if (s.ticker) {
+      sub.textContent = sections[Math.floor(el / 1.5) % sections.length];
+    } else sub.textContent = "";
+    status.innerHTML = `<b>${s.label}</b>` + (s.indet || s.concurrent && f >= 1 ? "" :
+      s.concurrent ? ` — ${(f*100).toFixed(0)}%` : s.indet ? "" : ` — ${(f*100).toFixed(0)}%`);
+    if (f >= 1) {
+      stage++; t0 = now;
+      if (stage >= STAGES.length) {
+        for (const el2 of segs) el2.className = "seg done";
+        status.innerHTML = "Processed ✓"; sub.textContent = "";
+        setTimeout(() => { stage = 0; t0 = performance.now(); requestAnimationFrame(tick); }, 2500);
+        return;
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+</script>
+</body>
+</html>
