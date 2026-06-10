@@ -16,7 +16,7 @@ get overwritten on the next regenerate).
 
 ## `tools/localrelease.sh` — use this for each rebuild the user runs locally
 
-Builds the `Parley` scheme in **Release** and installs it to `~/Applications/Parley.app`,
+Builds the `Parley` scheme in **Release** and installs it to `/Applications/Parley.app`,
 replacing the previous copy. Prefer this over a raw `xcodebuild` whenever the user wants an
 installed build they run between sessions.
 
