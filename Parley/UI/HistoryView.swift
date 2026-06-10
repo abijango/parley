@@ -11,8 +11,10 @@ struct HistoryView: View {
     @ObservedObject private var settings = AppSettings.shared
     /// Observed directly so live job state (pending/failed) republishes the view.
     @ObservedObject private var summaryService = RecordingController.shared.summaryService
+    /// Observed so the per-item "Detecting speakers…" state tracks the offline queue.
+    @ObservedObject private var offline = RecordingController.shared.offlineService
     @State private var selection = Set<TranscriptItem.ID>()
-    @State private var filter: HistoryFilter = .needsSpeakers
+    @State private var filter: HistoryFilter = .needsYou
     /// Search query, matched against title / attendees / filing (and bodies when enabled).
     @State private var searchQuery = ""
     @State private var searchInContents = false
@@ -22,38 +24,65 @@ struct HistoryView: View {
     @State private var refileDraft = ""
     @State private var deleteAudioToo = true
     @State private var deleteNoteToo = true
+    @State private var combineDraft = ""
+    @State private var combineTrashOriginals = false
 
     /// The active file-management sheet and its target(s).
     enum FileOp: Identifiable {
         case rename(TranscriptItem)
         case refile([TranscriptItem])
         case delete([TranscriptItem])
+        case combine([TranscriptItem])
         var id: String {
             switch self {
             case .rename(let i): return "rename:\(i.id)"
             case .refile(let items): return "refile:\(items.map(\.id).joined(separator: "|"))"
             case .delete(let items): return "delete:\(items.map(\.id).joined(separator: "|"))"
+            case .combine(let items): return "combine:\(items.map(\.id).joined(separator: "|"))"
             }
         }
     }
 
     enum HistoryFilter: String, CaseIterable, Identifiable {
-        case all = "All", review = "Review", needsSpeakers = "Unassigned", unprocessed = "Unprocessed", processed = "Processed"
+        case all = "All", processing = "Processing", needsYou = "Needs you", done = "Done"
         var id: String { rawValue }
     }
 
+    /// The fused pipeline stage for an item (file flags + offline queue + summary queue).
+    func stage(_ item: TranscriptItem) -> PipelineStage {
+        PipelineStage.derive(item: item, offline: offline, summary: summaryService)
+    }
+
     private var filteredItems: [TranscriptItem] {
-        let base: [TranscriptItem]
+        var base: [TranscriptItem]
         switch filter {
         case .all: base = store.items
-        case .review: base = store.items.filter { $0.summaryReadyURL != nil }
-        case .needsSpeakers: base = store.items.filter { $0.hasUnnamedSpeakers }
-        case .unprocessed: base = store.items.filter { !$0.isProcessed }
-        case .processed: base = store.items.filter { $0.isProcessed }
+        case .processing: base = processingOrderedItems
+        case .needsYou: base = store.items.filter { stage($0).needsYou }
+        case .done: base = store.items.filter { stage($0) == .processed }
         }
         let q = searchQuery.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return base }
         return base.filter { matchesSearch($0, query: q) }
+    }
+
+    /// Items in the Processing tab, ordered to mirror the actual queues: summaries first
+    /// (the scarce Claude resource — running, then queued), then speaker detection.
+    private var processingOrderedItems: [TranscriptItem] {
+        let inflight = store.items.filter { stage($0).isProcessing }
+        func rank(_ s: PipelineStage) -> Int {
+            switch s {
+            case .summarizing: return 0
+            case .queuedForSummary: return 1
+            case .detectingSpeakers: return 2
+            case .queuedForSpeakers: return 3
+            default: return 4
+            }
+        }
+        return inflight.sorted {
+            let (a, b) = (rank(stage($0)), rank(stage($1)))
+            return a != b ? a < b : $0.meta.date > $1.meta.date
+        }
     }
 
     /// Title / attendees / filing match (cheap, in-memory); body match only when content
@@ -67,8 +96,8 @@ struct HistoryView: View {
         }
         return false
     }
-    /// Count of summaries staged and waiting for review (drives discoverability).
-    private var reviewCount: Int { store.items.filter { $0.summaryReadyURL != nil }.count }
+    /// Count of items needing the user (badge on the "Needs you" tab).
+    private var needsYouCount: Int { store.items.filter { stage($0).needsYou }.count }
     /// Item awaiting the "speakers not assigned" confirmation before summarizing.
     @State private var pendingProcessItem: TranscriptItem?
     /// Add-attendee popover (for someone present who didn't speak / was forgotten).
@@ -92,14 +121,8 @@ struct HistoryView: View {
         .onAppear { store.refresh(); store.startWatching(); seedReviewDestination() }
         .onChange(of: selection) { seedReviewDestination() }
         .onChange(of: selectedItem?.summaryReadyURL) { seedReviewDestination() }
-        // Assign-speakers review for an on-demand "Detect speakers" run from History.
-        .sheet(isPresented: Binding(
-            get: { recording.pendingSpeakerReview != nil },
-            set: { if !$0 { recording.pendingSpeakerReview = nil } })) {
-            if let review = recording.pendingSpeakerReview {
-                AssignSpeakersView(review: review)
-            }
-        }
+        // The "Detect speakers" review sheet is hosted at the window root
+        // (MainWindowView), not here, so it survives switching tabs/notes mid-review.
         .confirmationDialog(
             "Speakers aren't all named",
             isPresented: Binding(get: { pendingProcessItem != nil },
@@ -117,6 +140,7 @@ struct HistoryView: View {
             case .rename(let item): renameSheet(item)
             case .refile(let items): refileSheet(items)
             case .delete(let items): deleteSheet(items)
+            case .combine(let items): combineSheet(items)
             }
         }
     }
@@ -128,9 +152,10 @@ struct HistoryView: View {
         }
     }
 
-    /// Queue a background Claude summary; switch to the Review filter so it's visible when ready.
+    /// Queue a background Claude summary. An explicit press is user-initiated — it
+    /// bypasses the auto-off + bulk-confirm gates (but still respects a usage-limit pause).
     private func summarize(_ item: TranscriptItem) {
-        recording.summaryService.summarize(item)
+        recording.summaryService.enqueueIfPolicyAllows(item, trigger: .userInitiated)
     }
 
     private func isPending(_ item: TranscriptItem) -> Bool {
@@ -148,13 +173,15 @@ struct HistoryView: View {
             Divider()
             Picker("", selection: $filter) {
                 ForEach(HistoryFilter.allCases) { f in
-                    Text(f == .review && reviewCount > 0 ? "Review (\(reviewCount))" : f.rawValue).tag(f)
+                    Text(f == .needsYou && needsYouCount > 0 ? "Needs you (\(needsYouCount))" : f.rawValue).tag(f)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(Theme.Spacing.small)
             Divider()
+
+            queueBanner
 
             if filteredItems.isEmpty {
                 listEmptyState
@@ -216,9 +243,13 @@ struct HistoryView: View {
     @ViewBuilder private func rowMenu(_ item: TranscriptItem) -> some View {
         let targets = selection.contains(item.id) && selection.count > 1 ? selectedItems : [item]
         if targets.count == 1 {
+            queueActions(item)
             Button("Rename…") { beginRename(item) }
         }
         Button("Refile…") { beginRefile(targets) }
+        if targets.count > 1 {
+            Button("Combine \(targets.count) into one…") { beginCombine(targets) }
+        }
         Divider()
         if let note = item.meta.note, !note.isEmpty {
             Button("Open note in Obsidian") {
@@ -239,6 +270,65 @@ struct HistoryView: View {
         }
     }
 
+    /// Stage-aware queue actions for a single item (top of the row menu).
+    @ViewBuilder private func queueActions(_ item: TranscriptItem) -> some View {
+        switch stage(item) {
+        case .queuedForSummary:
+            Button("Summarize now") { summaryService.prioritize(item) }
+            Button("Cancel summary") { summaryService.cancelQueued(item) }
+            Divider()
+        case .failed(.summary), .failed(.claudeUsageLimited):
+            Button("Retry summary") { summarize(item) }
+            Divider()
+        case .failed(.speakerDetection):
+            if audioAvailable(item) { Button("Retry speaker detection") { detectSpeakers(item) }; Divider() }
+        default:
+            EmptyView()
+        }
+    }
+
+    /// Banner above the list: the bulk-confirm prompt (highest priority) or a
+    /// throttle-paused notice with Resume. Shown in any tab so it's never missed.
+    @ViewBuilder private var queueBanner: some View {
+        if let bulk = summaryService.pendingBulkConfirm {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+                Text("Summarize \(bulk.items.count) notes?")
+                    .font(Theme.Typography.controlLabel)
+                Text("Several recordings are ready. Run them through Claude now, or leave them for later.")
+                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Summarize all") { summaryService.confirmPendingBulk() }
+                        .glassProminentButton().controlSize(.small)
+                    Button("Not now") { summaryService.dismissPendingBulk() }
+                        .glassButton().controlSize(.small)
+                }
+            }
+            .padding(Theme.Spacing.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.Palette.accent.opacity(Theme.Opacity.tintFill))
+            Divider()
+        } else if case .paused(let reason, let resumeAt) = summaryService.throttle {
+            HStack(spacing: Theme.Spacing.small) {
+                Image(systemName: "pause.circle.fill").foregroundStyle(Theme.Severity.warning.color)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(reason == .usageLimit ? "Summaries paused — Claude usage limit" : "Summaries paused")
+                        .font(Theme.Typography.caption)
+                    if let resumeAt {
+                        Text("Resumes \(Self.timeString(resumeAt))")
+                            .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Button("Resume now") { summaryService.resumeQueue() }
+                    .buttonStyle(.chip)
+            }
+            .padding(.horizontal, Theme.Spacing.medium).padding(.vertical, Theme.Spacing.small)
+            .background(.quaternary.opacity(Theme.Opacity.surface))
+            Divider()
+        }
+    }
+
     private func row(_ item: TranscriptItem) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
             HStack(spacing: Theme.Spacing.small) {
@@ -246,15 +336,7 @@ struct HistoryView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
-                if isPending(item) {
-                    ProgressView().controlSize(.mini)
-                        .help("Summarizing in the background…")
-                } else if item.hasUnnamedSpeakers {
-                    Image(systemName: "person.crop.circle.badge.exclamationmark")
-                        .foregroundStyle(Theme.Severity.warning.color)
-                        .font(Theme.Typography.caption)
-                        .help("Speakers not assigned — needs review")
-                }
+                rowIndicator(item)
                 statusBadge(item)
             }
             HStack(spacing: Theme.Spacing.small) {
@@ -268,17 +350,47 @@ struct HistoryView: View {
                     .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            // In-flight (or failed) pipeline state as a thin stage underline; the
+            // spinner/clock the row used to show is folded into this bar.
+            if let bar = StageBarModel.derive(item: item, offline: offline, summary: summaryService) {
+                SegmentedStageBar(segments: bar.segments, style: .mini)
+            }
         }
         .padding(.vertical, Theme.Spacing.xxSmall)
     }
 
-    /// Review → info (accent), Processed → success, Unprocessed → warning. Folds the
-    /// ad-hoc `Color.blue` badge into the one-accent rule.
+    /// Warning/attention icons in the row; in-flight states render as the mini stage
+    /// bar underline instead (see `row`).
+    @ViewBuilder private func rowIndicator(_ item: TranscriptItem) -> some View {
+        switch stage(item) {
+        case .needsSpeakerNames:
+            Image(systemName: "person.crop.circle.badge.exclamationmark")
+                .foregroundStyle(Theme.Severity.warning.color).font(Theme.Typography.caption)
+                .help("Speakers not assigned — needs review")
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Theme.Severity.warning.color).font(Theme.Typography.caption)
+                .help("Needs attention")
+        default:
+            EmptyView()
+        }
+    }
+
+    /// Status chip mapped from the fused pipeline stage.
     private func statusBadge(_ item: TranscriptItem) -> some View {
-        let (label, severity): (String, Theme.Severity) =
-            item.summaryReadyURL != nil ? ("Review", .info)
-            : item.isProcessed ? ("Processed", .success)
-            : ("Unprocessed", .warning)
+        let (label, severity): (String, Theme.Severity) = {
+            switch stage(item) {
+            case .detectingSpeakers: return ("Detecting", .info)
+            case .summarizing: return ("Summarizing", .info)
+            case .queuedForSpeakers, .queuedForSummary: return ("Queued", .info)
+            case .needsSpeakerNames: return ("Needs speakers", .warning)
+            case .reviewReady: return ("Review", .info)
+            case .processed: return ("Processed", .success)
+            case .idleUnprocessed: return ("Unprocessed", .warning)
+            case .failed(.claudeUsageLimited): return ("Paused", .warning)
+            case .failed: return ("Failed", .danger)
+            }
+        }()
         return StatusBadge(label, severity: severity)
     }
 
@@ -324,6 +436,9 @@ struct HistoryView: View {
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
             }
             HStack(spacing: Theme.Spacing.medium) {
+                Button { beginCombine(items) } label: { Label("Combine \(items.count)…", systemImage: "arrow.triangle.merge") }
+                    .glassButton()
+                    .help("Merge these into one transcript for a single, cohesive summary.")
                 Button { beginRefile(items) } label: { Label("Refile \(items.count)…", systemImage: "tray.and.arrow.down") }
                     .glassButton()
                 Button { items.forEach { summarize($0) } } label: { Label("Summarize \(items.count)", systemImage: "sparkles") }
@@ -445,12 +560,11 @@ struct HistoryView: View {
                              symbol: "person.crop.circle.badge.exclamationmark")
             }
             actionRow(item)
-            if recording.offlinePass == .running {
-                HStack(spacing: Theme.Spacing.small) {
-                    ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center)
-                    Text("Detecting speakers…")
-                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                }
+            // Live pipeline status for this note: the full segmented stage bar
+            // (detecting / queued / summarizing / failed), hidden when idle.
+            if let bar = StageBarModel.derive(item: item, offline: offline, summary: summaryService) {
+                SegmentedStageBar(segments: bar.segments,
+                                  statusLabel: bar.statusLabel, sublabel: bar.sublabel)
             }
         }
         .padding(Theme.Spacing.large)
@@ -498,13 +612,13 @@ struct HistoryView: View {
                     Button { detectSpeakers(item) } label: {
                         Label("Detect speakers", systemImage: "person.2.wave.2")
                     }
-                    .glassProminentButton().disabled(busy)
+                    .glassProminentButton().disabled(busy || isProcessingOffline(item))
                     .help("Diarize this recording and assign names")
                 } else {
                     Button { detectSpeakers(item) } label: {
                         Label("Detect speakers", systemImage: "person.2.wave.2")
                     }
-                    .glassButton().disabled(busy)
+                    .glassButton().disabled(busy || isProcessingOffline(item))
                     .help("Re-run diarization + speaker ID on this recording's audio")
                 }
             }
@@ -578,9 +692,16 @@ struct HistoryView: View {
         attendeeDraft = ""
     }
 
-    /// Detection or note generation is in flight — disable the action buttons.
+    /// Note generation is in flight — disable the action buttons.
     private var busy: Bool {
-        recording.notes.isRunning || recording.offlinePass == .running
+        recording.notes.isRunning
+    }
+
+    /// This item's recording already has an offline pass queued or running (so its
+    /// "Detect speakers" button is disabled to avoid a duplicate enqueue).
+    private func isProcessingOffline(_ item: TranscriptItem) -> Bool {
+        let s = offline.jobState(forAudioPath: item.meta.audio)
+        return s == .queued || s == .running
     }
 
     private func audioAvailable(_ item: TranscriptItem) -> Bool {
@@ -589,7 +710,9 @@ struct HistoryView: View {
     }
 
     private func detectSpeakers(_ item: TranscriptItem) {
-        recording.reprocessSpeakers(
+        // Prefer the persisted speaker cache (opens the review instantly); falls back to a
+        // full re-run only when there's no cache (older recordings).
+        recording.assignSpeakers(
             forAudioPath: item.meta.audio, transcript: item.url,
             attendees: item.meta.attendees.joined(separator: ", "),
             title: item.meta.title, filing: item.meta.filing)
@@ -656,6 +779,14 @@ struct HistoryView: View {
         deleteAudioToo = links.contains { $0.audioSession != nil }
         deleteNoteToo = links.contains { $0.note != nil }
         fileOp = .delete(items)
+    }
+
+    private func beginCombine(_ items: [TranscriptItem]) {
+        guard items.count > 1 else { return }
+        // Default the combined title to the earliest meeting's title.
+        combineDraft = items.min { $0.meta.date < $1.meta.date }?.meta.title ?? ""
+        combineTrashOriginals = false
+        fileOp = .combine(items)
     }
 
     private func renameSheet(_ item: TranscriptItem) -> some View {
@@ -755,6 +886,59 @@ struct HistoryView: View {
         fileOp = nil
     }
 
+    /// Merge several meetings into one cohesive transcript (e.g. a call that got
+    /// split by a crash or an auto-stop/restart), so it can be summarized as a whole.
+    private func combineSheet(_ items: [TranscriptItem]) -> some View {
+        let ordered = items.sorted { $0.meta.date < $1.meta.date }
+        return VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            Text("Combine \(ordered.count) meetings").font(Theme.Typography.sheetTitle)
+            Text("Stitches these recordings into one transcript, in time order, so a split call can be re-summarized as a single conversation. Attendees are merged; each part keeps its own timeline under a heading. A new unprocessed transcript is created.")
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+                ForEach(Array(ordered.enumerated()), id: \.element.id) { idx, item in
+                    HStack(spacing: Theme.Spacing.small) {
+                        Text("\(idx + 1).").font(Theme.Typography.caption).foregroundStyle(.secondary)
+                            .frame(width: 18, alignment: .trailing)
+                        Text(item.meta.title).font(Theme.Typography.caption).lineLimit(1)
+                        Spacer()
+                        Text(Self.dateString(item.meta.date))
+                            .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(Theme.Spacing.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(Theme.Opacity.surface), in: RoundedRectangle(cornerRadius: 6))
+
+            TextField("Combined title", text: $combineDraft)
+                .textFieldStyle(.roundedBorder)
+            Toggle("Move the originals to the Trash after combining", isOn: $combineTrashOriginals)
+                .help("Off keeps the originals; recorded audio and filed notes are always kept either way.")
+
+            HStack {
+                Spacer()
+                Button("Cancel") { fileOp = nil }
+                    .glassButton()
+                Button("Combine") { commitCombine(ordered) }
+                    .glassProminentButton()
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(Theme.Spacing.large).frame(width: 460)
+    }
+
+    private func commitCombine(_ items: [TranscriptItem]) {
+        let url = store.combine(items, title: combineDraft, trashOriginals: combineTrashOriginals)
+        fileOp = nil
+        guard let url else { return }
+        // Surface the new note: clear the multi-selection, drop any filter that would
+        // hide an unprocessed transcript, and select it.
+        if filter != .all { filter = .all }   // a freshly combined note is idle/unprocessed → only under All
+        selection = [url.path]
+    }
+
     // MARK: Helpers
 
     private static func dateString(_ date: Date) -> String {
@@ -763,4 +947,12 @@ struct HistoryView: View {
         f.timeStyle = .short
         return f.string(from: date)
     }
+
+    private static func timeString(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: date)
+    }
+
 }

@@ -1,91 +1,184 @@
 import SwiftUI
-import AppKit
 
-/// Multi-value attendee field (NSTokenField): chips with native substring
-/// completion against the known people list. New names are allowed (free text).
-struct TokenField: NSViewRepresentable {
+/// Multi-value attendee field — pure SwiftUI (no `NSTokenField`). The `tokens` binding is
+/// the SINGLE source of truth: chips render directly from it and every add/remove mutates
+/// it, so a programmatic change (a suggestion chip, an auto-identified speaker writing the
+/// model) just appears — there's no second copy to reconcile. This is the deliberate
+/// replacement for the AppKit bridge, whose objectValue/field-editor/binding tri-state
+/// caused repeated clobber / display-desync / stray-commit bugs. Mirrors the proven
+/// type-ahead pattern in `DestinationField`.
+struct TokenField: View {
     @Binding var tokens: [String]
     var completions: [String]
     var placeholder: String
-    /// Called when an unknown name is committed — lets the caller open a
-    /// "new contact" form instead of adding a bare token.
+    /// Called when a genuinely-new (not a known contact, not already added) name is
+    /// committed — the caller opens a "new contact" form instead of adding a bare token.
     var onCreateNew: (String) -> Void = { _ in }
 
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    @State private var draft = ""
+    @State private var highlighted = 0
+    @State private var fieldWidth: CGFloat = 0
+    @FocusState private var focused: Bool
 
-    func makeNSView(context: Context) -> NSTokenField {
-        let field = NSTokenField()
-        field.delegate = context.coordinator
-        field.placeholderString = placeholder
-        field.tokenStyle = .rounded
-        field.objectValue = tokens
-        return field
-    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+            FlowLayout(maxWidth: fieldWidth,
+                       spacing: Theme.Spacing.xSmall, rowSpacing: Theme.Spacing.xSmall) {
+                ForEach(tokens, id: \.self) { chip($0) }
+                inputField
+            }
+            // Measure the content width and feed it back to FlowLayout, so its wrapped
+            // height always matches placement (no proposal-width guessing → no overflow).
+            .background(GeometryReader { g in
+                Color.clear
+                    .onAppear { fieldWidth = g.size.width }
+                    .onChange(of: g.size.width) { fieldWidth = g.size.width }
+            })
+            .padding(Theme.Spacing.xSmall)
+            .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+            .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
+            .contentShape(Rectangle())
+            .onTapGesture { focused = true }
 
-    func updateNSView(_ field: NSTokenField, context: Context) {
-        context.coordinator.parent = self
-        field.placeholderString = placeholder
-        // Don't reassign objectValue while there's UNCOMMITTED text in the field
-        // editor: doing so ends editing and commits the highlighted completion as a
-        // token (the "random attendee got added" bug during live re-renders). But a
-        // merely-focused, idle field (empty editor) must still accept programmatic
-        // updates — e.g. auto-identified speakers being added to attendees — so guard
-        // on in-progress text, not on focus alone.
-        if let editor = field.currentEditor(), !editor.string.isEmpty { return }
-        let current = (field.objectValue as? [String]) ?? []
-        if current != tokens { field.objectValue = tokens }
-    }
-
-    final class Coordinator: NSObject, NSTokenFieldDelegate {
-        var parent: TokenField
-        init(_ parent: TokenField) { self.parent = parent }
-
-        func tokenField(_ tokenField: NSTokenField,
-                        completionsForSubstring substring: String,
-                        indexOfToken tokenIndex: Int,
-                        indexOfSelectedItem selectedIndex: UnsafeMutablePointer<Int>?) -> [Any]? {
-            let q = substring.lowercased()
-            guard !q.isEmpty else { return [] }
-            return parent.completions.filter { $0.lowercased().hasPrefix(q) }
+            if showSuggestions { suggestionList }
         }
+    }
 
-        /// Intercept committed tokens: keep names that are either a known contact
-        /// or already in the bound model, and route the first genuinely-new
-        /// (user-typed) name to the "new contact" form instead of adding it raw.
-        /// This also fires when the field re-tokenizes its programmatically-set
-        /// value, so an auto-identified speaker (a voiceprint name, not yet a vault
-        /// contact) must not be dropped just because it isn't in the completions.
-        func tokenField(_ tokenField: NSTokenField, shouldAdd tokens: [Any], at index: Int) -> [Any] {
-            let known = Set(parent.completions.map { $0.lowercased() })
-            let existing = Set(parent.tokens.map { $0.lowercased() })
-            var keep: [Any] = []
-            var firstNew: String?
-            for case let s as String in tokens {
-                let key = s.lowercased()
-                if known.contains(key) || existing.contains(key) {
-                    keep.append(s)                       // known contact, or already an attendee
-                } else if firstNew == nil {
-                    firstNew = s                         // first new user-typed name → new-contact form
-                } else {
-                    keep.append(s)                       // don't silently drop further new names
+    // MARK: Pieces
+
+    private var inputField: some View {
+        TextField(tokens.isEmpty ? placeholder : "", text: $draft)
+            .textFieldStyle(.plain)
+            .font(Theme.Typography.body)
+            .frame(minWidth: 120, idealWidth: 160)
+            .focused($focused)
+            .onKeyPress(.downArrow) { move(1) }
+            .onKeyPress(.upArrow) { move(-1) }
+            .onKeyPress(.return) { commitFromKeyboard() }
+            .onKeyPress(.escape) { clearDraft() }
+            .onKeyPress(.delete) { backspace() }
+            .onChange(of: draft) {
+                highlighted = 0
+                if draft.contains(",") { commitCommaSeparated() }
+            }
+    }
+
+    private func chip(_ name: String) -> some View {
+        HStack(spacing: Theme.Spacing.xSmall) {
+            Text(name)
+                .font(Theme.Typography.caption.weight(.medium))
+                .foregroundStyle(Theme.Palette.accent)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: 200, alignment: .leading)
+            Button { remove(name) } label: {
+                Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.Palette.accent.opacity(0.55))
+            .help("Remove")
+        }
+        .padding(.horizontal, Theme.Spacing.small)
+        .padding(.vertical, Theme.Spacing.xxSmall + 1)
+        .background(Capsule().fill(Theme.Palette.accent.opacity(Theme.Opacity.tintFill)))
+        .overlay(Capsule().strokeBorder(Theme.Palette.accent.opacity(0.25)))
+    }
+
+    private var suggestionList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(filtered.enumerated()), id: \.element) { index, name in
+                Button { commit(name) } label: {
+                    Text(name).frame(maxWidth: .infinity, alignment: .leading)
                 }
-            }
-            if let firstNew {
-                let parent = self.parent
-                DispatchQueue.main.async { parent.onCreateNew(firstNew) }
-            }
-            return keep
-        }
-
-        func controlTextDidChange(_ note: Notification) { sync(note) }
-        func controlTextDidEndEditing(_ note: Notification) { sync(note) }
-
-        private func sync(_ note: Notification) {
-            guard let field = note.object as? NSTokenField else { return }
-            let values = (field.objectValue as? [String]) ?? []
-            DispatchQueue.main.async {
-                if self.parent.tokens != values { self.parent.tokens = values }
+                .buttonStyle(.plain)
+                .padding(.vertical, Theme.Spacing.xSmall).padding(.horizontal, Theme.Spacing.small)
+                .background(suggestionHighlight(index))
+                // Hover and ↑/↓ share one highlight index — one selection model.
+                .onHover { if $0 { highlighted = index } }
             }
         }
+        .cardSurface(radius: Theme.Radius.small)
+        .frame(maxHeight: 170)
+    }
+
+    private func suggestionHighlight(_ index: Int) -> some View {
+        Theme.Radius.rect(Theme.Radius.small)
+            .fill(highlighted == index
+                  ? Theme.Palette.accent.opacity(Theme.Opacity.selection)
+                  : Color.clear)
+    }
+
+    // MARK: Matching
+
+    /// Known names matching the draft prefix, excluding ones already added.
+    private var filtered: [String] {
+        let q = draft.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return [] }
+        let existing = Set(tokens.map { $0.lowercased() })
+        return completions
+            .filter { $0.lowercased().hasPrefix(q) && !existing.contains($0.lowercased()) }
+            .prefix(8).map { $0 }
+    }
+    private var showSuggestions: Bool { focused && !filtered.isEmpty }
+
+    // MARK: Keyboard
+
+    private func move(_ delta: Int) -> KeyPress.Result {
+        guard showSuggestions else { return .ignored }
+        highlighted = max(0, min(highlighted + delta, filtered.count - 1))
+        return .handled
+    }
+
+    private func commitFromKeyboard() -> KeyPress.Result {
+        if showSuggestions, highlighted < filtered.count {
+            commit(filtered[highlighted]); return .handled
+        }
+        let q = draft.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return .ignored }
+        commit(q); return .handled
+    }
+
+    private func clearDraft() -> KeyPress.Result {
+        guard !draft.isEmpty else { return .ignored }
+        draft = ""; return .handled
+    }
+
+    /// Backspace on an empty input removes the last chip (NSTokenField behavior). While
+    /// there's text, let the field delete a character normally (`.ignored`).
+    private func backspace() -> KeyPress.Result {
+        guard draft.isEmpty, !tokens.isEmpty else { return .ignored }
+        tokens.removeLast(); return .handled
+    }
+
+    // MARK: Commit / remove
+
+    /// Classify a committed name. Pure + unit-tested; mirrors the old `shouldAdd` rule.
+    enum Commit: Equatable { case duplicate, add, createNew }
+    static func classify(_ name: String, tokens: [String], completions: [String]) -> Commit {
+        let key = name.lowercased()
+        if tokens.contains(where: { $0.lowercased() == key }) { return .duplicate }
+        if completions.contains(where: { $0.lowercased() == key }) { return .add }
+        return .createNew
+    }
+
+    private func commit(_ rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft = ""
+        highlighted = 0
+        guard !name.isEmpty else { return }
+        switch Self.classify(name, tokens: tokens, completions: completions) {
+        case .duplicate: break
+        case .add: tokens.append(name)
+        case .createNew: onCreateNew(name)   // route to the New Person sheet, not a raw token
+        }
+    }
+
+    private func commitCommaSeparated() {
+        let parts = draft.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        draft = ""
+        for p in parts where !p.isEmpty { commit(p) }
+    }
+
+    private func remove(_ name: String) {
+        tokens.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
     }
 }

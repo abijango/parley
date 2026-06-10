@@ -7,15 +7,17 @@ struct MainWindowView: View {
     @EnvironmentObject private var recording: RecordingController
     @ObservedObject private var store = RecordingController.shared.store
     @ObservedObject private var summaryService = RecordingController.shared.summaryService
+    @ObservedObject private var offline = RecordingController.shared.offlineService
     @State private var selection: SidebarSection? = .record
     @State private var showingRecovery = false
     @AppStorage("parley.sidebarCollapsed") private var sidebarCollapsed = false
 
-    /// Badge on the History nav item: summaries running + staged-and-waiting-for-review.
+    /// Badge on the History nav item: notes needing the user (unassigned speakers,
+    /// summaries to review, failures) — matching the "Needs you" tab.
     private var historyBadge: Int {
-        let ready = store.items.filter { $0.summaryReadyURL != nil }.count
-        let pending = summaryService.jobs.values.filter { if case .pending = $0 { return true } else { return false } }.count
-        return ready + pending
+        store.items.filter {
+            PipelineStage.derive(item: $0, offline: offline, summary: summaryService).needsYou
+        }.count
     }
 
     enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
@@ -68,6 +70,17 @@ struct MainWindowView: View {
         .sheet(isPresented: $showingRecovery) {
             RecoveryView { showingRecovery = false }
                 .environmentObject(recording)
+        }
+        // Assign-speakers review for a History "Detect speakers" run. Hosted here, at
+        // the always-mounted window root, so it survives switching tabs/notes — the
+        // History view used to own this sheet and tore it (and the only way back to
+        // the review) down on navigation, forcing a full re-run of the offline pass.
+        .sheet(isPresented: Binding(
+            get: { recording.autoPresentSpeakerReview && recording.pendingSpeakerReview != nil },
+            set: { if !$0 { recording.autoPresentSpeakerReview = false } })) {
+            if let review = recording.pendingSpeakerReview {
+                AssignSpeakersView(review: review)
+            }
         }
         .onChange(of: recording.pendingRecoveries.isEmpty) {
             showingRecovery = !recording.pendingRecoveries.isEmpty
@@ -168,6 +181,8 @@ struct RecordDetailView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var models: ModelManager
     @EnvironmentObject private var vault: VaultDirectory
+    /// Observed so the offline-queue strip republishes as jobs come and go.
+    @ObservedObject private var offline = RecordingController.shared.offlineService
     @State private var apps: [CapturableApp] = []
     @State private var mode: WindowMode = .live
     @State private var pendingPerson: PendingPerson?
@@ -176,6 +191,13 @@ struct RecordDetailView: View {
     /// auto-fill (discovered titles): only focused changes count as user edits.
     @FocusState private var titleFocused: Bool
     @AppStorage("parley.axBannerDismissed") private var axBannerDismissed = false
+    /// User-resizable inspector width (drag the divider). View-local presentation
+    /// state — deliberately not in AppSettings. Default 340 (a touch roomier than
+    /// the old fixed 300); double-clicking the divider resets to it.
+    @AppStorage("parley.inspectorWidth") private var inspectorWidth: Double = 340
+    @State private var dragBaseWidth: Double?
+    private static let inspectorWidthRange: ClosedRange<Double> = 280...440
+    private static let defaultInspectorWidth: Double = 340
 
     enum WindowMode: String, CaseIterable, Identifiable {
         case live = "Live", preview = "Preview"
@@ -193,16 +215,16 @@ struct RecordDetailView: View {
             HStack(spacing: 0) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                Divider()
+                inspectorDivider
                 inspector
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             offlinePassBar
-                // Scope the offline-pass animation to this bar only. Previously it sat
+                // Scope the offline-queue animation to this bar only. Previously it sat
                 // on the whole VStack, so the footer's text swap (word count →
                 // "Transcript saved") rode the same transaction and crossfaded the two
                 // on top of each other. Confining it here keeps the footer swap instant.
-                .animation(Theme.Motion.gentle, value: recording.offlinePass)
+                .animation(Theme.Motion.gentle, value: offlineActiveCount)
             footer
         }
         .frame(minWidth: 480, minHeight: 520)
@@ -313,9 +335,36 @@ struct RecordDetailView: View {
             notesField       // fills the rest of the rail
         }
         .padding(Theme.Spacing.large)
-        .frame(width: 300)
+        .frame(width: inspectorWidth)
         .frame(maxHeight: .infinity, alignment: .top)
         .chromeSurface()
+    }
+
+    /// The divider between the transcript and the inspector, doubled as a resize
+    /// handle: a slim transparent grab area straddles the 1pt line, shows the
+    /// horizontal-resize cursor on hover, and drags the rail width within range.
+    /// Dragging left (negative translation) widens the rail; double-click resets.
+    private var inspectorDivider: some View {
+        Divider()
+            .overlay {
+                Color.clear
+                    .frame(width: 8)
+                    .contentShape(Rectangle())
+                    .onHover { inside in
+                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                if dragBaseWidth == nil { dragBaseWidth = inspectorWidth }
+                                let proposed = dragBaseWidth! - value.translation.width
+                                inspectorWidth = min(max(proposed, Self.inspectorWidthRange.lowerBound),
+                                                     Self.inspectorWidthRange.upperBound)
+                            }
+                            .onEnded { _ in dragBaseWidth = nil }
+                    )
+                    .onTapGesture(count: 2) { inspectorWidth = Self.defaultInspectorWidth }
+            }
     }
 
     /// Status dot + text on the left, the active model on the right.
@@ -576,31 +625,39 @@ struct RecordDetailView: View {
 
     // MARK: Footer
 
-    /// A thin strip under the transcript showing the post-stop whole-recording
-    /// diarization pass: a spinner while it runs, then what it changed. Lingers
-    /// until the next recording starts so a fast pass is still noticed.
+    /// Count of offline jobs queued or running in the background (across all sessions).
+    private var offlineActiveCount: Int {
+        offline.jobs.values.filter { $0 == .queued || $0 == .running }.count
+    }
+
+    /// A strip under the transcript showing the post-stop pipeline as a segmented
+    /// stage bar: the running job's live per-stage progress, or a queued (dim) bar
+    /// while a job waits for idle, plus how many more recordings are behind it.
     @ViewBuilder private var offlinePassBar: some View {
-        switch recording.offlinePass {
-        case .idle:
-            EmptyView()
-        case .running:
-            HStack(spacing: Theme.Spacing.small) {
-                ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center)
-                Text("Offline Speaker Detection…").font(Theme.Typography.caption)
-                Spacer()
+        if offlineActiveCount > 0 {
+            let running = offline.runningProgress.flatMap {
+                StageBarModel.fuse(offlineState: .running, offlineProgress: $0,
+                                   summaryRunning: false, summaryQueued: false,
+                                   summaryFailed: nil, summaryPaused: false, summaryActivity: nil)
             }
-            .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
-            .background(.quaternary.opacity(Theme.Opacity.surface))
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-        case .done(let note):
-            HStack(spacing: Theme.Spacing.small) {
-                Image(systemName: "checkmark.seal.fill").foregroundStyle(Theme.Severity.success.color).font(Theme.Typography.caption)
-                Text(note).font(Theme.Typography.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                Spacer()
+            let model = running ?? StageBarModel.fuse(offlineState: .queued, offlineProgress: nil,
+                                                      summaryRunning: false, summaryQueued: false,
+                                                      summaryFailed: nil, summaryPaused: false,
+                                                      summaryActivity: nil)
+            if let model {
+                HStack(alignment: .top, spacing: Theme.Spacing.medium) {
+                    SegmentedStageBar(segments: model.segments,
+                                      statusLabel: model.statusLabel, sublabel: model.sublabel)
+                    if running != nil, offline.queuedCount > 0 {
+                        Text("+\(offline.queuedCount) queued")
+                            .font(Theme.Typography.captionSecondary)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
+                .background(.quaternary.opacity(Theme.Opacity.surface))
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
-            .background(.quaternary.opacity(Theme.Opacity.surface))
-            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 
