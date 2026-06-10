@@ -187,9 +187,21 @@ struct SettingsView: View {
                            description: "Once a summary is filed you have the raw transcript + the note, so the audio is redundant. Frees significant disk.") {
                     Toggle("", isOn: $settings.deleteAudioAfterFiling).labelsHidden()
                 }
+                SettingRow("Ask before summarizing a batch",
+                           description: "When several notes become ready at once (a backlog, or naming speakers across many), ask once rather than running them all silently — so a burst never unexpectedly uses up Claude.") {
+                    Stepper(value: $settings.summaryBulkThreshold, in: 2...50) {
+                        Text("\(settings.summaryBulkThreshold) notes").font(Theme.Typography.body)
+                    }
+                    .frame(maxWidth: 150)
+                }
+                SettingRow("Auto-resume after a usage limit",
+                           description: "If Claude hits a usage/rate limit, the summary queue pauses and resumes automatically when the limit lifts. Off keeps it paused until you press Resume.") {
+                    Toggle("", isOn: $settings.summaryAutoResumeAfterLimit).labelsHidden()
+                }
             }
 
             Section("Claude") {
+                ClaudeConnectionView()
                 LabeledContent("Model") {
                     TextField("sonnet", text: $settings.claudeModel)
                         .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
@@ -199,7 +211,7 @@ struct SettingsView: View {
                     TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
                         .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
                 }
-                helpText("Runs `claude -p` (raw prompt, no skill/tools; extended thinking left on). Requires the Claude CLI to be installed + logged in.")
+                helpText("Runs `claude -p` (raw prompt, no skill/tools; extended thinking left on). The status above shows whether the CLI is installed and logged in.")
             }
 
             Section("Prompt") {
@@ -634,7 +646,7 @@ struct SettingsView: View {
                         Text(String(format: "%.2f", settings.diarizationThreshold))
                             .font(Theme.Typography.mono).foregroundStyle(.secondary)
                     }
-                    helpText("How readily two voice samples are treated as the same person. Too high merges distinct speakers into one; too low fragments a single person's natural variation into several \"speakers\". ~0.6–0.7 suits most calls — only nudge it if you see one of those failure modes. Applies to the next recording.")
+                    helpText("How readily two voice samples are treated as the same person during in-session clustering. Too high merges distinct speakers into one; too low fragments a single person's natural variation into several \"speakers\". ~0.6–0.7 suits most calls — only nudge it if you see one of those failure modes. Applies to both FluidAudio and WhisperKit + SpeakerKit on the next recording.")
                 }
 
                 speakerRecognitionSection

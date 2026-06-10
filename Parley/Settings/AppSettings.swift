@@ -119,6 +119,10 @@ final class AppSettings: ObservableObject {
         static let claudeBinaryPath = "parley.claudeBinaryPath"
         static let claudePromptTemplate = "parley.claudePromptTemplate"
         static let claudeModel = "parley.claudeModel"
+        static let summaryBulkThreshold = "parley.summaryBulkThreshold"
+        static let summaryFailureTripThreshold = "parley.summaryFailureTripThreshold"
+        static let summaryAutoResumeAfterLimit = "parley.summaryAutoResumeAfterLimit"
+        static let summaryMinIntervalSeconds = "parley.summaryMinIntervalSeconds"
         static let scanRoots = "parley.scanRoots"
         static let contactsFile = "parley.contactsFile"
         static let skillPath = "parley.skillPath"
@@ -230,6 +234,17 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt
     @AppStorage(Key.claudeModel) var claudeModel: String = "sonnet"
+    /// Ask before auto-summarizing a wave of ≥ this many notes at once (backlog / bulk
+    /// speaker-naming) so a burst never silently burns Claude usage.
+    @AppStorage(Key.summaryBulkThreshold) var summaryBulkThreshold: Int = 3
+    /// Pause the summary queue after this many consecutive failures (a flapping CLI
+    /// burning the queue is the same harm as a usage limit).
+    @AppStorage(Key.summaryFailureTripThreshold) var summaryFailureTripThreshold: Int = 3
+    /// Auto-resume the summary queue after a usage-limit pause (at the parsed reset time,
+    /// else exponential backoff). Off ⇒ wait for a manual Resume.
+    @AppStorage(Key.summaryAutoResumeAfterLimit) var summaryAutoResumeAfterLimit: Bool = true
+    /// Optional pacing: minimum seconds between summary runs (0 = off).
+    @AppStorage(Key.summaryMinIntervalSeconds) var summaryMinIntervalSeconds: Double = 0
 
     var captureMode: CaptureMode {
         get { CaptureMode(rawValue: captureModeRaw) ?? .systemWide }
