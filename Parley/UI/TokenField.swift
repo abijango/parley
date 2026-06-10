@@ -27,15 +27,21 @@ struct TokenField: View {
                 ForEach(tokens, id: \.self) { chip($0) }
                 inputField
             }
-            // Measure the content width and feed it back to FlowLayout, so its wrapped
-            // height always matches placement (no proposal-width guessing → no overflow).
-            .background(GeometryReader { g in
-                Color.clear
-                    .onAppear { fieldWidth = g.size.width }
-                    .onChange(of: g.size.width) { fieldWidth = g.size.width }
-            })
             .padding(Theme.Spacing.xSmall)
             .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+            // Measure the BOX width — always the available width, because the frame
+            // above is `maxWidth: .infinity` — and feed it back (minus the horizontal
+            // padding) as FlowLayout's wrap width. Measuring the constrained box, NOT
+            // the FlowLayout's own intrinsic size, means a finite wrap width is known
+            // up front and never reflects a giant single-row intrinsic width. So the
+            // reported height can't collapse to one row while placement wraps into
+            // many — the bug where chips overflow the box and paint over the
+            // neighboring Title/Filing/Suggested fields.
+            .background(GeometryReader { g in
+                Color.clear
+                    .onAppear { fieldWidth = g.size.width - Theme.Spacing.xSmall * 2 }
+                    .onChange(of: g.size.width) { fieldWidth = g.size.width - Theme.Spacing.xSmall * 2 }
+            })
             .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
             .contentShape(Rectangle())
             .onTapGesture { focused = true }

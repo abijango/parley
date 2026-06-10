@@ -15,6 +15,17 @@ struct FlowLayout: Layout {
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
         let width = wrapWidth(proposal.width)
+        // Fail SAFE TALL: when the width is genuinely unknown (no measured `maxWidth`
+        // and an unbounded proposal), reserve the worst case — every subview on its
+        // own row — so the reported height is never LESS than what `placeSubviews`
+        // draws at a finite bounds width. Under-reporting here is the chips-overflow-
+        // the-box bug; over-reporting just leaves transient slack that collapses the
+        // moment the real width is measured (one frame later).
+        if width == .greatestFiniteMagnitude {
+            let heights = subviews.map { $0.sizeThatFits(.unspecified).height }
+            let height = heights.reduce(0, +) + rowSpacing * CGFloat(max(0, heights.count - 1))
+            return CGSize(width: proposal.width ?? 0, height: height)
+        }
         let rows = rows(maxWidth: width, subviews: subviews)
         let height = rows.reduce(0) { $0 + $1.height }
             + rowSpacing * CGFloat(max(0, rows.count - 1))
