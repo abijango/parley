@@ -681,14 +681,30 @@ final class RecordingController: ObservableObject {
         sessionDirectory?.appendingPathComponent("transcript.partial.md")
     }
 
-    /// On launch, salvage any `.partial` left by a crashed session into the vault inbox.
+    /// On launch, salvage any `.partial` left by a crashed or orphaned session into
+    /// the vault inbox. Two cases are handled:
+    ///
+    /// 1. **No manifest** — the classic partial: the app crashed before even writing
+    ///    a manifest, or the manifest was deleted externally.
+    /// 2. **Finalized-but-unlanded** — the app was force-quit AFTER the manifest was
+    ///    stamped `.finalized` (synchronously) but BEFORE the async Task completed the
+    ///    transcript write. The manifest shows `status: .finalized` with both
+    ///    `offlineStatus` and `summaryStatus` nil, meaning the durable path never ran.
+    ///    These sessions fall through all other recovery nets at launch.
+    ///
+    /// Sessions with an `.active` manifest are NOT touched here — they belong to the
+    /// Recovery sheet (crash-recovery), which offers re-transcribe. Salvaging them here
+    /// too would double-handle them and discard the re-transcribe option.
     private func recoverOrphanedPartials() {
         let recordings = AppPaths.recordingsDirectory
         guard let sessions = try? FileManager.default.contentsOfDirectory(at: recordings, includingPropertiesForKeys: nil) else { return }
         for session in sessions {
-            // Sessions with a manifest are handled by the Recovery sheet — skip
-            // them here so they aren't both auto-salvaged AND offered for resume.
-            if SessionStore.read(session) != nil { continue }
+            let existingManifest = SessionStore.read(session)
+            // Skip sessions whose manifest is `.active` — the Recovery sheet handles those.
+            if let m = existingManifest, SessionStore.isCrashed(m) { continue }
+            // Salvage: no manifest OR manifest is finalized-but-unlanded (durable Task never ran).
+            let isOrphanedFinalized = existingManifest.map { SessionStore.isFinalizedButUnlanded($0) } ?? false
+            guard existingManifest == nil || isOrphanedFinalized else { continue }
             let partial = session.appendingPathComponent("transcript.partial.md")
             guard FileManager.default.fileExists(atPath: partial.path) else { continue }
             do {
@@ -772,6 +788,12 @@ final class RecordingController: ObservableObject {
         // Link to the session audio (mic track) if it was archived.
         let audioPath = sessionDir.map { $0.appendingPathComponent("mic.caf").path }
 
+        // DURABILITY: stop the heartbeat timer NOW so no further `.active` stamps can
+        // land after the user stopped. The actual `.finalized` stamp is written inside
+        // the Task's SUCCESS path (below) — so a crash between here and the transcript
+        // write leaves the manifest `.active`, which the Recovery sheet catches.
+        stopHeartbeat()
+
         Task {
             do {
                 let result = try TranscriptWriter.write(
@@ -799,6 +821,10 @@ final class RecordingController: ObservableObject {
                 if autoSummarize && !segments.isEmpty && !isSpeakerEngine {
                     maybeAutoRunClaude()
                 }
+                // Transcript write succeeded — stamp the manifest finalized NOW, before
+                // the offline enqueue. `setOfflineStatus` does a read-modify-write on the
+                // manifest, so the `.finalized` stamp must be on disk first.
+                stampFinalizedManifest()
                 // Hand the finalized session to the idle-gated offline queue: ASR re-pass
                 // + speaker detect + compaction, run when nothing is recording. The job is
                 // a self-contained snapshot, so it's safe even if a new recording starts.
@@ -817,12 +843,14 @@ final class RecordingController: ObservableObject {
                 clearArmable = true
                 armClearIfReady()
             } catch {
+                // Write failed — leave the manifest `.active` (heartbeat is already stopped,
+                // so no spurious heartbeat will overwrite state) so the Recovery sheet catches
+                // this session on next launch. Do NOT stamp `.finalized` here.
                 AppLog.log("Finalize failed: \(error.localizedDescription)", category: "record")
                 lastResult = "Finalize failed: \(error.localizedDescription)"
             }
         }
 
-        finalizeManifest()   // mark the session cleanly finished (not a crash)
         state = .idle
         // Now idle again — drain any work that was waiting for a live recording to end.
         offlineService.runNextIfIdle()
@@ -1281,9 +1309,19 @@ final class RecordingController: ObservableObject {
         SessionStore.write(m, to: dir)
     }
 
-    /// Mark the session cleanly finished so it isn't treated as a crash.
-    private func finalizeManifest() {
+    /// Stop the heartbeat timer so no further `.active` stamps can land after the
+    /// recording stops. Call this SYNCHRONOUSLY at finalize entry. The actual
+    /// `.finalized` manifest stamp is written inside the async Task's success path
+    /// (see `finalize()`) so a crash before the transcript write leaves the manifest
+    /// `.active` — catchable by the Recovery sheet — rather than orphaned.
+    private func stopHeartbeat() {
         heartbeatTimer?.invalidate(); heartbeatTimer = nil
+    }
+
+    /// Stamp the manifest `.finalized` and release the in-memory references.
+    /// Called from inside the async Task in `finalize()` AFTER the transcript write
+    /// succeeds, so durability is guaranteed before the status advances.
+    private func stampFinalizedManifest() {
         guard manifest != nil else { return }
         persistManifest(status: .finalized)
         AppLog.log("Session manifest finalized — \(manifest?.id ?? "?")", category: "record")

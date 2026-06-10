@@ -183,4 +183,29 @@ enum SessionStore {
             .sorted { $0.1.startedAt < $1.1.startedAt }
             .map { (dir: $0.0, manifest: $0.1) }
     }
+
+    // MARK: Pure session-state predicates (filesystem-free, injectable for tests)
+
+    /// True when a session's manifest is still `.active` — meaning the app died
+    /// mid-recording and the session belongs to the crash-Recovery sheet.
+    static func isCrashed(_ manifest: SessionManifest) -> Bool {
+        manifest.status == .active
+    }
+
+    /// True when a session's manifest was already stamped `.finalized` but the
+    /// durable async Task (transcript write + offline enqueue) never completed —
+    /// i.e. the app was killed between the manifest stamp and the transcript write.
+    /// Identified by: `status == .finalized` AND both `offlineStatus` and
+    /// `summaryStatus` are nil (neither the offline queue nor the summary queue
+    /// was ever set, which only happens if the write-Task succeeded).
+    ///
+    /// These sessions are orphaned: they fall through all four recovery nets
+    /// at launch (crashed-sessions, pending-offline, pending-summary, and the old
+    /// orphan-partial scan), so `recoverOrphanedPartials()` now catches them when
+    /// a `.partial` file is still on disk.
+    static func isFinalizedButUnlanded(_ manifest: SessionManifest) -> Bool {
+        manifest.status == .finalized
+            && manifest.offlineStatus == nil
+            && manifest.summaryStatus == nil
+    }
 }
