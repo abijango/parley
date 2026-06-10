@@ -15,8 +15,11 @@ struct CallSpeakerSummary: Identifiable, Equatable {
 /// Self-contained native transcription engine powered entirely by FluidAudio.
 ///
 /// Mixes the mic + system capture rings into a single 16 kHz mono stream and runs
-/// everything from that one buffer: Parakeet ASR via `SlidingWindowAsrManager`
-/// (multilingual v3) plus pyannote/WeSpeaker diarization via `DiarizerManager`.
+/// everything from that one buffer: live Parakeet ASR via the multilingual
+/// Nemotron `StreamingNemotronMultilingualAsrManager` (cache-aware true streaming,
+/// ~one-chunk latency) plus pyannote/WeSpeaker diarization via `DiarizerManager`.
+/// The accurate, token-timed final transcript is produced by the offline TDT v3
+/// batch re-pass at stop (`offlineTranscribe`).
 ///
 /// Display segments are DERIVED from ASR "units" (each with per-token timings) and
 /// the diarization timeline: every token is attributed to the diarized speaker whose
@@ -43,9 +46,12 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Accepted for SpeakerCapableEngine conformance; not forwarded to FluidAudio's
     /// DiarizerManager (which uses its own clusteringThreshold from settings).
     var speakerCountHint: Int? = nil
-    // `.streaming` (11s chunks, low latency) — `.default` uses 15s chunks and
-    // won't emit anything until ~15s of audio, which reads as "no transcript".
-    private let asr = SlidingWindowAsrManager(config: .streaming)
+    // Live ASR is the multilingual Nemotron cache-aware STREAMING model — true
+    // low-latency (~one chunk) transcription. The old `SlidingWindowAsrManager`
+    // floored at chunk+right (~13s) because it re-ran a *batch* model over
+    // overlapping windows; this carries encoder state forward and emits within a
+    // chunk. The chunk tier + language come from settings at load time.
+    private let asr = StreamingNemotronMultilingualAsrManager()
 
     /// The same mixed audio fed to ASR, buffered for the diarizer (drained in chunks).
     private let diarRing = AudioRingBuffer(capacity: 16_000 * 60)
@@ -56,6 +62,17 @@ final class FluidAudioEngine: TranscriptionEngine {
     private var seeded: [Segment] = []
     private var confirmedUnits: [ASRUnit] = []
     private var volatileUnit: ASRUnit?
+    /// Live-streaming segmentation state. The streaming model emits a single
+    /// growing transcript with NO per-token timings, so we slice it into units on
+    /// a fixed wall-clock cadence: `liveCommittedChars` is how much of the
+    /// cumulative text has been promoted to `confirmedUnits`, and `liveSegStart`
+    /// is the timeline position where the current volatile span began. Audio is
+    /// fed in real time, so the wall clock ≈ audio time — accurate enough for live
+    /// diarization attribution. The offline TDT v3 re-pass replaces all of this
+    /// with token-timed units at stop.
+    private var liveCommittedChars = 0
+    private var liveSegStart: TimeInterval = 0
+    private let liveConfirmInterval: TimeInterval = 6
     /// Stable ids for derived sub-segments (keyed by unit + speaker + start) so
     /// re-splitting doesn't churn SwiftUI identities or the recovery journal.
     private var runIds: [String: UUID] = [:]
@@ -73,7 +90,6 @@ final class FluidAudioEngine: TranscriptionEngine {
 
     // Background work.
     private var loadTask: Task<Void, Never>?
-    private var updatesTask: Task<Void, Never>?
     private var mixerTask: Task<Void, Never>?
     private var diarTask: Task<Void, Never>?
 
@@ -252,19 +268,46 @@ final class FluidAudioEngine: TranscriptionEngine {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Split streaming text into one `Tok` per word, spreading the wall-clock span
+    /// evenly and tagging each with the ▁ word-start marker. The streaming model
+    /// emits no per-token timings, so these positions are approximations — but
+    /// they let `diarizationFirst` split a unit ACROSS speakers and attribute each
+    /// word to the diarized turn at its midpoint, exactly as it does for the
+    /// offline token-timed transcript. Without per-word tokens every unit collapses
+    /// into one ▁-less "word" and the whole live history lands on a single speaker.
+    /// The offline TDT v3 re-pass replaces these with real timings at stop.
+    private static func wordToks(_ text: String, start: TimeInterval, end: TimeInterval) -> [Tok] {
+        let words = text.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
+        guard !words.isEmpty else { return [] }
+        let step = max(0, end - start) / Double(words.count)
+        return words.enumerated().map { i, w in
+            let s = start + step * Double(i)
+            let e = i == words.count - 1 ? end : start + step * Double(i + 1)
+            return Tok(text: "\u{2581}" + w, start: s, end: e)
+        }
+    }
+
     // MARK: - Lifecycle
 
     func start(micRing: AudioRingBuffer, systemRing: AudioRingBuffer, startElapsed: TimeInterval) {
-        let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
         let clusterThreshold = Float(settings.diarizationThreshold)
+        let chunkMs = settings.liveStreamingTier.rawValue
+        let language = settings.liveStreamingLanguage
         loadTask = Task { [weak self] in
+            guard let self else { return }
             do {
-                let models = try await AsrModels.downloadAndLoad(version: version)
-                try await self?.asr.loadModels(models)
-                try await self?.asr.startStreaming()
-                AppLog.log("FluidAudio engine ready — Parakeet \(version) sliding-window streaming", category: "record")
-                self?.beginConsumingAndMixing(micRing: micRing, systemRing: systemRing,
-                                              startElapsed: startElapsed, clusterThreshold: clusterThreshold)
+                // Download (cached after first run) + load the multilingual streaming
+                // variant for the chosen tier/language, then route its cumulative
+                // partial transcript into the live timeline via the callback.
+                let dir = try await StreamingNemotronMultilingualAsrManager.downloadVariant(
+                    languageCode: language, chunkMs: chunkMs)
+                try await self.asr.loadModels(from: dir)
+                await self.asr.setPartialCallback { [weak self] text in
+                    Task { @MainActor in self?.applyPartial(text, startElapsed: startElapsed) }
+                }
+                AppLog.log("FluidAudio engine ready — Nemotron multilingual streaming (\(chunkMs)ms, \(language))", category: "record")
+                self.beginConsumingAndMixing(micRing: micRing, systemRing: systemRing,
+                                             startElapsed: startElapsed, clusterThreshold: clusterThreshold)
             } catch {
                 AppLog.log("FluidAudio engine failed to start: \(error.localizedDescription); capturing audio only (archive preserved)", category: "record")
             }
@@ -274,9 +317,8 @@ final class FluidAudioEngine: TranscriptionEngine {
     func stop() async {
         loadTask?.cancel()
         mixerTask?.cancel()
-        updatesTask?.cancel()
         diarTask?.cancel()
-        loadTask = nil; mixerTask = nil; updatesTask = nil; diarTask = nil
+        loadTask = nil; mixerTask = nil; diarTask = nil
         _ = try? await asr.finish()
         await asr.cleanup()
     }
@@ -286,27 +328,22 @@ final class FluidAudioEngine: TranscriptionEngine {
     private func beginConsumingAndMixing(micRing: AudioRingBuffer, systemRing: AudioRingBuffer,
                                          startElapsed: TimeInterval, clusterThreshold: Float) {
         streamStart = Date()
-
-        updatesTask = Task { [weak self] in
-            guard let self else { return }
-            let stream = await self.asr.transcriptionUpdates
-            for await update in stream {
-                if Task.isCancelled { break }
-                self.apply(update, startElapsed: startElapsed)
-            }
-        }
+        liveSegStart = startElapsed
 
         // Mix both capture rings into one mono stream; feed the recognizer AND
-        // buffer the same samples for the diarizer.
+        // buffer the same samples for the diarizer. The streaming ASR delivers its
+        // running transcript via the partial callback set in `start()`.
         let asr = self.asr
         let diarRing = self.diarRing
         mixerTask = Task.detached {
             var fedSamples = 0
             var lastLogged = 0
             while !Task.isCancelled {
-                if let mixed = Self.mix(mic: micRing, system: systemRing), !mixed.isEmpty,
-                   let buffer = Self.makeBuffer(mixed) {
-                    await asr.streamAudio(buffer)
+                if let mixed = Self.mix(mic: micRing, system: systemRing), !mixed.isEmpty {
+                    // `process(samples:)` appends the 16 kHz mix and drains every
+                    // complete chunk through the encoder (firing the partial
+                    // callback); the diarizer reads the same samples.
+                    try? await asr.process(samples: mixed)
                     mixed.withUnsafeBufferPointer { diarRing.write($0) }
                     fedSamples += mixed.count
                     if fedSamples - lastLogged >= 16_000 * 5 {
@@ -713,25 +750,50 @@ final class FluidAudioEngine: TranscriptionEngine {
         return pcm
     }
 
-    private func apply(_ update: SlidingWindowTranscriptionUpdate, startElapsed: TimeInterval) {
-        let text = update.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Consume a cumulative partial transcript from the streaming ASR. The text is
+    /// the FULL running transcript so far (no per-token timings, no confirmation
+    /// concept); keep the newest portion as the volatile tail and promote older
+    /// text to confirmed units on a fixed wall-clock cadence so the live view
+    /// scrolls instead of growing one unbounded line. The offline TDT v3 re-pass
+    /// replaces all of these units with token-timed ones at stop.
+    private func applyPartial(_ rawText: String, startElapsed: TimeInterval) {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        var tokens = update.tokenTimings.map {
-            Tok(text: $0.token, start: startElapsed + $0.startTime, end: startElapsed + $0.endTime)
+        let now = elapsedNow(startElapsed)
+
+        // The model occasionally shortens the transcript (a late re-decode); if it
+        // drops below what we've already committed, restart tracking so the
+        // committed-prefix offset stays valid.
+        if text.count < liveCommittedChars {
+            liveCommittedChars = 0
+            confirmedUnits.removeAll()
+            runIds.removeAll()
+            liveSegStart = startElapsed
         }
-        if tokens.isEmpty {   // no token timings — one token spanning the whole text
-            let t = elapsedNow(startElapsed)
-            tokens = [Tok(text: text, start: t, end: t)]
-        }
-        // Reuse the volatile unit's id across updates so the in-progress row keeps a
-        // stable identity (content updates in place instead of re-creating the row).
-        let id = update.isConfirmed ? UUID() : (volatileUnit?.id ?? UUID())
-        let unit = ASRUnit(id: id, tokens: tokens, text: text, confirmed: update.isConfirmed)
-        AppLog.log("FluidAudio update (\(update.isConfirmed ? "confirmed" : "volatile")): \(text.count) chars", category: "record")
-        if update.isConfirmed {
-            confirmedUnits.append(unit); volatileUnit = nil
+
+        let startIdx = text.index(text.startIndex, offsetBy: min(liveCommittedChars, text.count))
+        let tail = String(text[startIdx...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tail.isEmpty else { return }
+
+        // Once the volatile span has accumulated for ~liveConfirmInterval seconds,
+        // promote it to a confirmed unit stamped with its wall-clock span and start
+        // a fresh span. A single Tok per unit (no sub-token timings) means each unit
+        // attributes to one diarized speaker at its midpoint — coarse but fine live.
+        if now - liveSegStart >= liveConfirmInterval {
+            let unit = ASRUnit(id: UUID(),
+                               tokens: Self.wordToks(tail, start: liveSegStart, end: now),
+                               text: tail, confirmed: true)
+            confirmedUnits.append(unit)
+            liveCommittedChars = text.count
+            liveSegStart = now
+            volatileUnit = nil
+            AppLog.log("FluidAudio streaming: confirmed \(tail.count) chars", category: "record")
         } else {
-            volatileUnit = unit
+            // Reuse the volatile unit's id across updates so the in-progress row
+            // keeps a stable identity (content updates in place).
+            volatileUnit = ASRUnit(id: volatileUnit?.id ?? UUID(),
+                                   tokens: Self.wordToks(tail, start: liveSegStart, end: now),
+                                   text: tail, confirmed: false)
         }
         publish()
     }

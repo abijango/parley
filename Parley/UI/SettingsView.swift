@@ -651,6 +651,29 @@ struct SettingsView: View {
 
                 speakerRecognitionSection
 
+                Section("Live transcript") {
+                    Picker("Latency", selection: Binding(
+                        get: { settings.liveStreamingTier },
+                        set: { settings.liveStreamingTier = $0 }
+                    )) {
+                        ForEach(FluidStreamingTier.allCases) { Text($0.label).tag($0) }
+                    }
+                    .disabled(recording.isRecording)
+                    Picker("Language", selection: $settings.liveStreamingLanguage) {
+                        Text("Auto (all languages)").tag("auto")
+                        Text("English").tag("en-US")
+                        Text("Spanish").tag("es")
+                        Text("French").tag("fr")
+                        Text("German").tag("de")
+                        Text("Italian").tag("it")
+                        Text("Portuguese").tag("pt")
+                        Text("Chinese").tag("zh-CN")
+                        Text("Japanese").tag("ja")
+                    }
+                    .disabled(recording.isRecording)
+                    helpText("Cache-aware streaming ASR shows the transcript within ~one chunk while recording — far faster than the old sliding-window (~11 s) approach. Smaller chunks = lower latency, larger = higher accuracy. \"Auto\" uses the full multilingual model (covers Chinese/Japanese); picking a Latin-script language loads a smaller, faster model. The accurate final transcript still comes from the re-pass below.")
+                }
+
                 Section("Final transcript") {
                     Toggle("Re-transcribe the whole recording after stopping", isOn: $settings.offlineAsrRepass)
                     helpText("A full-context batch pass over the recorded audio — more accurate than the live streaming chunks. Runs once at stop (adds a few seconds) and rewrites the saved transcript. Turn off to keep the live transcript as-is.")

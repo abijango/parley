@@ -102,6 +102,28 @@ enum FluidParakeetVersion: String, CaseIterable, Identifiable {
     }
 }
 
+/// Chunk-size tier (ms per chunk) for the FluidAudio multilingual *streaming*
+/// live ASR (Nemotron). Smaller = lower latency, larger = higher accuracy. 560
+/// is the lowest multilingual tier; 2240 is the library's recommended balance.
+/// The accurate final transcript still comes from the offline TDT v3 re-pass,
+/// so the live tier is purely a latency/quality knob for in-session feedback.
+enum FluidStreamingTier: Int, CaseIterable, Identifiable {
+    case ms560 = 560
+    case ms1120 = 1120
+    case ms2240 = 2240
+    case ms4480 = 4480
+
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .ms560: return "560 ms (lowest latency)"
+        case .ms1120: return "1120 ms"
+        case .ms2240: return "2240 ms (recommended)"
+        case .ms4480: return "4480 ms (highest accuracy)"
+        }
+    }
+}
+
 /// App-wide settings persisted via UserDefaults (`@AppStorage`).
 /// TODO(app-name): the AppStorage keys are namespaced with a literal prefix below.
 @MainActor
@@ -137,6 +159,8 @@ final class AppSettings: ObservableObject {
         static let idleUnloadMinutes = "parley.idleUnloadMinutes"
         static let transcriptionEngine = "parley.transcriptionEngine"
         static let parakeetVersion = "parley.parakeetVersion"
+        static let liveStreamingTier = "parley.liveStreamingTier"
+        static let liveStreamingLanguage = "parley.liveStreamingLanguage"
         static let diarizationThreshold = "parley.diarizationThreshold"
         static let identificationThreshold = "parley.identificationThreshold"
         static let offlineAsrRepass = "parley.offlineAsrRepass"
@@ -209,6 +233,12 @@ final class AppSettings: ObservableObject {
     // selectable as a secondary option. Only affects fresh installs / unset stores.
     @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.whisperKit.rawValue
     @AppStorage(Key.parakeetVersion) var parakeetVersionRaw: String = FluidParakeetVersion.v3.rawValue
+    /// FluidAudio live streaming ASR: chunk-size tier (ms) + language hint. 560 ms
+    /// is the lowest-latency multilingual tier; "auto" uses the full-vocab model
+    /// (covers zh/ja). Only affects the in-session live transcript — the final
+    /// transcript is the offline TDT v3 re-pass.
+    @AppStorage(Key.liveStreamingTier) var liveStreamingTierRaw: Int = FluidStreamingTier.ms560.rawValue
+    @AppStorage(Key.liveStreamingLanguage) var liveStreamingLanguage: String = "auto"
     /// FluidAudio in-session diarization clustering threshold (lower = more speakers /
     /// more sensitive; higher = merges similar voices). Default 0.6 — the library's
     /// 0.7 over-merges distinct speakers in practice.
@@ -278,6 +308,12 @@ final class AppSettings: ObservableObject {
     var parakeetVersion: FluidParakeetVersion {
         get { FluidParakeetVersion(rawValue: parakeetVersionRaw) ?? .v3 }
         set { parakeetVersionRaw = newValue.rawValue }
+    }
+
+    /// Chunk-size tier (ms) for the FluidAudio multilingual streaming live ASR.
+    var liveStreamingTier: FluidStreamingTier {
+        get { FluidStreamingTier(rawValue: liveStreamingTierRaw) ?? .ms560 }
+        set { liveStreamingTierRaw = newValue.rawValue }
     }
 
     /// Root folders (vault-relative) to scan for filing destinations.

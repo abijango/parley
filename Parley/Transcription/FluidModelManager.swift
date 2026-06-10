@@ -34,12 +34,20 @@ final class FluidModelManager: ObservableObject {
         status = AsrModels.modelsExist(at: Self.presenceProbe, version: .v3) ? .downloaded : .notDownloaded
     }
 
-    /// Fetch the Parakeet v3 models to disk (download only, no load). Idempotent —
+    /// Fetch the FluidAudio models to disk (download only, no load). Idempotent —
     /// skips files already present. The engine loads them at record time.
-    /// `AsrModels.download` throws on failure, so no-throw means success.
+    ///
+    /// Fetches BOTH models the engine needs: the Parakeet v3 batch model (the
+    /// authoritative offline re-pass) and the multilingual streaming variant for
+    /// the configured live tier/language (low-latency in-session transcript).
+    /// Presence/status track the v3 batch model; the streaming fetch is
+    /// best-effort so a streaming-only hiccup doesn't mark the whole set failed
+    /// (the engine re-fetches the exact chosen variant lazily at record time).
     func download() {
         guard status != .downloading else { return }
         status = .downloading
+        let tier = AppSettings.shared.liveStreamingTier.rawValue
+        let language = AppSettings.shared.liveStreamingLanguage
         Task {
             do {
                 _ = try await AsrModels.download(version: .v3)
@@ -48,6 +56,15 @@ final class FluidModelManager: ObservableObject {
             } catch {
                 status = .failed(error.localizedDescription)
                 AppLog.log("FluidAudio model download failed: \(error.localizedDescription)", category: "model")
+            }
+            // Warm the live streaming variant too (non-fatal — lazily fetched at
+            // record time if this is skipped or fails).
+            do {
+                _ = try await StreamingNemotronMultilingualAsrManager.downloadVariant(
+                    languageCode: language, chunkMs: tier)
+                AppLog.log("FluidAudio streaming variant (\(tier)ms, \(language)) downloaded/verified", category: "model")
+            } catch {
+                AppLog.log("FluidAudio streaming variant download skipped/failed: \(error.localizedDescription)", category: "model")
             }
         }
     }
