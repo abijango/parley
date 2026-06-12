@@ -93,12 +93,10 @@ struct AssignSpeakersView: View {
         // The review carries its own attendee snapshot (it may be for a History note,
         // not the live Record session) — use it rather than the live `recording.attendees`.
         let attendees = TranscriptWriter.splitAttendees(review.attendees)
-        let attendeeSet = Set(attendees.map { $0.lowercased() })
-        let matches: [String] = d.isEmpty ? [] : vault.people.filter {
-            $0.lowercased().contains(d.lowercased())
-                && $0.caseInsensitiveCompare(d) != .orderedSame
-                && !attendeeSet.contains($0.lowercased())
-        }.prefix(5).map { $0 }
+        // Fuzzy suggestions: contacts plausibly matching what the user typed.
+        // Returns [] when draft is empty or is already an exact name/alias hit.
+        let suggestions: [Contact] = d.isEmpty ? [] :
+            recording.vault.suggestMatches(for: d)
 
         return VStack(alignment: .leading, spacing: Theme.Spacing.small) {
             Text("Name this speaker").font(Theme.Typography.sheetTitle)
@@ -117,11 +115,26 @@ struct AssignSpeakersView: View {
             TextField("Type a name", text: $draft)
                 .textFieldStyle(.roundedBorder).frame(width: 240)
                 .onSubmit { assign(s.id, draft) }
-            if !matches.isEmpty {
+            if !suggestions.isEmpty {
+                // Show as chips: tapping a suggestion names with canonical + records alias.
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                    ForEach(matches, id: \.self) { p in
-                        Button(p) { draft = p }
-                            .buttonStyle(.plain).font(Theme.Typography.secondary)
+                    Text("Rolodex match")
+                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                    ForEach(suggestions, id: \.name) { contact in
+                        Button(action: {
+                            assignSuggestion(s.id, suggestion: contact, typedDraft: d)
+                        }) {
+                            HStack(spacing: 4) {
+                                Text(contact.name)
+                                    .font(Theme.Typography.secondary)
+                                if let company = contact.company {
+                                    Text("\u{00B7} \(company)")
+                                        .font(Theme.Typography.captionSecondary)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -140,6 +153,19 @@ struct AssignSpeakersView: View {
         guard !name.isEmpty else { return }
         recording.nameSpeaker(id, as: name)   // relabels transcript + enrols voiceprint + adds attendee
         names[id] = name
+        namingId = nil
+    }
+
+    /// Assign a Rolodex suggestion. Names the speaker with the canonical contact name,
+    /// and -- when the user typed something different -- records that draft as an alias
+    /// so future meetings resolve it automatically.
+    private func assignSuggestion(_ id: String, suggestion: Contact, typedDraft: String) {
+        recording.nameSpeaker(id, as: suggestion.name)
+        names[id] = suggestion.name
+        // Only record alias when what the user typed differs from the canonical name.
+        if suggestion.name.caseInsensitiveCompare(typedDraft) != .orderedSame && !typedDraft.isEmpty {
+            recording.linkAttendeeToExisting(detected: typedDraft, canonicalName: suggestion.name)
+        }
         namingId = nil
     }
 

@@ -1199,6 +1199,20 @@ final class RecordingController: ObservableObject {
         armClearIfReady()
     }
 
+    /// Record that `detected` (e.g. a Teams display name) is an alias for an existing
+    /// canonical contact. Writes the alias line to the rolodex, then removes the
+    /// enrichment row whose name equals `detected` -- the person is now known, so no
+    /// manual company fill is needed. If that empties the row set, finishes enrichment
+    /// (saving any remaining filled rows) so the deferred summary fires correctly.
+    func linkAttendeeToExisting(detected: String, canonicalName: String) {
+        vault.addAlias(detected, toCanonical: canonicalName)
+        guard pendingEnrichment != nil else { return }
+        pendingEnrichment!.rows.removeAll { $0.name == detected }
+        if pendingEnrichment!.rows.isEmpty {
+            finishEnrichment(save: true)
+        }
+    }
+
     /// Write confirmed inferred affiliations back to the rolodex (promotes attendees out
     /// of the "Other" section into their inferred company section).
     /// Called from HistoryView at commit time for each toggle that is ON.

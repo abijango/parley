@@ -363,6 +363,10 @@ final class AppSettings: ObservableObject {
     {{contacts}}
 
     Attendees supplied: {{attendees}}
+    Each attendee may be annotated with their company in parentheses, e.g. `Alice Smith (Vanguard)` \
+    -- treat that as authoritative; do not override it from the transcript. When the annotation \
+    ends with `, customer` (e.g. `Anna Krylova (IG Group, customer)`), that person is an \
+    external client/counterpart; attendees without `, customer` are your own internal team.
     Filing location (context only, do not output): {{destination}}
 
     Write these sections in order. Be COMPREHENSIVE and SPECIFIC — capture every concrete detail: \
@@ -375,7 +379,13 @@ final class AppSettings: ObservableObject {
     THIS call — i.e. who spoke or were present. People merely mentioned/referenced but NOT on \
     the call must NOT appear here; capture them in Key Topics instead. If someone was invited \
     but absent, you may add a row marked "(invited — not present)". When in doubt about whether \
-    someone was present, do not list them as an attendee.)
+    someone was present, do not list them as an attendee. For any attendee whose name is NOT \
+    already annotated with a company (no parentheses in the supplied attendee list) and is NOT \
+    confidently matched in the contacts, if the transcript clearly states their affiliation \
+    (e.g. "I'm Dana from Acme" or "...here at Acme"), put that company in the Company column \
+    and append the literal tag " (inferred)" -- for example "Acme (inferred)". If no affiliation \
+    is evident, leave Company blank. NEVER append "(inferred)" to a company that was supplied \
+    in the attendee annotation or matched from contacts.)
 
     ## Executive Summary
     (2–3 paragraphs: who met, why, the core need/opportunity, and the outcome / immediate next step.)

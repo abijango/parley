@@ -26,6 +26,12 @@ struct HistoryView: View {
     @State private var deleteNoteToo = true
     @State private var combineDraft = ""
     @State private var combineTrashOriginals = false
+    // Inferred-affiliation confirm banner (Slice D).
+    // Tracks names whose toggle has been turned OFF; empty means all are confirmed (default ON).
+    @State private var deselectedAffiliations: Set<String> = []
+    // The URL of the staged note for which the current inferred set was computed,
+    // so we can reset deselections when the user navigates to a different note.
+    @State private var inferredAffiliationStagedURL: URL?
 
     /// The active file-management sheet and its target(s).
     enum FileOp: Identifiable {
@@ -481,6 +487,8 @@ struct HistoryView: View {
     /// The review pane shown when a summary is staged: editable destination above the
     /// rendered note, with Commit / Discard / Regenerate.
     @ViewBuilder private func reviewPane(_ item: TranscriptItem, staged: URL) -> some View {
+        let body = (try? String(contentsOf: staged, encoding: .utf8)) ?? ""
+        let inferred = InferredAffiliationParser.parseInferred(markdown: body)
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: Theme.Spacing.small) {
                 Text("Summary ready — review, set where it's filed, then commit to your vault.")
@@ -499,6 +507,10 @@ struct HistoryView: View {
             TranscriptPreviewView(url: staged, reloadToken: recording.transcriptRevision)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
+            if !inferred.isEmpty {
+                inferredAffiliationBanner(inferred, staged: staged)
+                Divider()
+            }
             HStack(spacing: Theme.Spacing.medium) {
                 Button(role: .destructive) { summaryService.discard(item) } label: {
                     Label("Discard", systemImage: "trash")
@@ -509,7 +521,11 @@ struct HistoryView: View {
                 }
                 .glassButton()
                 Spacer()
-                Button { summaryService.commit(item, destination: reviewDestination) } label: {
+                Button {
+                    let confirmed = inferred.filter { !deselectedAffiliations.contains($0.name) }
+                    recording.confirmInferredAffiliations(confirmed)
+                    summaryService.commit(item, destination: reviewDestination)
+                } label: {
                     Label("Commit & File", systemImage: "tray.and.arrow.down")
                 }
                 .glassProminentButton()
@@ -517,6 +533,41 @@ struct HistoryView: View {
             .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
             .chromeSurface()
         }
+        .onChange(of: staged) {
+            // Reset toggle state when the user reviews a different staged note.
+            deselectedAffiliations.removeAll()
+            inferredAffiliationStagedURL = staged
+        }
+    }
+
+    /// Banner listing inferred affiliations, each with a default-ON toggle.
+    @ViewBuilder private func inferredAffiliationBanner(
+        _ items: [InferredAffiliation],
+        staged: URL
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+            Text("Claude inferred \(items.count == 1 ? "1 affiliation" : "\(items.count) affiliations") from the transcript — confirm to save to your rolodex:")
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
+            ForEach(items, id: \.name) { affiliation in
+                let isOn = Binding<Bool>(
+                    get: { !deselectedAffiliations.contains(affiliation.name) },
+                    set: { checked in
+                        if checked {
+                            deselectedAffiliations.remove(affiliation.name)
+                        } else {
+                            deselectedAffiliations.insert(affiliation.name)
+                        }
+                    }
+                )
+                Toggle(isOn: isOn) {
+                    Text("\(affiliation.name) -> \(affiliation.company)")
+                        .font(Theme.Typography.caption)
+                }
+                .toggleStyle(.checkbox)
+            }
+        }
+        .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
+        .chromeSurface()
     }
 
     private var selectedItems: [TranscriptItem] {

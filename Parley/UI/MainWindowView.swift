@@ -82,6 +82,15 @@ struct MainWindowView: View {
                 AssignSpeakersView(review: review)
             }
         }
+        // Post-call batch enrichment sheet (Slice B): one-time prompt to add Company
+        // for attendees with no known rolodex entry. The setter handles OS-level
+        // dismiss (Escape) by calling finishEnrichment(save:false), which ensures the
+        // deferred non-speaker summary always fires even when the user skips.
+        .sheet(isPresented: Binding(
+            get: { recording.autoPresentEnrichment && recording.pendingEnrichment != nil },
+            set: { if !$0 && recording.pendingEnrichment != nil { recording.finishEnrichment(save: false) } })) {
+            AttendeeEnrichmentSheet(recording: recording)
+        }
         .onChange(of: recording.pendingRecoveries.isEmpty) {
             showingRecovery = !recording.pendingRecoveries.isEmpty
         }
