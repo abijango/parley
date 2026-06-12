@@ -70,6 +70,17 @@ final class ModelManager: ObservableObject {
         UserDefaults.standard.set(false, forKey: loadInProgressKey)
     }
 
+    /// Call on graceful termination. A clean quit is by definition NOT a crash,
+    /// so drop the in-progress sentinel. Without this, a normal quit during the
+    /// multi-minute ANE specialization is indistinguishable at the next launch
+    /// from a true mid-compile crash, and `recoverFromCrashedLoadIfNeeded()`
+    /// needlessly wipes the (perfectly valid) compiled-model cache — forcing a
+    /// ~150s cold re-specialization. Since cold specialization is slow enough
+    /// that users routinely quit during it, that wipe was self-perpetuating.
+    static func noteGracefulShutdown() {
+        UserDefaults.standard.set(false, forKey: loadInProgressKey)
+    }
+
     // MARK: Download management
 
     /// Local folder WhisperKit downloads a variant into.
@@ -238,6 +249,13 @@ final class ModelManager: ObservableObject {
                 let warmStart = Date()
                 try await kit.prewarmModels()    // .prewarming → .prewarmed (ANE specialization)
                 AppLog.log("Specialized \(model.rawValue) (ANE) in \(Self.secs(warmStart))s", category: "model")
+                // The ANE specialization compile is the only step that writes —
+                // and can corrupt — the e5bundlecache. It just succeeded, so the
+                // cache is known-good: drop the crash sentinel NOW. A crash/quit
+                // during the loadModels() below only fails to map already-compiled
+                // weights into memory; it can't corrupt the cache, so it must not
+                // trigger a recovery wipe on the next launch.
+                UserDefaults.standard.set(false, forKey: Self.loadInProgressKey)
             }
 
             let loadStart = Date()
