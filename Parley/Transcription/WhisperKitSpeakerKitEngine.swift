@@ -281,6 +281,20 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
         opts.wordTimestamps = true
         opts.withoutTimestamps = false
         opts.skipSpecialTokens = true
+        // VAD chunking is the difference between the offline pass decoding the
+        // ENTIRE recording sequentially (silence included) and decoding only the
+        // speech regions, in parallel. Without a strategy WhisperKit takes the
+        // single-window sequential path; `.vad` splits on silence and fans the
+        // chunks out across `concurrentWorkerCount` workers. Word timings stay
+        // absolute — the chunker re-bases each chunk's word start/end by its seek
+        // offset (TranscriptionUtilities.updateSegmentTimings) — so diarization
+        // attribution, which aligns words to turns by absolute time, is unaffected.
+        //
+        // 4 workers (WhisperKit's own CLI default), NOT 0 (unbounded): this pass
+        // runs concurrently with SpeakerKit diarization, and both share the one
+        // Neural Engine — fanning out every chunk at once would just thrash it.
+        opts.chunkingStrategy = .vad
+        opts.concurrentWorkerCount = 4
         let results: [TranscriptionResult]
         do {
             results = try await kit.transcribe(audioArray: samples, decodeOptions: opts)
