@@ -80,10 +80,15 @@ struct SpeakersSettingsView: View {
     /// Regenerate voiceprint vectors from retained clips — the recovery path when a
     /// FluidAudio upgrade changes the embedding model (constraint #1).
     private var reEnrollSection: some View {
-        let clipBacked = store.voiceprints.filter { $0.audioSample != nil }.count
+        // Only FluidAudio (wespeaker) prints can be regenerated here: re-embedding
+        // runs FluidAudio's extractor, so the count, the button label, and the
+        // action must all exclude WhisperKit/SpeakerKit (pyannote) prints.
+        let clipBacked = store.voiceprints.filter {
+            $0.audioSample != nil && $0.embeddingModel != VoiceprintStore.speakerKitEmbeddingModel
+        }.count
         let stale = store.staleVoiceprints.count
         return Section("Re-enrollment") {
-            Text("If a FluidAudio update changes the embedding model, saved voiceprints stop matching. Regenerate their vectors from the retained clips — no re-recording needed.")
+            Text("If a FluidAudio update changes its embedding model, FluidAudio voiceprints stop matching. Regenerate their vectors from the retained clips — no re-recording needed. WhisperKit/SpeakerKit prints are left untouched (they can't be regenerated this way).")
                 .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if stale > 0 {
@@ -107,9 +112,20 @@ struct SpeakersSettingsView: View {
     }
 
     private func reEnrollFromClips(staleOnly: Bool) {
-        let targets = (staleOnly ? store.staleVoiceprints : store.voiceprints)
+        let candidates = (staleOnly ? store.staleVoiceprints : store.voiceprints)
             .filter { $0.audioSample != nil }
-        guard !targets.isEmpty else { status = "No saved clips to re-enroll from."; return }
+        // pyannote (WhisperKit/SpeakerKit) prints can't be regenerated here: there's
+        // no SpeakerKit clip-embedding path, and re-embedding via FluidAudio would
+        // re-stamp them wespeaker_v2 — destroying WhisperKit identification for those
+        // people. Exclude them so this can never silently convert across engines.
+        let targets = candidates.filter { $0.embeddingModel != VoiceprintStore.speakerKitEmbeddingModel }
+        let skipped = candidates.count - targets.count
+        guard !targets.isEmpty else {
+            status = skipped > 0
+                ? "Nothing to re-enroll — \(skipped) WhisperKit print(s) can't be regenerated this way."
+                : "No saved clips to re-enroll from."
+            return
+        }
         reenrolling = true
         status = "Re-enrolling \(targets.count) speaker(s) from saved clips…"
         let threshold = Float(diarizationThreshold)
@@ -124,7 +140,9 @@ struct SpeakersSettingsView: View {
             }
             reenrolling = false
             status = "Re-enrolled \(done) speaker(s)"
-                + (failed > 0 ? "; \(failed) skipped (clip too short or low quality)." : ".")
+                + (failed > 0 ? "; \(failed) skipped (clip too short or low quality)" : "")
+                + (skipped > 0 ? "; \(skipped) WhisperKit print(s) left untouched" : "")
+                + "."
         }
     }
 

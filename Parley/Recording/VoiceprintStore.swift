@@ -63,6 +63,14 @@ final class VoiceprintStore: ObservableObject {
     /// version number, or every previously-enrolled SpeakerKit print stops matching.
     static let speakerKitEmbeddingModel = "pyannote_v3"
 
+    /// Embedding models that some CURRENT engine still uses. A print tagged with
+    /// any of these is valid — it matches under its own engine — and must never be
+    /// treated as stale. Both spaces are live: FluidAudio (`wespeaker_v2`) and
+    /// WhisperKit+SpeakerKit (`pyannote_v3`). Treating a `pyannote_v3` print as
+    /// "outdated" and regenerating it via FluidAudio silently destroys it (there is
+    /// no SpeakerKit clip-embedding path to put it back).
+    static let currentEmbeddingModels: Set<String> = [embeddingModel, speakerKitEmbeddingModel]
+
     @discardableResult
     func enroll(name: String, embedding: [Float],
                 model: String = VoiceprintStore.embeddingModel) -> Voiceprint {
@@ -98,11 +106,17 @@ final class VoiceprintStore: ObservableObject {
         save()
     }
 
-    /// Voiceprints whose embeddings were made by a model other than the current one
-    /// (a FluidAudio upgrade can change the embedding model, invalidating old vectors).
-    /// These should be re-enrolled from their retained clips.
+    /// Voiceprints whose embeddings were made by a model NO current engine uses
+    /// (e.g. an old FluidAudio embedder superseded on upgrade) — their vectors are
+    /// no longer comparable and should be regenerated from the retained clip.
+    ///
+    /// Scoped by model id, NOT by "is it the FluidAudio model": a `pyannote_v3`
+    /// print is current (it matches under WhisperKit+SpeakerKit), so it is never
+    /// stale. The previous wespeaker-only definition flagged every pyannote print
+    /// as outdated and the re-enroll path then converted them to wespeaker —
+    /// silently wiping WhisperKit identification for those people.
     var staleVoiceprints: [Voiceprint] {
-        voiceprints.filter { $0.embeddingModel != Self.embeddingModel || $0.embeddingDim != Self.embeddingDim }
+        voiceprints.filter { !Self.currentEmbeddingModels.contains($0.embeddingModel) }
     }
 
     /// Replace a voiceprint's vectors with freshly-computed embeddings (e.g. from its
@@ -190,7 +204,8 @@ final class VoiceprintStore: ObservableObject {
             voiceprints = []
         }
         let withClips = voiceprints.filter { $0.audioSample != nil }.count
-        AppLog.log("Loaded \(voiceprints.count) voiceprint(s), \(withClips) with audio clip(s)", category: "model")
+        let byModel = Dictionary(grouping: voiceprints, by: \.embeddingModel).mapValues(\.count)
+        AppLog.log("Loaded \(voiceprints.count) voiceprint(s), \(withClips) with audio clip(s), \(staleVoiceprints.count) stale; by model: \(byModel)", category: "model")
     }
 
     private func save() {
