@@ -85,6 +85,27 @@ final class SpeakerKitDiarizer {
         return Output(turns: turns, centroids: centroids,
                       speakerCount: result.speakerCount, raw: result)
     }
+
+    /// Embed a single-speaker enrollment clip into the `pyannote_v3` space — the
+    /// SpeakerKit counterpart to `FluidAudioEngine.embeddings(forClip:)`. Runs
+    /// diarization on the clip and returns the DOMINANT speaker's centroid (the clip
+    /// is one person, but background noise can spawn minor clusters, so pick the
+    /// speaker with the most speech). Returns nil for a too-short clip or if no
+    /// embedding could be derived.
+    ///
+    /// Reuses the already-loaded SpeakerKit model, so a batch caller should keep one
+    /// diarizer alive across all clips and `unload()` once at the end (the model load
+    /// is expensive — never per-clip).
+    func embedding(forClip samples: [Float], clusterThreshold: Double? = nil) async -> [Float]? {
+        guard samples.count >= 16_000 else { return nil }   // < 1 s is too short to embed
+        guard let out = try? await diarize(samples, clusterThreshold: clusterThreshold) else { return nil }
+        // Dominant speaker = most total speech in the clip.
+        var talk: [String: TimeInterval] = [:]
+        for t in out.turns { talk[t.speakerId, default: 0] += max(0, t.end - t.start) }
+        guard let dominant = talk.max(by: { $0.value < $1.value })?.key,
+              let centroid = out.centroids[dominant], !centroid.isEmpty else { return nil }
+        return centroid
+    }
 }
 
 enum SpeakerKitDiarizerError: Error { case notLoaded }

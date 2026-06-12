@@ -91,6 +91,38 @@ final class RecordingController: ObservableObject {
     /// History view (which used to silently discard it, forcing a full re-run).
     @Published var autoPresentSpeakerReview = false
 
+    // MARK: - Post-call batch enrichment (Slice B)
+
+    /// Snapshot of attendees with no known company, offered to the user once
+    /// after a recording stops so they can add Title/Company/LinkedIn before the
+    /// rolodex entry is filed under "Other".
+    struct AttendeeEnrichment: Identifiable {
+        let id = UUID()
+        var rows: [Row]
+        /// URL of the transcript that triggered this sheet (used by the deferred
+        /// summary on the non-speaker path).
+        let transcriptURL: URL?
+        /// Leaf of destinationPath, used as a Company placeholder hint.
+        let destinationDefault: String
+        /// True only on the non-speaker auto-summarize path: the summary was
+        /// intentionally deferred so it runs after company data is captured.
+        var runSummaryOnFinish: Bool
+
+        struct Row: Identifiable {
+            let id = UUID()
+            let name: String
+            var title = ""
+            var company = ""
+            var linkedin = ""
+        }
+    }
+
+    /// Non-nil while the enrichment sheet is waiting for the user.
+    @Published var pendingEnrichment: AttendeeEnrichment?
+    /// True when the enrichment sheet should auto-present (set alongside
+    /// pendingEnrichment; cleared by finishEnrichment).
+    @Published var autoPresentEnrichment = false
+
     /// A pending auto-clear of the Record view back to a blank slate. Surfaced as
     /// a footer chip ("Clearing in Ns — Keep") that counts down once the
     /// post-meeting pipeline has settled; any user edit cancels it (implicit Keep).
@@ -107,7 +139,7 @@ final class RecordingController: ObservableObject {
     /// older session's data, so it must not pin the Record view (which could otherwise
     /// stay un-clearable indefinitely under a queue backlog).
     private var clearIsBusy: Bool {
-        pendingSpeakerReview != nil || notes.isRunning
+        pendingSpeakerReview != nil || pendingEnrichment != nil || notes.isRunning
     }
 
     /// Bumped whenever a saved transcript's body is rewritten (offline pass, speaker
@@ -220,10 +252,13 @@ final class RecordingController: ObservableObject {
         let model = eng.embeddingModelId
         if let centroid = eng.setSpeakerName(speakerId, as: name) {
             let vpId = enrollVoiceprint(name: name, centroid: centroid, model: model)
-            // Retain a short enrollment clip for re-enrollment (off-main, best-effort).
+            // Retain a short enrollment clip for re-enrollment, AND cross-enroll the
+            // OTHER engine's space from that same clip so naming a person once makes
+            // them recognisable on both engines (off-main, best-effort).
             Task { [weak self] in
                 guard let self, let audio = await eng.repAudioSample(for: speakerId) else { return }
                 self.voiceprints.attachAudioSample(to: vpId, samples: audio)
+                await self.crossEnroll(name: name, clip: audio, activeModel: model)
             }
         } else {
             AppLog.log("Named speaker \(speakerId) as \(name) but not enough clean audio — labeled, not enrolled", category: "record")
@@ -252,6 +287,38 @@ final class RecordingController: ObservableObject {
             return existing.id
         }
         return voiceprints.enroll(name: name, embedding: centroid, model: model).id
+    }
+
+    /// Enrol `name` into the OTHER engine's embedding space from the same rep clip,
+    /// so a person named under one engine is also recognised by the other. Idempotent:
+    /// skips if a print for (name, targetModel) already exists. Best-effort and
+    /// off-main — a failure or a missing extractor never affects the user's naming.
+    private func crossEnroll(name: String, clip: [Float], activeModel: String) async {
+        let targetModel = activeModel == VoiceprintStore.embeddingModel
+            ? VoiceprintStore.speakerKitEmbeddingModel    // active FluidAudio → add pyannote
+            : VoiceprintStore.embeddingModel              // active WhisperKit → add wespeaker
+        guard !voiceprints.voiceprints.contains(where: {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame && $0.embeddingModel == targetModel
+        }) else { return }
+
+        let embedding: [Float]?
+        switch targetModel {
+        case VoiceprintStore.embeddingModel:
+            embedding = await FluidAudioEngine.embeddings(
+                forClip: clip, clusterThreshold: Float(settings.diarizationThreshold))?.first
+        case VoiceprintStore.speakerKitEmbeddingModel:
+            let diarizer = SpeakerKitDiarizer()
+            embedding = await diarizer.embedding(forClip: clip)
+            await diarizer.unload()
+        default:
+            embedding = nil
+        }
+        guard let embedding, !embedding.isEmpty else {
+            AppLog.log("Cross-enroll \(name) → \(targetModel): no embedding derived", category: "record")
+            return
+        }
+        _ = voiceprints.enroll(name: name, embedding: embedding, model: targetModel)
+        AppLog.log("Cross-enrolled \(name) into \(targetModel) space from rep clip", category: "record")
     }
 
     /// Append a name to the comma-separated attendees list if not already present.
@@ -814,12 +881,28 @@ final class RecordingController: ObservableObject {
                     : "Transcript saved: \(result.url.lastPathComponent)"
                 notes.reset()
                 store.refresh()
-                // Auto-run is opt-in; skip it when there's nothing to summarise. For a
-                // speaker-capable engine, the OFFLINE QUEUE chains the summary after its
-                // pass (so the note uses the attributed transcript) — so only non-speaker
-                // engines summarize here.
-                if autoSummarize && !segments.isEmpty && !isSpeakerEngine {
-                    maybeAutoRunClaude()
+                // B: offer a one-time enrichment sheet for attendees with no known
+                // company. On the non-speaker path this also defers the summary so
+                // E-annotation reflects whatever the user fills in. On the speaker path
+                // it is best-effort rolodex enrichment only (the summary is queued via
+                // the offline service independently).
+                let destinationLeaf = destination.split(separator: "/").last.map(String.init) ?? ""
+                let enrichRows = enrichmentRows(forAttendees: attendeeNames)
+                if !enrichRows.isEmpty {
+                    let runSummary = autoSummarize && !segments.isEmpty && !isSpeakerEngine
+                    pendingEnrichment = AttendeeEnrichment(
+                        rows: enrichRows,
+                        transcriptURL: result.url,
+                        destinationDefault: destinationLeaf,
+                        runSummaryOnFinish: runSummary)
+                    autoPresentEnrichment = true
+                    // Non-speaker summary is deferred to finishEnrichment(); speaker path
+                    // does not summarize here regardless.
+                } else {
+                    // No unenriched attendees: preserve today's behavior exactly.
+                    if autoSummarize && !segments.isEmpty && !isSpeakerEngine {
+                        maybeAutoRunClaude()
+                    }
                 }
                 // Transcript write succeeded — stamp the manifest finalized NOW, before
                 // the offline enqueue. `setOfflineStatus` does a read-modify-write on the
@@ -1059,10 +1142,70 @@ final class RecordingController: ObservableObject {
             // Fallback (no decoupled context): rewrite the live transcript.
             rewriteLastTranscript(reason: "reviewed speakers")
         }
+        // B: best-effort enrichment for speaker-review attendees with no known company.
+        // The summary was already enqueued above (independent of the sheet), so
+        // runSummaryOnFinish is false here — we're only enriching the rolodex.
+        if let review {
+            let names = TranscriptWriter.splitAttendees(review.attendees)
+            let enrichRows = enrichmentRows(forAttendees: names)
+            if !enrichRows.isEmpty {
+                let leaf = review.filing.split(separator: "/").last.map(String.init) ?? ""
+                pendingEnrichment = AttendeeEnrichment(
+                    rows: enrichRows,
+                    transcriptURL: review.transcriptURL,
+                    destinationDefault: leaf,
+                    runSummaryOnFinish: false)
+                autoPresentEnrichment = true
+            }
+        }
         // The review closed — re-arm the Record-view auto-clear (if it was deferred) and
         // pump the offline queue in case a job was waiting behind the open sheet.
         armClearIfReady()
         offlineService.runNextIfIdle()
+    }
+
+    // MARK: - Post-call enrichment (Slice B)
+
+    /// Returns rows for attendees that have no known company in the rolodex.
+    /// Empty when all attendees are already enriched (the common case after the
+    /// first time someone has been met).
+    func enrichmentRows(forAttendees names: [String]) -> [AttendeeEnrichment.Row] {
+        names
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !vault.isCompanyKnown($0) }
+            .map { AttendeeEnrichment.Row(name: $0) }
+    }
+
+    /// Called by the enrichment sheet on both Save and Skip paths.
+    ///
+    /// - Parameter save: when `true`, persists non-empty company rows to the
+    ///   rolodex. When `false` (Skip all / Escape dismiss), upserts are skipped
+    ///   but the deferred non-speaker summary still fires so it is never lost.
+    func finishEnrichment(save: Bool) {
+        let e = pendingEnrichment
+        pendingEnrichment = nil
+        autoPresentEnrichment = false
+        if save {
+            for row in e?.rows ?? [] where !row.company.trimmingCharacters(in: .whitespaces).isEmpty {
+                vault.upsertPerson(
+                    name: row.name,
+                    title: row.title,
+                    company: row.company,
+                    linkedin: row.linkedin)
+            }
+        }
+        // Always fire the deferred summary (if any) — Skip must not lose the summary.
+        if e?.runSummaryOnFinish == true { maybeAutoRunClaude(forTranscriptURL: e?.transcriptURL) }
+        armClearIfReady()
+    }
+
+    /// Write confirmed inferred affiliations back to the rolodex (promotes attendees out
+    /// of the "Other" section into their inferred company section).
+    /// Called from HistoryView at commit time for each toggle that is ON.
+    func confirmInferredAffiliations(_ items: [InferredAffiliation]) {
+        for i in items {
+            vault.upsertPerson(name: i.name, title: "", company: i.company, linkedin: "")
+        }
     }
 
     // MARK: Auto-clear after meeting
@@ -1154,9 +1297,18 @@ final class RecordingController: ObservableObject {
     /// Queue a background Claude summary for the just-saved recording, if auto-summarize
     /// is on. Reads the current transcript (post-attribution) from the store so the summary
     /// reflects assigned speakers + attendees. The result is staged for review in History.
-    private func maybeAutoRunClaude() {
-        guard settings.autoRunClaude, let url = lastTranscriptURL else { return }
-        guard !(engine?.finalTimeline() ?? segments).isEmpty else { return }
+    /// Enqueue the auto-summary for a finalized transcript. `targetURL` lets a DEFERRED
+    /// caller (the enrichment sheet, which may be dismissed only after a new recording
+    /// has re-pointed `lastTranscriptURL`) pin the summary to the correct session rather
+    /// than whatever is live now. Note: both shipping live engines are speaker-capable,
+    /// so the deferred branch is currently inert; the guard is defensive for that path.
+    private func maybeAutoRunClaude(forTranscriptURL targetURL: URL? = nil) {
+        guard settings.autoRunClaude, let url = targetURL ?? lastTranscriptURL else { return }
+        // The live (non-deferred) path requires a non-empty timeline; a deferred call
+        // targets a file already saved to disk, so it skips the live-engine check.
+        if targetURL == nil {
+            guard !(engine?.finalTimeline() ?? segments).isEmpty else { return }
+        }
         store.refresh()
         guard let item = store.items.first(where: { $0.url == url })
             ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) else { return }

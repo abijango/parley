@@ -15,6 +15,7 @@ struct SpeakersSettingsView: View {
     @State private var status: String?
     @State private var player = SamplePlayer()
     @State private var reenrolling = false
+    @State private var rebuilding = false
 
     var body: some View {
         Form {
@@ -87,6 +88,10 @@ struct SpeakersSettingsView: View {
             $0.audioSample != nil && $0.embeddingModel != VoiceprintStore.speakerKitEmbeddingModel
         }.count
         let stale = store.staleVoiceprints.count
+        // People who have a retained clip but NO pyannote (WhisperKit) print — these
+        // can be rebuilt for WhisperKit from the clip (e.g. prints lost to the old
+        // re-enroll bug).
+        let missingPyannote = store.clipSourcesMissing(model: VoiceprintStore.speakerKitEmbeddingModel).count
         return Section("Re-enrollment") {
             Text("If a FluidAudio update changes its embedding model, FluidAudio voiceprints stop matching. Regenerate their vectors from the retained clips — no re-recording needed. WhisperKit/SpeakerKit prints are left untouched (they can't be regenerated this way).")
                 .font(Theme.Typography.caption).foregroundStyle(.secondary)
@@ -106,6 +111,19 @@ struct SpeakersSettingsView: View {
                 if clipBacked == 0 {
                     Text("No retained clips yet.")
                         .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                }
+            }
+            if missingPyannote > 0 {
+                Divider()
+                Text("Rebuild WhisperKit (SpeakerKit) voiceprints from retained clips for people who only have a FluidAudio print — e.g. prints lost to an earlier re-enroll. Leaves existing prints untouched.")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: Theme.Spacing.small) {
+                    if rebuilding { ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center) }
+                    Button("Rebuild WhisperKit voiceprints (\(missingPyannote))") {
+                        rebuildPyannoteFromClips()
+                    }
+                    .disabled(rebuilding)
                 }
             }
         }
@@ -143,6 +161,32 @@ struct SpeakersSettingsView: View {
                 + (failed > 0 ? "; \(failed) skipped (clip too short or low quality)" : "")
                 + (skipped > 0 ? "; \(skipped) WhisperKit print(s) left untouched" : "")
                 + "."
+        }
+    }
+
+    /// Recovery: for each person with a retained clip but NO pyannote print, generate a
+    /// pyannote (WhisperKit/SpeakerKit) print from the clip. Additive — never touches the
+    /// existing FluidAudio prints. One source clip per distinct name; loads the SpeakerKit
+    /// model once for the whole batch.
+    private func rebuildPyannoteFromClips() {
+        let targets = store.clipSourcesMissing(model: VoiceprintStore.speakerKitEmbeddingModel)
+        guard !targets.isEmpty else { status = "No clips to rebuild WhisperKit voiceprints from."; return }
+        rebuilding = true
+        status = "Rebuilding \(targets.count) WhisperKit voiceprint(s) from saved clips…"
+        Task {
+            let diarizer = SpeakerKitDiarizer()
+            var done = 0, failed = 0
+            for vp in targets {
+                guard let samples = store.clipSamples(vp.id),
+                      let centroid = await diarizer.embedding(forClip: samples) else { failed += 1; continue }
+                _ = store.enroll(name: vp.name, embedding: centroid,
+                                 model: VoiceprintStore.speakerKitEmbeddingModel)
+                done += 1
+            }
+            await diarizer.unload()
+            rebuilding = false
+            status = "Rebuilt \(done) WhisperKit voiceprint(s)"
+                + (failed > 0 ? "; \(failed) skipped (clip too short or low quality)." : ".")
         }
     }
 

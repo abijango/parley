@@ -49,4 +49,40 @@ final class VoiceprintStoreTests: XCTestCase {
         XCTAssertTrue(VoiceprintStore.currentEmbeddingModels.contains(VoiceprintStore.embeddingModel))
         XCTAssertTrue(VoiceprintStore.currentEmbeddingModels.contains(VoiceprintStore.speakerKitEmbeddingModel))
     }
+
+    // MARK: clipSourcesMissing (recovery candidate selection)
+
+    func testClipSourceMissingFindsWespeakerOnlyPersonWithClip() {
+        let store = makeStore()
+        let vp = store.enroll(name: "Andre", embedding: vec(), model: VoiceprintStore.embeddingModel)
+        store.attachAudioSample(to: vp.id, samples: vec())
+        let sources = store.clipSourcesMissing(model: VoiceprintStore.speakerKitEmbeddingModel)
+        XCTAssertEqual(sources.map(\.name), ["Andre"])
+    }
+
+    func testClipSourceMissingExcludesPersonWhoAlreadyHasTargetModel() {
+        let store = makeStore()
+        let w = store.enroll(name: "Andre", embedding: vec(), model: VoiceprintStore.embeddingModel)
+        store.attachAudioSample(to: w.id, samples: vec())
+        store.enroll(name: "Andre", embedding: vec(), model: VoiceprintStore.speakerKitEmbeddingModel)
+        // Already has a pyannote print → nothing to rebuild (idempotent).
+        XCTAssertTrue(store.clipSourcesMissing(model: VoiceprintStore.speakerKitEmbeddingModel).isEmpty)
+    }
+
+    func testClipSourceMissingSkipsPrintsWithoutClip() {
+        let store = makeStore()
+        store.enroll(name: "NoClip", embedding: vec(), model: VoiceprintStore.embeddingModel)
+        XCTAssertTrue(store.clipSourcesMissing(model: VoiceprintStore.speakerKitEmbeddingModel).isEmpty,
+                      "Can't rebuild without a retained clip")
+    }
+
+    func testClipSourceMissingDedupesByName() {
+        let store = makeStore()
+        let a = store.enroll(name: "Andre", embedding: vec(), model: VoiceprintStore.embeddingModel)
+        store.attachAudioSample(to: a.id, samples: vec())
+        let b = store.enroll(name: "andre", embedding: vec(), model: VoiceprintStore.embeddingModel)
+        store.attachAudioSample(to: b.id, samples: vec())
+        // Two wespeaker prints for the same name (case-insensitive) → one source.
+        XCTAssertEqual(store.clipSourcesMissing(model: VoiceprintStore.speakerKitEmbeddingModel).count, 1)
+    }
 }

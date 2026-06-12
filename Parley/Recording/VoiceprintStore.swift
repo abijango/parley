@@ -119,6 +119,20 @@ final class VoiceprintStore: ObservableObject {
         voiceprints.filter { !Self.currentEmbeddingModels.contains($0.embeddingModel) }
     }
 
+    /// One clip-backed source print per distinct name (case-insensitive) that has NO
+    /// print in `model`'s embedding space — the candidates for rebuilding that engine's
+    /// voiceprints from retained clips (e.g. pyannote prints lost to an earlier
+    /// re-enroll). Names that already have a `model` print are excluded, so applying
+    /// the result and re-querying yields an empty set (idempotent).
+    func clipSourcesMissing(model: String) -> [Voiceprint] {
+        let have = Set(voiceprints.filter { $0.embeddingModel == model }.map { $0.name.lowercased() })
+        var sources: [String: Voiceprint] = [:]
+        for vp in voiceprints where vp.audioSample != nil && !have.contains(vp.name.lowercased()) {
+            sources[vp.name.lowercased()] = sources[vp.name.lowercased()] ?? vp
+        }
+        return Array(sources.values)
+    }
+
     /// Replace a voiceprint's vectors with freshly-computed embeddings (e.g. from its
     /// retained clip after a model upgrade), re-stamping the current model/dim/schema.
     /// Identity (id, name, createdAt) and the retained clip are preserved.
