@@ -21,12 +21,13 @@ struct MainWindowView: View {
     }
 
     enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
-        case record = "Record", history = "History"
+        case record = "Record", history = "History", people = "People"
         var id: String { rawValue }
         var symbol: String {
             switch self {
-            case .record: return "record.circle"
+            case .record:  return "record.circle"
             case .history: return "clock.arrow.circlepath"
+            case .people:  return "person.crop.circle"
             }
         }
     }
@@ -46,6 +47,8 @@ struct MainWindowView: View {
                     RecordDetailView()
                 case .history:
                     HistoryView()
+                case .people:
+                    PeopleView(voiceprintStore: recording.voiceprints)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
