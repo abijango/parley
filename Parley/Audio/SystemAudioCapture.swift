@@ -324,6 +324,9 @@ final class SystemAudioCapture {
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
         if let archiver {
+            // Flush any staged frames before releasing. The IO proc is stopped above
+            // so there are no concurrent append calls at this point.
+            archiver.finalize()
             AppLog.log("System archive: \(archiver.framesWritten) frames written", category: "audio")
         }
         archiver = nil
