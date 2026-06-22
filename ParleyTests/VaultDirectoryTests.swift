@@ -740,6 +740,72 @@ final class VaultDirectoryTests: XCTestCase {
         )
     }
 
+    // MARK: - upsertPerson clearLinkedinIfEmpty
+
+    /// clearLinkedinIfEmpty:true + empty link removes an existing LinkedIn URL.
+    @MainActor
+    func testUpsertPersonClearLinkedinRemovesExistingURL() throws {
+        let rolodex = "## Customers\n\n### Vanguard\n- [Alice Smith](https://linkedin.com/in/alice) - Engineer\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            // Confirm initial state: linkedin is set.
+            let initial = vault.contacts.first { $0.name == "Alice Smith" }
+            XCTAssertEqual(initial?.linkedin, "https://linkedin.com/in/alice")
+
+            // Editor saves with empty linkedin and clearLinkedinIfEmpty:true -> should clear.
+            vault.upsertPerson(name: "Alice Smith", title: "Engineer", company: "Vanguard",
+                               linkedin: "", side: .customer, clearLinkedinIfEmpty: true)
+
+            let updated = vault.contacts.first { $0.name == "Alice Smith" }
+            XCTAssertNil(updated?.linkedin,
+                         "clearLinkedinIfEmpty:true with empty link must remove existing URL")
+        }
+    }
+
+    /// clearLinkedinIfEmpty:false (default) + empty link preserves existing LinkedIn URL.
+    @MainActor
+    func testUpsertPersonDefaultPreservesLinkedinWhenEmpty() throws {
+        let rolodex = "## Customers\n\n### Vanguard\n- [Alice Smith](https://linkedin.com/in/alice) - Engineer\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            // Default (clearLinkedinIfEmpty:false) + empty link preserves existing URL.
+            vault.upsertPerson(name: "Alice Smith", title: "Engineer", company: "Vanguard",
+                               linkedin: "")
+
+            let updated = vault.contacts.first { $0.name == "Alice Smith" }
+            XCTAssertEqual(updated?.linkedin, "https://linkedin.com/in/alice",
+                           "Default (clearLinkedinIfEmpty:false) with empty link must preserve existing URL")
+        }
+    }
+
+    /// clearLinkedinIfEmpty:true with a non-empty link writes the new URL (not cleared).
+    @MainActor
+    func testUpsertPersonClearLinkedinFlagDoesNotClearNonEmptyLink() throws {
+        let rolodex = "## Customers\n\n### Vanguard\n- [Alice Smith](https://linkedin.com/in/alice) - Engineer\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            vault.upsertPerson(name: "Alice Smith", title: "Engineer", company: "Vanguard",
+                               linkedin: "https://linkedin.com/in/alice-new",
+                               side: .customer, clearLinkedinIfEmpty: true)
+
+            let updated = vault.contacts.first { $0.name == "Alice Smith" }
+            XCTAssertEqual(updated?.linkedin, "https://linkedin.com/in/alice-new",
+                           "Non-empty link must always be written regardless of clearLinkedinIfEmpty")
+        }
+    }
+
+    /// clearLinkedinIfEmpty:true clears via the alias-match branch as well.
+    @MainActor
+    func testUpsertPersonClearLinkedinWorksForAliasMatch() throws {
+        let rolodex = "## Customers\n\n### Vanguard\n- [Alice Smith](https://linkedin.com/in/alice) (aka Ali) - Engineer\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            // Upserting by alias "Ali" with clear flag should remove the URL.
+            vault.upsertPerson(name: "Ali", title: "Engineer", company: "Vanguard",
+                               linkedin: "", side: .customer, clearLinkedinIfEmpty: true)
+
+            let updated = vault.contacts.first { $0.name == "Alice Smith" }
+            XCTAssertNil(updated?.linkedin,
+                         "clearLinkedinIfEmpty:true via alias match must also clear the URL")
+        }
+    }
+
     @MainActor
     func testUpsertPersonNoTitleRoundTripDoesNotDoubleCompany() throws {
         // Regression test for the bare-company doubling bug:

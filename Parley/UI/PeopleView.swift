@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Top-level People screen: a master-detail split showing every known person
 /// from the joined Rolodex + Voiceprints stores.
@@ -9,6 +10,10 @@ struct PeopleView: View {
     @State private var selection: String?   // Person.id (lowercased displayName)
     @State private var searchQuery = ""
     @State private var isEditing = false
+
+    // MARK: - Store-wide voiceprint export/import state (migrated from SpeakersSettingsView)
+
+    @State private var showVoiceprintTransfer = false
 
     // MARK: - Derived data
 
@@ -42,13 +47,16 @@ struct PeopleView: View {
                 .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showVoiceprintTransfer) {
+            VoiceprintTransferSheet(store: voiceprintStore)
+        }
     }
 
     // MARK: - List pane
 
     private var listPane: some View {
         VStack(spacing: 0) {
-            searchBar
+            listHeader
             Divider()
             if filteredPeople.isEmpty {
                 emptyListState
@@ -70,6 +78,15 @@ struct PeopleView: View {
         .chromeSurface()
     }
 
+    /// Combined search bar + toolbar actions (voiceprint backup/transfer).
+    private var listHeader: some View {
+        VStack(spacing: 0) {
+            searchBar
+            Divider()
+            toolbarRow
+        }
+    }
+
     private var searchBar: some View {
         HStack(spacing: Theme.Spacing.xSmall) {
             Image(systemName: "magnifyingglass")
@@ -89,6 +106,41 @@ struct PeopleView: View {
         }
         .padding(.horizontal, Theme.Spacing.medium)
         .padding(.vertical, Theme.Spacing.small)
+    }
+
+    /// Toolbar row below the search bar: store-wide voiceprint backup/transfer.
+    private var toolbarRow: some View {
+        HStack {
+            Text("\(allPeople.count) \(allPeople.count == 1 ? "person" : "people")")
+                .font(Theme.Typography.captionSecondary)
+                .foregroundStyle(.tertiary)
+            Spacer()
+            // Stale-voiceprint warning: shown only when outdated prints exist.
+            // Replaces the store-wide banner that was in SpeakersSettingsView.
+            let staleCount = voiceprintStore.staleVoiceprints.count
+            if staleCount > 0 {
+                HStack(spacing: Theme.Spacing.xxSmall) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                    Text("\(staleCount) outdated")
+                        .font(Theme.Typography.captionSecondary)
+                        .foregroundStyle(Color.orange)
+                }
+                .help("\(staleCount) voiceprint\(staleCount == 1 ? "" : "s") use an outdated model and won't match until re-enrolled. Select each person to re-enroll.")
+            }
+            Button {
+                showVoiceprintTransfer = true
+            } label: {
+                Label("Backup", systemImage: "arrow.up.arrow.down.circle")
+                    .font(Theme.Typography.caption)
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            .help("Export or import voiceprints for backup and transfer")
+        }
+        .padding(.horizontal, Theme.Spacing.medium)
+        .padding(.vertical, Theme.Spacing.xSmall)
     }
 
     @ViewBuilder private var emptyListState: some View {
@@ -434,5 +486,89 @@ struct EngineBadgeRow: View {
             }
         }
         .help(help + (enrolled ? " enrolled" : " not enrolled"))
+    }
+}
+
+// MARK: - VoiceprintTransferSheet
+
+/// Store-wide voiceprint backup and transfer (export/import).
+/// Moved from SpeakersSettingsView; reuses the same VoiceprintStore export/import API verbatim.
+struct VoiceprintTransferSheet: View {
+    @ObservedObject var store: VoiceprintStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var exportPassphrase = ""
+    @State private var importPassphrase = ""
+    @State private var status: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.large) {
+            Text("Voiceprint Backup & Transfer")
+                .font(Theme.Typography.sheetTitle)
+
+            Text("Export your voiceprints to a file for backup or transfer to another Mac. Add a passphrase to encrypt the export; leave it empty for plain JSON.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            Group {
+                HStack {
+                    SecureField("Export passphrase (optional)", text: $exportPassphrase)
+                        .frame(width: 230)
+                    Button("Export...") { exportStore() }
+                        .disabled(store.voiceprints.isEmpty)
+                }
+                HStack {
+                    SecureField("Import passphrase (if encrypted)", text: $importPassphrase)
+                        .frame(width: 230)
+                    Button("Import...") { importStore() }
+                }
+            }
+
+            if let status {
+                Text(status)
+                    .font(Theme.Typography.captionSecondary)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .glassProminentButton()
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(Theme.Spacing.xLarge)
+        .frame(width: 420)
+    }
+
+    private func exportStore() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = exportPassphrase.isEmpty ? "parley-voiceprints.json" : "parley-voiceprints.enc"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try store.exportData(passphrase: exportPassphrase.isEmpty ? nil : exportPassphrase)
+            try data.write(to: url, options: .atomic)
+            status = "Exported \(store.voiceprints.count) speaker(s)."
+        } catch {
+            status = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importStore() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            let n = try store.importData(data, passphrase: importPassphrase.isEmpty ? nil : importPassphrase)
+            status = "Imported \(n) speaker(s)."
+        } catch {
+            status = "Import failed -- wrong passphrase or unreadable file."
+        }
     }
 }

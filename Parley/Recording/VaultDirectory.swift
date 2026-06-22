@@ -1333,8 +1333,13 @@ final class VaultDirectory: ObservableObject {
     /// - Parameters:
     ///   - side: When non-nil, use this placement instead of the company-derived default.
     ///           Nil preserves the existing inference behaviour for all pre-editor callers.
+    /// When `clearLinkedinIfEmpty` is `true` AND the passed `linkedin` field is empty,
+    /// the contact is written with NO linkedin URL (clears an existing one). When
+    /// `false` (the default, used by all enrichment/inferred paths), an empty `linkedin`
+    /// preserves whatever was already stored -- the historical preserve-on-empty behaviour.
     func upsertPerson(name rawName: String, title rawTitle: String, company rawCompany: String,
-                      linkedin rawLink: String, side explicitSide: Side? = nil) {
+                      linkedin rawLink: String, side explicitSide: Side? = nil,
+                      clearLinkedinIfEmpty: Bool = false) {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
         let titleTrimmed = rawTitle.trimmingCharacters(in: .whitespaces)
@@ -1386,15 +1391,16 @@ final class VaultDirectory: ObservableObject {
             if matchedByAlias {
                 // Preserve the canonical name + existing aliases; only update
                 // title/company/linkedin with the new data.
+                let aliasLink = (clearLinkedinIfEmpty && link == nil) ? nil : (link ?? existing.linkedin)
                 var merged = Contact(name: existing.name, company: company, side: side,
-                                     title: titleStr, linkedin: link ?? existing.linkedin)
+                                     title: titleStr, linkedin: aliasLink)
                 merged.aliases = existing.aliases
                 parsed[existingIdx] = merged
             } else {
                 // Matched by canonical name: replace, but preserve any existing aliases
                 // and linkedin if not provided.
                 let existingAliases = existing.aliases
-                let resolvedLink = link ?? existing.linkedin
+                let resolvedLink = (clearLinkedinIfEmpty && link == nil) ? nil : (link ?? existing.linkedin)
                 var updated = Contact(name: name, company: company, side: side,
                                       title: titleStr, linkedin: resolvedLink)
                 updated.aliases = existingAliases
