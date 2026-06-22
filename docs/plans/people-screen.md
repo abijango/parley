@@ -200,13 +200,26 @@ Derive from `voiceprints.filter { name ~= person }`:
 
 ## Sequencing (after the rolodex cleanup commits)
 
-1. `PeopleViewModel` join layer (Contact ⨝ Voiceprints by name) + unit tests. No UI.
-2. Read-only People list + detail (contact display + voiceprint status badges).
+1. [DONE] `PeopleViewModel` join layer (Contact ⨝ Voiceprints by name) + unit tests. No UI.
+2. [DONE] Read-only People list + detail (contact display + voiceprint status badges).
    Ship, validate the join against real data (52 prints / Rolodex).
-3. Editing: write-through `upsertPerson`, debounced save, single `renamePerson`
-   fan-out, company autocomplete.
-4. Migrate voiceprint management (rebuild/delete/play/export-import) into the
+3. [DONE 2026-06-21] Editing: write-through `upsertPerson`, debounced save, single `renamePerson`
+   fan-out, company autocomplete. Key files: VaultDirectory.swift (upsertPerson explicit
+   side + renameContact), RecordingController.swift (renamePerson fan-out),
+   PersonEditorView.swift (new), PeopleView.swift. Bug fixed: bare-company title doubling
+   (strippedTitle now handles title==company case). 300 tests, 0 failures.
+4. [DONE 2026-06-22] Migrate voiceprint management (rebuild/delete/play/export-import) into the
    detail pane; redirect Settings → Speakers.
+   - Part A (LinkedIn-clear): `upsertPerson` gained `clearLinkedinIfEmpty: Bool = false`; both
+     alias-match and canonical-match branches updated; `PersonEditorView.commitSave` passes `true`.
+     4 new unit tests in `VaultDirectoryTests.swift`.
+   - Part B (voiceprint migration): `PersonEditorView.swift` now has per-print delete
+     (confirmationDialog), rebuild WhisperKit from clip, re-enroll FluidAudio from clip (with
+     strict engine guard: never converts pyannote prints). `PeopleView.swift` gained
+     `VoiceprintTransferSheet` (export/import, moved verbatim from SpeakersSettings) and a
+     stale-voiceprint count indicator in the toolbar row (replaces old store-wide warning banner).
+     `SpeakersSettingsView.swift` replaced with redirect stub (same signature, no capability drop).
+     304 tests, 0 failures.
 5. Optional later: contact-only / voiceprint-only nudges; duplicate-name sidecar.
 
 ## Reuse, don't reinvent

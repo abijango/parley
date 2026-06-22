@@ -17,3 +17,6 @@ Package.resolved
 # Claude Code (machine-local settings)
 .claude/settings.local.json
 tools/MeetingProbe/probe.log
+
+# graphify knowledge-graph output
+graphify-out/
