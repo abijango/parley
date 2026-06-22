@@ -1323,11 +1323,18 @@ final class VaultDirectory: ObservableObject {
     ///    When matched by alias: preserve the canonical name, merge aliases + linkedin rather
     ///    than overwriting with the alias string -- avoids silent data loss.
     ///    When matched by canonical name: replace with new data.
-    /// 3. Determine side: if company matches an existing contact's company, inherit its side.
-    ///    Brand-new company -> .customer (attendees with a company are usually external).
-    ///    Empty company -> .other.
+    /// 3. Determine side: when `explicitSide` is non-nil use it directly (editor explicit
+    ///    placement); otherwise derive from company (inherit existing / brand-new -> .customer
+    ///    / empty company -> .other).
+    ///    Guard: empty company always forces .other regardless of explicitSide, so we never
+    ///    emit a ## Uncategorized internal section or a ## Customers entry with no company.
     /// 4. renderCanonical -> write -> refresh.
-    func upsertPerson(name rawName: String, title rawTitle: String, company rawCompany: String, linkedin rawLink: String) {
+    ///
+    /// - Parameters:
+    ///   - side: When non-nil, use this placement instead of the company-derived default.
+    ///           Nil preserves the existing inference behaviour for all pre-editor callers.
+    func upsertPerson(name rawName: String, title rawTitle: String, company rawCompany: String,
+                      linkedin rawLink: String, side explicitSide: Side? = nil) {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
         let titleTrimmed = rawTitle.trimmingCharacters(in: .whitespaces)
@@ -1341,12 +1348,17 @@ final class VaultDirectory: ObservableObject {
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         var parsed = Self.parseContacts(text)
 
-        // Determine side from company.
+        // Determine side.
+        // - Empty company always -> .other (guards against junk ## Uncategorized sections).
+        // - Explicit side overrides derivation when company is present.
+        // - Otherwise inherit from existing contacts for that company.
         let side: Side
-        if let co = company {
-            side = Self.sideFor(company: co, in: parsed)
-        } else {
+        if company == nil {
             side = .other
+        } else if let explicit = explicitSide {
+            side = explicit
+        } else {
+            side = Self.sideFor(company: company!, in: parsed)
         }
 
         // Build the title string: "Title, Company" or just "Title" when company is nil.
@@ -1401,6 +1413,109 @@ final class VaultDirectory: ObservableObject {
         let section = company ?? Self.otherSection
         AppLog.log("Upserted contact \(name) under \(section) in \(url.lastPathComponent)", category: "vault")
         refresh()
+    }
+
+    /// Rename a contact in place, preserving all fields (aliases, company, side, title, linkedin).
+    ///
+    /// Matches by canonical name OR alias (case-insensitive). When the target name matches
+    /// one of the contact's own aliases, that alias is removed from the aliases list so the
+    /// canonical name and alias do not collide.
+    ///
+    /// When `newName` already exists as a separate contact (a collision), the two entries are
+    /// merged using the same richness rules as normalize() -- richer fields win, alias sets
+    /// are unioned -- and the result is logged.
+    ///
+    /// No-op when `oldName` is not found in the file.
+    func renameContact(from oldName: String, to newName: String) {
+        let oldTrimmed = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newTrimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !oldTrimmed.isEmpty, !newTrimmed.isEmpty else { return }
+        guard oldTrimmed.lowercased() != newTrimmed.lowercased() else { return }
+
+        let url = settings.contactsURL
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        var parsed = Self.parseContacts(text)
+
+        let oldLower = oldTrimmed.lowercased()
+        let newLower = newTrimmed.lowercased()
+
+        // Find the contact to rename.
+        guard let sourceIdx = parsed.firstIndex(where: { c in
+            c.name.lowercased() == oldLower ||
+            c.aliases.contains(where: { $0.lowercased() == oldLower })
+        }) else {
+            AppLog.log("renameContact: no contact found matching \"\(oldTrimmed)\"", category: "vault")
+            return
+        }
+
+        var renamed = parsed[sourceIdx]
+        renamed = Contact(name: newTrimmed, company: renamed.company, side: renamed.side,
+                          title: renamed.title, linkedin: renamed.linkedin)
+        // Preserve aliases; drop any alias that now matches the new canonical name (avoid redundant aka).
+        let filteredAliases = parsed[sourceIdx].aliases.filter { $0.lowercased() != newLower }
+        renamed.aliases = filteredAliases
+
+        // Remove the source entry.
+        parsed.remove(at: sourceIdx)
+
+        // Check for a collision: another contact already has newName as canonical or alias.
+        if let collisionIdx = parsed.firstIndex(where: { c in
+            c.name.lowercased() == newLower ||
+            c.aliases.contains(where: { $0.lowercased() == newLower })
+        }) {
+            let collision = parsed[collisionIdx]
+            AppLog.log("renameContact: collision -- \"\(newTrimmed)\" already exists; merging", category: "vault")
+            let merged = Self.mergeRenameCollision(renamed, collision)
+            parsed[collisionIdx] = merged
+        } else {
+            parsed.append(renamed)
+        }
+
+        let rendered = Self.renderCanonical(parsed)
+        writeContacts(rendered, to: url)
+        AppLog.log("renameContact: \"\(oldTrimmed)\" -> \"\(newTrimmed)\" in \(url.lastPathComponent)", category: "vault")
+        refresh()
+    }
+
+    /// Merge two contacts that collided on a rename, preferring the richer entry.
+    /// Richness: linkedin > title > real company. Alias sets are unioned.
+    nonisolated private static func mergeRenameCollision(_ a: Contact, _ b: Contact) -> Contact {
+        func richness(_ c: Contact) -> Int {
+            var s = 0
+            if c.linkedin != nil { s += 4 }
+            if c.title    != nil { s += 2 }
+            if c.company  != nil && c.side != .other { s += 1 }
+            return s
+        }
+        let rich = richness(a) >= richness(b) ? a : b
+        let other = richness(a) >= richness(b) ? b : a
+
+        let mergedLinkedin = rich.linkedin ?? other.linkedin
+        let mergedTitle: String?
+        switch (rich.title, other.title) {
+        case (nil, nil):          mergedTitle = nil
+        case (let t?, nil):       mergedTitle = t
+        case (nil, let t?):       mergedTitle = t
+        case (let t1?, let t2?):  mergedTitle = t1.count >= t2.count ? t1 : t2
+        }
+        let mergedCompany = (rich.company != nil && rich.side != .other) ? rich.company : other.company
+        let mergedSide    = (rich.company != nil && rich.side != .other) ? rich.side    : other.side
+
+        let canonLower = rich.name.lowercased()
+        var aliasSet = Set<String>()
+        for alias in (a.aliases + b.aliases) {
+            let low = alias.lowercased()
+            if low != canonLower { aliasSet.insert(low) }
+        }
+        let allForms = (a.aliases + b.aliases)
+        let mergedAliases = aliasSet.sorted().map { key -> String in
+            allForms.first { $0.lowercased() == key } ?? key
+        }
+
+        var result = Contact(name: rich.name, company: mergedCompany, side: mergedSide,
+                             title: mergedTitle, linkedin: mergedLinkedin)
+        result.aliases = mergedAliases
+        return result
     }
 
     /// Returns the `Side` to use for a given company name, consulting the existing

@@ -548,4 +548,234 @@ final class VaultDirectoryTests: XCTestCase {
         XCTAssertEqual(r1.map { $0.name }, r2.map { $0.name },
                        "suggestMatches must be deterministic for identical input")
     }
+
+    // MARK: - upsertPerson with explicit side parameter
+
+    @MainActor
+    func testUpsertPersonExplicitSideInternal() throws {
+        let rolodex = ""
+        try withTempVault(rolodex: rolodex) { vault, url in
+            // A brand-new company would default to .customer, but we explicitly mark it Internal.
+            vault.upsertPerson(name: "Jane Doe", title: "CEO", company: "NewCo",
+                               linkedin: "", side: .internalTeam)
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            let jane = contacts.first { $0.name == "Jane Doe" }
+            XCTAssertNotNil(jane)
+            XCTAssertEqual(jane?.side, .internalTeam,
+                           "Explicit side:.internalTeam must be honoured for a brand-new company")
+            XCTAssertEqual(jane?.company, "NewCo")
+        }
+    }
+
+    @MainActor
+    func testUpsertPersonExplicitSideCustomer() throws {
+        let rolodex = ""
+        try withTempVault(rolodex: rolodex) { vault, url in
+            vault.upsertPerson(name: "Bob Smith", title: "VP", company: "ExternalCo",
+                               linkedin: "", side: .customer)
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            let bob = contacts.first { $0.name == "Bob Smith" }
+            XCTAssertEqual(bob?.side, .customer)
+        }
+    }
+
+    @MainActor
+    func testUpsertPersonEmptyCompanyForcesOtherRegardlessOfExplicitSide() throws {
+        // Empty company must always resolve to .other, even if caller passes side:.internalTeam.
+        let rolodex = ""
+        try withTempVault(rolodex: rolodex) { vault, url in
+            vault.upsertPerson(name: "Anon Person", title: "", company: "",
+                               linkedin: "", side: .internalTeam)
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            let person = contacts.first { $0.name == "Anon Person" }
+            XCTAssertEqual(person?.side, .other,
+                           "Empty company must always yield .other regardless of explicitSide")
+            XCTAssertNil(person?.company)
+        }
+    }
+
+    @MainActor
+    func testUpsertPersonRoundTripTitleDoesNotDouble() throws {
+        // Calling upsertPerson twice with the same title + company must not double the company suffix.
+        let rolodex = ""
+        try withTempVault(rolodex: rolodex) { vault, url in
+            vault.upsertPerson(name: "Alice Repeat", title: "Engineer", company: "Acme",
+                               linkedin: "", side: .customer)
+            // Re-upsert: the stored title is "Engineer, Acme"; we call with "Engineer" again.
+            // The editor strips the suffix before passing back, simulating the round-trip.
+            vault.upsertPerson(name: "Alice Repeat", title: "Engineer", company: "Acme",
+                               linkedin: "", side: .customer)
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            let alice = contacts.first { $0.name == "Alice Repeat" }
+            // Title as stored must NOT be "Engineer, Acme, Acme".
+            XCTAssertFalse(alice?.title?.contains("Acme, Acme") ?? false,
+                           "Re-upserting same title+company must not double the company suffix")
+        }
+    }
+
+    // MARK: - renameContact
+
+    @MainActor
+    func testRenameContactPreservesAllFields() throws {
+        let rolodex = "## Customers\n\n### Vanguard\n- [Alice Smith](https://linkedin.com/in/alice) (aka Ali) - Senior Engineer\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            vault.renameContact(from: "Alice Smith", to: "Alice Jones")
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            // Old name must be gone.
+            XCTAssertNil(contacts.first { $0.name == "Alice Smith" },
+                         "Old name should not appear after rename")
+            // New name should be present with all preserved fields.
+            let renamed = contacts.first { $0.name == "Alice Jones" }
+            XCTAssertNotNil(renamed, "Renamed contact must appear under new name")
+            XCTAssertEqual(renamed?.company, "Vanguard")
+            XCTAssertEqual(renamed?.side, .customer)
+            XCTAssertEqual(renamed?.linkedin, "https://linkedin.com/in/alice")
+            // Alias preserved.
+            XCTAssertTrue(renamed?.aliases.contains("Ali") ?? false,
+                          "Alias should be preserved across rename")
+        }
+    }
+
+    @MainActor
+    func testRenameContactByAlias() throws {
+        // Rename when oldName matches an alias, not the canonical name.
+        let rolodex = "## Intellias\n- **Christina Wharf-Bulsara** (aka Christina Wharf) - Director\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            // Rename using the alias "Christina Wharf" -> "Christina Jones"
+            vault.renameContact(from: "Christina Wharf", to: "Christina Jones")
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            // The canonical "Christina Wharf-Bulsara" entry should now be "Christina Jones"
+            let renamed = contacts.first { $0.name == "Christina Jones" }
+            XCTAssertNotNil(renamed, "Renaming by alias should rename the canonical entry")
+            XCTAssertEqual(renamed?.side, .internalTeam)
+            XCTAssertEqual(renamed?.title?.contains("Director") ?? false, true)
+        }
+    }
+
+    @MainActor
+    func testRenameContactDropsAliasWhenNewNameMatchesAlias() throws {
+        // If we rename to a name that is already listed as an alias, the alias should be dropped.
+        let rolodex = "## Other\n- **Bob Extended** (aka Bob) - Consultant\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            vault.renameContact(from: "Bob Extended", to: "Bob")
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            let renamed = contacts.first { $0.name == "Bob" }
+            XCTAssertNotNil(renamed)
+            // "Bob" alias should be removed since it's now the canonical name.
+            XCTAssertFalse(renamed?.aliases.contains("Bob") ?? false,
+                           "Alias matching new canonical name should be dropped")
+        }
+    }
+
+    @MainActor
+    func testRenameContactNoOpWhenNotFound() throws {
+        // No crash, no change when old name not found.
+        let rolodex = "## Other\n- **Real Person** - Consultant\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            vault.renameContact(from: "Ghost Person", to: "New Name")
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            XCTAssertEqual(contacts.count, 1)
+            XCTAssertEqual(contacts.first?.name, "Real Person",
+                           "File should be unchanged when oldName not found")
+        }
+    }
+
+    @MainActor
+    func testRenameContactMergesOnCollision() throws {
+        // When the newName already exists, the two contacts should be merged.
+        let rolodex = "## Other\n- **Alice Old** - Engineer\n- **Alice New** - Senior Engineer\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            vault.renameContact(from: "Alice Old", to: "Alice New")
+            let updated = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let contacts = VaultDirectory.parseContacts(updated)
+            // Should have exactly 1 contact after merge.
+            XCTAssertEqual(contacts.count, 1, "Collision rename should merge into one entry")
+            XCTAssertEqual(contacts.first?.name, "Alice New")
+        }
+    }
+
+    // MARK: - strippedTitle: bare-company round-trip (title == company stored by upsertPerson)
+
+    func testStrippedTitleHandlesBareCompanyCase() {
+        // upsertPerson stores just the company name in title when no title was provided.
+        // e.g. upsertPerson(title:"", company:"Acme") -> stored title = "Acme".
+        // strippedTitle must return "" so the editor shows an empty title field,
+        // preventing a re-save from producing "Acme, Acme".
+        XCTAssertEqual(
+            PersonEditorView.strippedTitle("Acme", company: "Acme"),
+            "",
+            "Bare-company title should strip to empty string"
+        )
+        // Case-insensitive: stored value may differ in case from company field.
+        XCTAssertEqual(
+            PersonEditorView.strippedTitle("acme", company: "Acme"),
+            "",
+            "Case-insensitive bare-company match should strip to empty string"
+        )
+    }
+
+    func testStrippedTitleHandlesTitlePlusCompany() {
+        // Normal case: "Engineer, Acme" -> "Engineer".
+        XCTAssertEqual(
+            PersonEditorView.strippedTitle("Engineer, Acme", company: "Acme"),
+            "Engineer"
+        )
+        // Nil company: title is returned as-is.
+        XCTAssertEqual(
+            PersonEditorView.strippedTitle("Engineer", company: nil),
+            "Engineer"
+        )
+        // Nil title: returns empty string.
+        XCTAssertEqual(
+            PersonEditorView.strippedTitle(nil, company: "Acme"),
+            ""
+        )
+    }
+
+    @MainActor
+    func testUpsertPersonNoTitleRoundTripDoesNotDoubleCompany() throws {
+        // Regression test for the bare-company doubling bug:
+        // When a contact has no real title, upsertPerson stores just the company name
+        // in the title field (the "else if let co" branch). If the editor reloads without
+        // stripping this, the next save produces "Acme, Acme".
+        //
+        // The contact must be in a named company section (not ## Other) so that
+        // parsing produces a non-nil company and the bare-company case is triggered.
+        let rolodex = "## Customers\n### Acme\n- **No Title Person**\n"
+        try withTempVault(rolodex: rolodex) { vault, url in
+            // upsertPerson with no title creates a stored title equal to just the company name.
+            vault.upsertPerson(name: "No Title Person", title: "", company: "Acme",
+                               linkedin: "", side: .customer)
+
+            // Verify that the stored title == company (this is the bare-company case).
+            let initial = vault.contacts.first { $0.name == "No Title Person" }
+            XCTAssertNotNil(initial)
+            XCTAssertEqual(initial?.company, "Acme")
+            XCTAssertEqual(initial?.title, "Acme",
+                           "Sanity: upsert stores company as title when no title given")
+
+            // Simulate editor load: strippedTitle must return "" for the bare-company case.
+            let editorTitle = PersonEditorView.strippedTitle(initial?.title, company: initial?.company)
+            XCTAssertEqual(editorTitle, "", "Editor must see empty title, not 'Acme'")
+
+            // Simulate save with empty title (what the editor would pass).
+            vault.upsertPerson(name: "No Title Person", title: editorTitle,
+                               company: "Acme", linkedin: "", side: .customer)
+
+            let afterSave = vault.contacts.first { $0.name == "No Title Person" }
+            XCTAssertNotNil(afterSave)
+            // Title should remain "Acme" (company fallback), NOT "Acme, Acme".
+            XCTAssertEqual(afterSave?.title, "Acme",
+                           "Title should not double to 'Acme, Acme' after round-trip save")
+            XCTAssertEqual(afterSave?.company, "Acme")
+        }
+    }
 }

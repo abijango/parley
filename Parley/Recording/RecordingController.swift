@@ -293,6 +293,44 @@ final class RecordingController: ObservableObject {
     /// so a person named under one engine is also recognised by the other. Idempotent:
     /// skips if a print for (name, targetModel) already exists. Best-effort and
     /// off-main — a failure or a missing extractor never affects the user's naming.
+    // MARK: - People: coordinated rename
+
+    /// Rename a person across both the Rolodex (VaultDirectory) and all matching
+    /// voiceprints (VoiceprintStore) in a single, coordinated operation.
+    ///
+    /// This is the ONLY place that touches both stores on a rename. The UI must call
+    /// this for name changes; never rename one store in isolation.
+    ///
+    /// Transcript-frontmatter propagation is out of scope (eventual consistency).
+    func renamePerson(from oldName: String, to newName: String) {
+        Self.renamePerson(from: oldName, to: newName, vault: vault, voiceprints: voiceprints)
+    }
+
+    /// Testable static core: takes explicit store references so tests can inject
+    /// temp instances without touching RecordingController.shared.
+    @MainActor
+    static func renamePerson(from oldName: String, to newName: String,
+                             vault: VaultDirectory, voiceprints: VoiceprintStore) {
+        let old = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let new = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !old.isEmpty, !new.isEmpty, old.lowercased() != new.lowercased() else { return }
+
+        // 1. Rename in Rolodex (no-op if contact not found).
+        vault.renameContact(from: old, to: new)
+
+        // 2. Rename every matching voiceprint (name match, case-insensitive).
+        //    Voiceprints have no alias field; match on name only.
+        let oldLower = old.lowercased()
+        let matching = voiceprints.voiceprints.filter { $0.name.lowercased() == oldLower }
+        for vp in matching {
+            voiceprints.rename(vp.id, to: new)
+        }
+        let vpCount = matching.count
+        AppLog.log("renamePerson: \"\(old)\" -> \"\(new)\" -- contact renamed; \(vpCount) voiceprint(s) renamed",
+                   category: "people")
+    }
+
+
     private func crossEnroll(name: String, clip: [Float], activeModel: String) async {
         let targetModel = activeModel == VoiceprintStore.embeddingModel
             ? VoiceprintStore.speakerKitEmbeddingModel    // active FluidAudio → add pyannote

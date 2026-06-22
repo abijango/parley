@@ -1,13 +1,14 @@
 import SwiftUI
 
 /// Top-level People screen: a master-detail split showing every known person
-/// from the joined Rolodex + Voiceprints stores. Read-only in v1.
+/// from the joined Rolodex + Voiceprints stores.
 struct PeopleView: View {
     @EnvironmentObject private var vault: VaultDirectory
     @ObservedObject var voiceprintStore: VoiceprintStore
 
     @State private var selection: String?   // Person.id (lowercased displayName)
     @State private var searchQuery = ""
+    @State private var isEditing = false
 
     // MARK: - Derived data
 
@@ -57,7 +58,10 @@ struct PeopleView: View {
                         ForEach(filteredPeople) { person in
                             PersonRow(person: person, isSelected: selection == person.id)
                                 .contentShape(Rectangle())
-                                .onTapGesture { selection = person.id }
+                                .onTapGesture {
+                                    if selection != person.id { isEditing = false }
+                                    selection = person.id
+                                }
                         }
                     }
                 }
@@ -79,6 +83,7 @@ struct PeopleView: View {
                     if let id = selection,
                        !filteredPeople.contains(where: { $0.id == id }) {
                         selection = nil
+                        isEditing = false
                     }
                 }
         }
@@ -108,7 +113,24 @@ struct PeopleView: View {
 
     @ViewBuilder private var detailPane: some View {
         if let person = selectedPerson {
-            PersonDetailView(person: person)
+            if isEditing {
+                PersonEditorView(
+                    person: person,
+                    onSave: { newDisplayName in
+                        // Keep selection stable after a rename.
+                        selection = newDisplayName.lowercased()
+                        isEditing = false
+                    },
+                    onCancel: {
+                        isEditing = false
+                    },
+                    voiceprintStore: voiceprintStore
+                )
+                .id(person.id)
+            } else {
+                PersonDetailView(person: person, onEdit: { isEditing = true })
+                    .id(person.id)
+            }
         } else {
             noSelectionPlaceholder
         }
@@ -168,6 +190,7 @@ private struct PersonRow: View {
 
 private struct PersonDetailView: View {
     let person: Person
+    let onEdit: () -> Void
     @State private var player = SamplePlayer()
 
     var body: some View {
@@ -190,12 +213,22 @@ private struct PersonDetailView: View {
                 Text(person.displayName)
                     .font(Theme.Typography.screenTitle)
                 sideLabel
+                Spacer()
+                Button("Edit") { onEdit() }
+                    .buttonStyle(.bordered)
+                    .font(Theme.Typography.caption)
             }
             if person.contact == nil {
-                Text("Not in Rolodex")
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(.tertiary)
-                    .italic()
+                HStack(spacing: Theme.Spacing.xSmall) {
+                    Text("Not in Rolodex")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(.tertiary)
+                        .italic()
+                    Button("Add to Rolodex") { onEdit() }
+                        .buttonStyle(.borderless)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.accent)
+                }
             } else {
                 contactMetadata
             }
