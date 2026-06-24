@@ -1411,8 +1411,56 @@ final class RecordingController: ObservableObject {
         metadataSyncTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 600_000_000)
             guard !Task.isCancelled else { return }
-            self?.rewriteLastTranscript(reason: "edited metadata")
+            self?.syncMetadataToTranscript()
         }
+    }
+
+    /// Update frontmatter + header lines only — NEVER regenerates the transcript body.
+    /// The on-disk body (written by the offline pass) is always at least as good as the
+    /// live engine timeline, so this preserves it verbatim.
+    private func syncMetadataToTranscript() {
+        guard let url = lastTranscriptURL else { return }
+        let liveTitle = meetingTitle.trimmingCharacters(in: .whitespaces)
+        let liveDest = destinationPath.trimmingCharacters(in: .whitespaces)
+        let names = TranscriptWriter.splitAttendees(attendees)
+
+        TranscriptWriter.updateFrontmatter(at: url) { m in
+            if !liveTitle.isEmpty { m.title = liveTitle }
+            if !liveDest.isEmpty { m.filing = liveDest }
+            m.attendees = names
+        }
+
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            let updated = Self.replaceHeaderLines(in: text, title: liveTitle, filing: liveDest, names: names)
+            if updated != text { try? updated.write(to: url, atomically: true, encoding: .utf8) }
+        }
+
+        vault.addPeople(names)
+        if !liveDest.isEmpty { vault.ensureDestination(liveDest) }
+        store.refresh()
+        transcriptRevision += 1
+        AppLog.log("Synced metadata (header only): \(url.lastPathComponent)", category: "record")
+    }
+
+    /// Replace the title heading, Filing line, and Attendees line in the body header
+    /// without touching anything from `## Transcript` onward.
+    private static func replaceHeaderLines(in text: String, title: String, filing: String, names: [String]) -> String {
+        var lines = text.components(separatedBy: "\n")
+
+        // Replace the first `# ` title heading (not `## `)
+        if !title.isEmpty,
+           let idx = lines.firstIndex(where: { $0.hasPrefix("# ") && !$0.hasPrefix("## ") }) {
+            lines[idx] = "# \(title)"
+        }
+
+        // Replace the `**Filing:**` line
+        if !filing.isEmpty,
+           let idx = lines.firstIndex(where: { $0.hasPrefix("**Filing:**") }) {
+            lines[idx] = "**Filing:** \(filing)"
+        }
+
+        // Replace the `**Attendees:**` line (reuse existing helper)
+        return replaceAttendeeHeader(in: lines.joined(separator: "\n"), with: names)
     }
 
     // MARK: Idle model unload
