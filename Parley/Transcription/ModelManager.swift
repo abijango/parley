@@ -227,16 +227,25 @@ final class ModelManager: ObservableObject {
             // Sentinel: if we crash during the compute-graph load below, this
             // flag survives and the next launch clears the corrupt cache.
             UserDefaults.standard.set(true, forKey: Self.loadInProgressKey)
+            // If the model is already on disk, point WhisperKit straight at the
+            // local folder so it never touches the network — even offline loads
+            // succeed. When the model is absent we let WhisperKit download it
+            // (the explicit WhisperKit.download() call above already ran, so
+            // this path is only hit on a genuine first-time load failure or if
+            // the download step was skipped by a future code path).
+            let present = isDownloaded(model)
+            let resolvedModelFolder: String? = present ? localFolder(for: model).path : nil
+            let resolvedDownload: Bool = !present
             let config = WhisperKitConfig(
                 model: model.rawValue,
                 downloadBase: AppPaths.modelsDirectory,
-                modelFolder: nil,
+                modelFolder: resolvedModelFolder,
                 computeOptions: Self.computeOptions(for: compute),
                 verbose: false,
                 logLevel: .error,
                 prewarm: false,
                 load: false,
-                download: true
+                download: resolvedDownload
             )
             let kit = try await WhisperKit(config)
             kit.modelStateCallback = { [weak self] _, newState in
