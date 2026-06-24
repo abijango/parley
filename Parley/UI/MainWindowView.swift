@@ -244,9 +244,17 @@ struct RecordDetailView: View {
             apps = ProcessLister.capturableApps()
             recording.launchWarmup()   // warm the model + surface both permission prompts up front
         }
-        // Auto-switch to the rendered note when a recording finishes writing it.
+        // Auto-switch to the rendered note when a recording finishes writing it —
+        // but never while a (new) recording is already live, so a back-to-back
+        // auto-started call isn't yanked to the previous call's preview.
         .onChange(of: recording.lastTranscriptURL) {
-            if recording.lastTranscriptURL != nil { mode = .preview }
+            if recording.lastTranscriptURL != nil, !recording.isRecording { mode = .preview }
+        }
+        // Any recording start (manual OR auto-detected) shows the live transcript.
+        // Auto-record used to leave the window on whatever it was (often the prior
+        // call's Preview), so live text appeared to be "missing" until you switched tabs.
+        .onChange(of: recording.isRecording) {
+            if recording.isRecording { mode = .live }
         }
         // At-stop "Assign speakers" review (FluidAudio).
         // Speaker review is opt-in (a footer button), not an auto-popup after every call.

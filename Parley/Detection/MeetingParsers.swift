@@ -58,21 +58,52 @@ enum MeetingParsers {
 
     // MARK: Teams roster (People pane open)
 
-    /// Rows under `AXOutline desc="Attendees"`, e.g.
-    /// `"Naufal Mir, Has context menu, Organizer, Muted"`. Section headers
-    /// ("In this meeting, 1 total") carry no "Has context menu" and are skipped.
+    /// Rows under `AXOutline desc="Attendees"`. The clean display name is each
+    /// row's first non-empty `AXStaticText` value; the row title carries the name
+    /// glued to status badges ("Oleksii Brodnikov, Unmuted") with the role, if any,
+    /// as a later badge or a sibling static text ("Organizer"). Section-header rows
+    /// ("In this meeting, 3 total", "Others invited, 2 total") carry an "N total"
+    /// count and are skipped.
+    ///
+    /// New Teams (2026) dropped the old "Has context menu" delimiter that used to
+    /// mark the name boundary, so we read the name from the static text instead and
+    /// fall back to the leading title segment. Tolerant of the old format too.
     static func teamsAttendees(_ nodes: [AXNode]) -> [RosterEntry] {
-        let roles: Set<String> = ["Organizer", "Presenter", "Attendee", "Guest", "External"]
+        let roles: Set<String> = ["Organizer", "Co-organizer", "Presenter", "Attendee", "Guest", "External", "Host"]
+        let slice = subtree(of: nodes, anchor: { $0.role == "AXOutline" && $0.desc == "Attendees" })
         var entries: [RosterEntry] = []
-        for row in subtree(of: nodes, anchor: { $0.role == "AXOutline" && $0.desc == "Attendees" })
-        where row.role == "AXRow" {
-            guard let text = row.title ?? row.desc else { continue }
-            let parts = text.components(separatedBy: ", ")
-            guard let menuIdx = parts.firstIndex(of: "Has context menu"), menuIdx > 0 else { continue }
-            // Names containing ", " keep their commas: everything before the marker.
-            let name = stripStatusBadges(parts[..<menuIdx].joined(separator: ", "))
-            let role = parts[(menuIdx + 1)...].first(where: roles.contains)
-            entries.append(RosterEntry(name: name, role: role))
+        var seen = Set<String>()
+        var i = slice.startIndex
+        while i < slice.endIndex {
+            let row = nodes[i]
+            guard row.role == "AXRow" else { i += 1; continue }
+            let rowDepth = row.depth
+            let title = row.title ?? row.desc ?? ""
+            // Section header ("In this meeting, 3 total" / "Others invited, 2 total").
+            if title.range(of: #"\d+\s+total"#, options: .regularExpression) != nil { i += 1; continue }
+
+            // The row's own subtree: depth strictly greater, up to the next sibling.
+            var j = i + 1
+            var name: String?
+            var role: String?
+            while j < slice.endIndex, nodes[j].depth > rowDepth {
+                let d = nodes[j]
+                if d.role == "AXStaticText", let v = d.value, !v.isEmpty {
+                    if name == nil { name = v }
+                    else if role == nil, roles.contains(v) { role = v }
+                }
+                j += 1
+            }
+            // Fallbacks from the title when a row carries no usable static text
+            // (older trees, or the legacy "Name, Has context menu, …" format).
+            let parts = title.components(separatedBy: ", ").filter { $0 != "Has context menu" }
+            if name == nil { name = parts.first }
+            if role == nil { role = parts.dropFirst().first(where: roles.contains) }
+
+            if let nm = name.map(stripStatusBadges), !nm.isEmpty, seen.insert(nm.lowercased()).inserted {
+                entries.append(RosterEntry(name: nm, role: role))
+            }
+            i = j   // skip past this row's subtree
         }
         return entries
     }

@@ -43,17 +43,49 @@ final class MeetingParsersTests: XCTestCase {
 
     // MARK: Teams roster
 
+    // New Teams (v26149, captured live 2026-06-24): row titles are "Name, status…"
+    // with NO "Has context menu" marker; the clean name is the row's AXStaticText
+    // value; section headers carry an "N total" count.
     func testTeamsAttendeesParsesRosterRows() {
+        let nodes = [
+            node("AXOutline", desc: "Attendees", depth: 18),
+            node("AXRow", title: "In this meeting, 3 total Mute all", depth: 19),  // header — skipped
+            node("AXGroup", desc: "In this meeting, 3 total", depth: 20),
+            node("AXStaticText", value: "In this meeting (3)", depth: 21),
+            node("AXRow", title: "Naufal Mir, Muted", depth: 19),
+            node("AXGroup", desc: "Naufal Mir, Muted", depth: 20),
+            node("AXStaticText", value: "Naufal Mir", depth: 22),
+            node("AXImage", desc: "Muted", depth: 21),
+            node("AXRow", title: "Oleksii Brodnikov, Unmuted", depth: 19),
+            node("AXStaticText", value: "Oleksii Brodnikov", depth: 22),
+            node("AXRow", title: "Others invited, 2 total", depth: 19),           // header — skipped
+            node("AXStaticText", value: "Others invited (2)", depth: 21),
+            node("AXRow", title: "Tetyana Nykologorska, Out of office, Tentative", depth: 19),
+            node("AXStaticText", value: "Tetyana Nykologorska", depth: 22),
+            node("AXStaticText", value: "Tentative", depth: 22),
+            node("AXRow", title: "Olga Ditmarova, In a meeting, Organizer", depth: 19),
+            node("AXStaticText", value: "Olga Ditmarova", depth: 22),
+            node("AXStaticText", value: "Organizer", depth: 22),
+            node("AXButton", desc: "Share invite", depth: 4),                     // outside the outline
+        ]
+        XCTAssertEqual(MeetingParsers.teamsAttendees(nodes), [
+            RosterEntry(name: "Naufal Mir", role: nil),
+            RosterEntry(name: "Oleksii Brodnikov", role: nil),
+            RosterEntry(name: "Tetyana Nykologorska", role: nil),
+            RosterEntry(name: "Olga Ditmarova", role: "Organizer"),
+        ])
+    }
+
+    // Legacy Teams format (pre-2026): "Name, Has context menu, Role, …" still parses.
+    func testTeamsAttendeesParsesLegacyRosterRows() {
         let nodes = [
             node("AXOutline", desc: "Attendees", depth: 5),
             node("AXRow", title: "In this meeting, 1 total", depth: 6),           // header — skipped
             node("AXRow", title: "Naufal Mir, Has context menu, Organizer, Muted", depth: 6),
             node("AXStaticText", value: "Naufal Mir", depth: 7),
             node("AXRow", title: "Jane Doe, Has context menu, Muted", depth: 6),  // no role segment
-            node("AXButton", desc: "Share invite", depth: 4),                     // outside the outline
         ]
-        let entries = MeetingParsers.teamsAttendees(nodes)
-        XCTAssertEqual(entries, [
+        XCTAssertEqual(MeetingParsers.teamsAttendees(nodes), [
             RosterEntry(name: "Naufal Mir", role: "Organizer"),
             RosterEntry(name: "Jane Doe", role: nil),
         ])
