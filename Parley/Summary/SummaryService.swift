@@ -599,6 +599,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             return nil
         }
         let moved = store.moveToProcessed(item, notePath: noteURL.path)
+        crossLink(summaryURL: noteURL, rawURL: moved)
         try? FileManager.default.removeItem(at: staged)
         jobs[item.id] = nil
         queue.removeAll { $0.id == item.id }
@@ -619,7 +620,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             AppLog.log("Summary: deleted session audio after filing", category: "summary")
         }
 
-        openInObsidian(noteURL)
         AppLog.log("Summary: committed \(noteURL.lastPathComponent) → \(dest.isEmpty ? "(vault root)" : dest)", category: "summary")
         store.refresh()
         return noteURL
@@ -639,11 +639,59 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         return lines.joined(separator: "\n") + "\n\n" + body
     }
 
-    private func openInObsidian(_ url: URL) {
-        if let obs = NotesGenerator.obsidianOpenURL(for: url, configuredVault: AppSettings.shared.vaultURL) {
-            NSWorkspace.shared.open(obs)
-        } else {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
+    // MARK: Cross-linking
+
+    /// Inserts/updates bidirectional Obsidian wiki-links between the summary note and the raw
+    /// transcript. Both operations are idempotent — re-committing won't duplicate lines.
+    private func crossLink(summaryURL: URL, rawURL: URL) {
+        let rawName = rawURL.deletingPathExtension().lastPathComponent
+        let summaryName = summaryURL.deletingPathExtension().lastPathComponent
+
+        // a) Summary note → raw transcript
+        if var text = try? String(contentsOf: summaryURL, encoding: .utf8) {
+            let linkLine = "**Raw transcript:** [[\(rawName)]]"
+            var lines = text.components(separatedBy: "\n")
+            if let idx = lines.firstIndex(where: { $0.hasPrefix("**Raw transcript:**") }) {
+                if lines[idx] != linkLine {
+                    lines[idx] = linkLine
+                    text = lines.joined(separator: "\n")
+                    try? text.write(to: summaryURL, atomically: true, encoding: .utf8)
+                }
+            } else {
+                // Append footer block
+                var footer = text
+                if footer.hasSuffix("\n") { footer += "\n---\n\n\(linkLine)\n" }
+                else { footer += "\n\n---\n\n\(linkLine)\n" }
+                try? footer.write(to: summaryURL, atomically: true, encoding: .utf8)
+            }
+        }
+
+        // b) Raw transcript → summary note
+        if var text = try? String(contentsOf: rawURL, encoding: .utf8) {
+            let linkLine = "**Summary note:** [[\(summaryName)]]"
+            var lines = text.components(separatedBy: "\n")
+            if let idx = lines.firstIndex(where: { $0.hasPrefix("**Summary note:**") }) {
+                if lines[idx] != linkLine {
+                    lines[idx] = linkLine
+                    text = lines.joined(separator: "\n")
+                    try? text.write(to: rawURL, atomically: true, encoding: .utf8)
+                }
+            } else {
+                // Insert after **Attendees:**, then **Date:**, then first # heading, else top.
+                let insertIdx: Int
+                if let idx = lines.firstIndex(where: { $0.hasPrefix("**Attendees:**") }) {
+                    insertIdx = idx + 1
+                } else if let idx = lines.firstIndex(where: { $0.hasPrefix("**Date:**") }) {
+                    insertIdx = idx + 1
+                } else if let idx = lines.firstIndex(where: { $0.hasPrefix("# ") && !$0.hasPrefix("## ") }) {
+                    insertIdx = idx + 1
+                } else {
+                    insertIdx = 0
+                }
+                lines.insert(linkLine, at: insertIdx)
+                text = lines.joined(separator: "\n")
+                try? text.write(to: rawURL, atomically: true, encoding: .utf8)
+            }
         }
     }
 }
