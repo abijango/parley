@@ -160,6 +160,8 @@ final class RecordingController: ObservableObject {
     /// recordings — serialized and idle-gated so it never competes with live recording.
     private(set) lazy var offlineService = OfflineProcessingService(
         models: models, voiceprints: voiceprints, store: store, vault: vault, summaryService: summaryService)
+    /// Merge-service: combines drop/rejoin recording legs into a single note (C1 stitch / C2 re-pass).
+    lazy var mergeService = MergeService(store: store, vault: vault, offline: offlineService)
     let callDetector = CallDetector()
     let metadataResolver = MeetingMetadataResolver()
 
@@ -1082,6 +1084,20 @@ final class RecordingController: ObservableObject {
         lastResult = isRecording
             ? "Speaker detection queued — runs when the current recording stops."
             : "Detecting speakers…"
+    }
+
+    /// Combine two or more drop/rejoin recording legs into a single note.
+    ///
+    /// Thin wrapper over `mergeService.merge`; mirrors the pattern of `reprocessSpeakers`.
+    /// The caller is responsible for presenting the result to the user (the returned URL is
+    /// the combined/seed note, or nil on failure).
+    ///
+    /// - Parameters:
+    ///   - items: The recording legs to combine (any order; sorted internally by date).
+    ///   - backend: Override the merge strategy; nil = auto (C2 when all audio is present, else C1).
+    /// - Returns: The URL of the combined or seed note, or nil on failure.
+    func combineRecordings(_ items: [TranscriptItem], backend: MergeBackend?) async -> URL? {
+        await mergeService.merge(items, backend: backend)
     }
 
     /// Add an attendee to an already-saved transcript — e.g. someone present who

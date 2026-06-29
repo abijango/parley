@@ -6,3 +6,4 @@
 - [Rolodex schema + parser details](rolodex-schema.md) — Contact/Side shape, parser state machine, near-dup fix, normalize name collision, real-file preview stats
 - [PeopleJoin architecture](people-join-arch.md) — Person struct + PeopleJoin enum location, engine-label map, voiceprint test fixture pattern
 - [strippedTitle test setup](feedback-stripped-title-test-setup.md) — bare-company test must use named company section, not ## Other (which sets company=nil)
+- [MergeService patterns](merge-service-patterns.md) — API symbols, file-ordering pitfalls, C2 manifest must be .finalized, Task.detached for concat, OfflineJob flags

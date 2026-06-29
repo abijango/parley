@@ -54,10 +54,16 @@ enum AppPaths {
         appVaultFolderURL(vault: vault).appendingPathComponent(".staging", isDirectory: true)
     }
 
-    /// Creates the Unprocessed/Processed folders (and the parent) if missing.
+    /// `<vault>/<App>/Merged` — source notes moved during merge (recoverable).
+    static func mergedURL(vault: URL) -> URL {
+        appVaultFolderURL(vault: vault).appendingPathComponent("Merged", isDirectory: true)
+    }
+
+    /// Creates the Unprocessed/Processed/Merged folders (and the parent) if missing.
     static func ensureVaultFolders(vault: URL) {
         ensureDirectory(unprocessedURL(vault: vault))
         ensureDirectory(processedURL(vault: vault))
+        ensureDirectory(mergedURL(vault: vault))
     }
 
     // MARK: @MainActor conveniences reading the current vault from settings
@@ -66,5 +72,6 @@ enum AppPaths {
     @MainActor static var unprocessedURL: URL { unprocessedURL(vault: AppSettings.shared.vaultURL) }
     @MainActor static var processedURL: URL { processedURL(vault: AppSettings.shared.vaultURL) }
     @MainActor static var stagingURL: URL { stagingURL(vault: AppSettings.shared.vaultURL) }
+    @MainActor static var mergedURL: URL { mergedURL(vault: AppSettings.shared.vaultURL) }
     @MainActor static func ensureVaultFolders() { ensureVaultFolders(vault: AppSettings.shared.vaultURL) }
 }

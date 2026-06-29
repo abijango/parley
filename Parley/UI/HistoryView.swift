@@ -39,12 +39,15 @@ struct HistoryView: View {
         case refile([TranscriptItem])
         case delete([TranscriptItem])
         case combine([TranscriptItem])
+        /// New MergeService-backed "Combine with…" for a single base item.
+        case merge(TranscriptItem)
         var id: String {
             switch self {
             case .rename(let i): return "rename:\(i.id)"
             case .refile(let items): return "refile:\(items.map(\.id).joined(separator: "|"))"
             case .delete(let items): return "delete:\(items.map(\.id).joined(separator: "|"))"
             case .combine(let items): return "combine:\(items.map(\.id).joined(separator: "|"))"
+            case .merge(let i): return "merge:\(i.id)"
             }
         }
     }
@@ -147,6 +150,7 @@ struct HistoryView: View {
             case .refile(let items): refileSheet(items)
             case .delete(let items): deleteSheet(items)
             case .combine(let items): combineSheet(items)
+            case .merge(let item): mergeSheetView(item)
             }
         }
     }
@@ -251,6 +255,7 @@ struct HistoryView: View {
         if targets.count == 1 {
             queueActions(item)
             Button("Rename…") { beginRename(item) }
+            Button("Combine with…") { beginMerge(item) }
         }
         Button("Refile…") { beginRefile(targets) }
         if targets.count > 1 {
@@ -658,6 +663,12 @@ struct HistoryView: View {
 
             addAttendeeButton(item)
 
+            Button { beginMerge(item) } label: {
+                Label("Combine with\u{2026}", systemImage: "arrow.triangle.merge")
+            }
+            .glassButton()
+            .help("Combine this recording with another leg of the same call")
+
             if audioAvailable(item) {
                 if item.hasUnnamedSpeakers {
                     Button { detectSpeakers(item) } label: {
@@ -838,6 +849,43 @@ struct HistoryView: View {
         combineDraft = items.min { $0.meta.date < $1.meta.date }?.meta.title ?? ""
         combineTrashOriginals = false
         fileOp = .combine(items)
+    }
+
+    private func beginMerge(_ item: TranscriptItem) {
+        fileOp = .merge(item)
+    }
+
+    /// Present MergeSheet as a sheet body when fileOp == .merge(item).
+    private func mergeSheetView(_ item: TranscriptItem) -> some View {
+        // All other items are candidates; sort by date so the picker is in order.
+        let candidates = store.items
+            .filter { $0.id != item.id }
+            .sorted { $0.meta.date < $1.meta.date }
+        // Pre-select the most likely sibling: adjacent item with the same trimmed
+        // case-insensitive title within 5 minutes of this item's date.
+        let baseTitle = item.meta.title.trimmingCharacters(in: .whitespaces).lowercased()
+        let siblingWindow: TimeInterval = 5 * 60
+        let preselected: Set<TranscriptItem.ID> = Set(
+            candidates.filter { candidate in
+                let titleMatches = candidate.meta.title
+                    .trimmingCharacters(in: .whitespaces)
+                    .lowercased() == baseTitle
+                let timeDelta = abs(candidate.meta.date.timeIntervalSince(item.meta.date))
+                return titleMatches && timeDelta <= siblingWindow
+            }.map(\.id)
+        )
+        return MergeSheet(
+            base: item,
+            candidates: candidates,
+            initialSelection: preselected,
+            recording: recording
+        ) { resultURL in
+            fileOp = nil
+            guard let url = resultURL else { return }
+            // Switch to All tab so the newly created unprocessed note is visible.
+            if filter != .all { filter = .all }
+            selection = [url.path]
+        }
     }
 
     private func renameSheet(_ item: TranscriptItem) -> some View {
