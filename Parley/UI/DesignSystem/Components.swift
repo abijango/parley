@@ -51,6 +51,37 @@ struct StatusBanner: View {
     }
 }
 
+/// A thin horizontal input-level meter: a labeled track whose fill is proportional
+/// to `level` (0…1). Uses the accent color normally and the danger color when
+/// `warn` is set (e.g. a mic that has gone silent mid-call).
+struct InputLevelBar: View {
+    let label: String
+    let level: Float
+    var warn: Bool = false
+
+    var body: some View {
+        HStack(spacing: Theme.Spacing.small) {
+            Text(label)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .leading)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary)
+                    Capsule()
+                        .fill(warn ? Theme.Severity.danger.color : Color.accentColor)
+                        .frame(width: max(2, geo.size.width * CGFloat(min(1, max(0, level)))))
+                }
+            }
+            .frame(height: 4)
+            .animation(.linear(duration: 0.08), value: level)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(warn ? "silent" : "\(Int(min(1, max(0, level)) * 100)) percent")
+    }
+}
+
 /// A small capsule status badge (e.g. Review / Processed / Unprocessed, or a count).
 /// Consolidates the History status badge and the sidebar count badge.
 struct StatusBadge: View {

@@ -51,6 +51,17 @@ final class RecordingController: ObservableObject {
     /// Live capture levels (0…1) for the meters, while recording.
     @Published private(set) var micLevel: Float = 0
     @Published private(set) var remoteLevel: Float = 0
+    /// True while the remote (call) track is carrying audio but the mic has stayed
+    /// effectively silent for a sustained stretch — the classic "wrong input device
+    /// / muted mic" case where *your* half of the conversation is being lost.
+    /// Drives a live advisory banner and turns the mic meter red. Self-clearing:
+    /// the moment the mic registers audio again it drops back to false.
+    @Published private(set) var micSeemsSilent: Bool = false
+
+    /// Silent-mic heuristic thresholds (on the 0…1 smoothed meter scale).
+    private static let micSilenceFloor: Float = 0.03    // at/under this the mic is effectively silent
+    private static let remoteActiveFloor: Float = 0.06  // over this the call track has real audio
+    private static let silenceGrace: TimeInterval = 12   // how long the mic may stay silent before warning
 
     /// Permission state surfaced after launch warmup, so the UI can show a
     /// persistent "fix this" banner instead of only failing at record time.
@@ -176,6 +187,10 @@ final class RecordingController: ObservableObject {
     private var sessionDirectory: URL?
     private var recordingStartDate: Date?
     private var meterTimer: Timer?
+    /// Last time (wall clock) the mic / remote meters exceeded their activity floor,
+    /// for the silent-mic heuristic. Nil until the meter timer starts.
+    private var micLastActive: Date?
+    private var remoteLastActive: Date?
     private var partialTimer: Timer?
     /// Fires after a stretch of inactivity to unload the model and reclaim RAM.
     private var idleUnloadTimer: Timer?
@@ -750,13 +765,29 @@ final class RecordingController: ObservableObject {
     // MARK: Meters + crash-recovery autosave
 
     private func startMeterTimer() {
+        micLastActive = Date(); remoteLastActive = nil; micSeemsSilent = false
         meterTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.micLevel = self.micCapture?.level ?? 0
                 self.remoteLevel = self.systemCapture?.level ?? 0
+                self.evaluateMicSilence()
             }
         }
+    }
+
+    /// Warn when the call track has audio but the mic has produced essentially
+    /// nothing for `silenceGrace` seconds — a dead/muted mic or the wrong input
+    /// device selected. Self-clearing: any real mic level resets the timer and the
+    /// warning. Suppressed when the mic is outright denied (a separate banner
+    /// already covers that).
+    private func evaluateMicSilence() {
+        let now = Date()
+        if micLevel >= Self.micSilenceFloor { micLastActive = now }
+        if remoteLevel >= Self.remoteActiveFloor { remoteLastActive = now }
+        let remoteActiveRecently = remoteLastActive.map { now.timeIntervalSince($0) < 4 } ?? false
+        let micSilentFor = micLastActive.map { now.timeIntervalSince($0) } ?? 0
+        micSeemsSilent = !micDenied && remoteActiveRecently && micSilentFor >= Self.silenceGrace
     }
 
     private func startPartialTimer() {
@@ -769,6 +800,7 @@ final class RecordingController: ObservableObject {
         meterTimer?.invalidate(); meterTimer = nil
         partialTimer?.invalidate(); partialTimer = nil
         micLevel = 0; remoteLevel = 0
+        micSeemsSilent = false; micLastActive = nil; remoteLastActive = nil
     }
 
     /// Periodically dumps the confirmed transcript to a `.partial` file so a

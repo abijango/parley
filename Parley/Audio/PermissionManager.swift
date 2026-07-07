@@ -47,6 +47,13 @@ enum PermissionManager {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy")
     }
 
+    /// Opens System Settings → Sound, where the input device is chosen. Parley
+    /// records from the system *default* input, so a silent mic is usually the
+    /// wrong device selected here rather than a denied permission.
+    static func openSoundSettings() {
+        open("x-apple.systempreferences:com.apple.Sound-Settings.extension")
+    }
+
     // MARK: Accessibility (meeting-metadata discovery)
 
     /// Accessibility (AX) trust — used to read meeting titles/rosters from

@@ -333,6 +333,7 @@ struct RecordDetailView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             recordButton
             timerView
+            levelMeters
             audioControls
 
             statusRow
@@ -416,6 +417,12 @@ struct RecordDetailView: View {
                          symbol: "speaker.slash.fill",
                          actionLabel: "Open Settings", action: PermissionManager.openPrivacySettings)
         }
+        if recording.micSeemsSilent {
+            StatusBanner(.danger,
+                         "Your mic has been silent while the call has audio — check the input device.",
+                         symbol: "mic.slash.fill",
+                         actionLabel: "Sound Settings", action: PermissionManager.openSoundSettings)
+        }
         if let advisory = models.memoryAdvisory {
             StatusBanner(.warning, advisory, symbol: "memorychip")
         }
@@ -488,6 +495,19 @@ struct RecordDetailView: View {
                     .contentTransition(.numericText())
             }
             .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    /// Live mic + remote input levels, shown only while recording so a dead or
+    /// wrong input device is visible at a glance. The mic bar turns red when the
+    /// sustained-silence heuristic (`micSeemsSilent`) trips.
+    @ViewBuilder private var levelMeters: some View {
+        if recording.isRecording {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+                InputLevelBar(label: "Mic", level: recording.micLevel, warn: recording.micSeemsSilent)
+                InputLevelBar(label: "Remote", level: recording.remoteLevel)
+            }
+            .frame(maxWidth: .infinity)
         }
     }
 
