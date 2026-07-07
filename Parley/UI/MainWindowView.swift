@@ -579,6 +579,11 @@ struct RecordDetailView: View {
                         recording.scheduleMetadataSync()
                         recording.userInteracted()
                     }
+                if !attendeesBinding.wrappedValue.isEmpty {
+                    Button("Clear all attendees") { recording.attendees = "" }
+                        .buttonStyle(.chip)
+                        .help("Remove every attendee (call suggestions below are kept)")
+                }
                 SuggestionChips(recording: recording)
             }
         }

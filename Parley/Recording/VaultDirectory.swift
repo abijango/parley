@@ -1315,6 +1315,31 @@ final class VaultDirectory: ObservableObject {
         upsertPerson(name: rawName, title: rawTitle, company: rawCompany, linkedin: rawLink)
     }
 
+    /// Delete Rolodex contacts by display name (case-insensitive, matched on the canonical
+    /// name). Used by the People tab to purge polluted/junk entries — e.g. speaker-split
+    /// "Rosen"/"Adam" fragments that leaked in via `addPeople`. Removes ONLY the contact
+    /// record; a voiceprint enrolled for the same name is left untouched. No-op when nothing
+    /// matches, so a stray call can't rewrite the file needlessly. Returns the count removed.
+    @discardableResult
+    func removePeople(_ rawNames: [String]) -> Int {
+        let targets = Set(rawNames
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty })
+        guard !targets.isEmpty else { return 0 }
+
+        let url = settings.contactsURL
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let parsed = Self.parseContacts(text)
+        let kept = parsed.filter { !targets.contains($0.name.lowercased()) }
+        let removed = parsed.count - kept.count
+        guard removed > 0 else { return 0 }
+
+        writeContacts(Self.renderCanonical(kept), to: url)
+        AppLog.log("Removed \(removed) contact(s) from \(url.lastPathComponent)", category: "vault")
+        refresh()
+        return removed
+    }
+
     /// Idempotent relocate/insert for a rich contact entry using parse->mutate->render.
     ///
     /// Algorithm:

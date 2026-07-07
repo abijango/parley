@@ -1125,11 +1125,34 @@ final class RecordingController: ObservableObject {
         AppLog.log("Added attendee \(name) to \(url.lastPathComponent)", category: "history")
     }
 
+    /// Overwrite a transcript's whole attendee list (frontmatter + body header), used by
+    /// the History attendees editor. Mirrors `addAttendeeToTranscript` but REPLACES rather
+    /// than appends; an empty list clears the field in both places. Trims/dedupes so a
+    /// stray blank or duplicate never lands in the note.
+    func setAttendees(on url: URL, to names: [String]) {
+        var clean: [String] = []
+        for n in names.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }) where !n.isEmpty {
+            if !clean.contains(where: { $0.caseInsensitiveCompare(n) == .orderedSame }) { clean.append(n) }
+        }
+        TranscriptWriter.updateFrontmatter(at: url) { $0.attendees = clean }
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            let updated = Self.replaceAttendeeHeader(in: text, with: clean)
+            if updated != text { try? updated.write(to: url, atomically: true, encoding: .utf8) }
+        }
+        vault.addPeople(clean)
+        store.refresh()
+        transcriptRevision += 1
+        AppLog.log("Set attendees on \(url.lastPathComponent): \(clean.count)", category: "history")
+    }
+
     /// Replace (or insert after the Date line) the body "**Attendees:**" header so it
-    /// matches the frontmatter list.
+    /// matches the frontmatter list. An empty list removes the header line entirely.
     private static func replaceAttendeeHeader(in text: String, with names: [String]) -> String {
-        guard !names.isEmpty else { return text }
         var lines = text.components(separatedBy: "\n")
+        guard !names.isEmpty else {
+            lines.removeAll { $0.hasPrefix("**Attendees:**") }
+            return lines.joined(separator: "\n")
+        }
         let line = "**Attendees:** \(names.joined(separator: ", "))"
         if let idx = lines.firstIndex(where: { $0.hasPrefix("**Attendees:**") }) {
             lines[idx] = line

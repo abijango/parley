@@ -11,6 +11,14 @@ struct PeopleView: View {
     @State private var searchQuery = ""
     @State private var isEditing = false
 
+    // Bulk-delete mode: a toolbar toggle turns rows into checkboxes so many polluted
+    // contacts can be purged at once. `pendingDeletion` carries the display names into
+    // the confirmation dialog (shared by the bulk button and the per-row context menu).
+    @State private var isSelecting = false
+    @State private var checked: Set<String> = []
+    @State private var pendingDeletion: [String] = []
+    @State private var confirmDelete = false
+
     // MARK: - Store-wide voiceprint export/import state (migrated from SpeakersSettingsView)
 
     @State private var showVoiceprintTransfer = false
@@ -50,6 +58,45 @@ struct PeopleView: View {
         .sheet(isPresented: $showVoiceprintTransfer) {
             VoiceprintTransferSheet(store: voiceprintStore)
         }
+        .confirmationDialog(deletePrompt, isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { performDelete() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This removes the contact record from your Rolodex. Any enrolled voiceprint is kept.")
+        }
+    }
+
+    // MARK: - Delete
+
+    /// Display names of checked people that actually have a Rolodex record (voiceprint-only
+    /// people have nothing to remove, so they're excluded from the count and the action).
+    private func deletableNames(in ids: Set<String>) -> [String] {
+        allPeople.filter { ids.contains($0.id) && $0.contact != nil }.map(\.displayName)
+    }
+
+    private var deletePrompt: String {
+        pendingDeletion.count == 1
+            ? "Delete “\(pendingDeletion[0])” from your Rolodex?"
+            : "Delete \(pendingDeletion.count) people from your Rolodex?"
+    }
+
+    private func toggleChecked(_ id: String) {
+        if checked.contains(id) { checked.remove(id) } else { checked.insert(id) }
+    }
+
+    private func requestDelete(_ names: [String]) {
+        guard !names.isEmpty else { return }
+        pendingDeletion = names
+        confirmDelete = true
+    }
+
+    private func performDelete() {
+        let removed = pendingDeletion.map { $0.lowercased() }
+        vault.removePeople(pendingDeletion)
+        if let sel = selection, removed.contains(sel) { selection = nil; isEditing = false }
+        checked.removeAll()
+        isSelecting = false
+        pendingDeletion = []
     }
 
     // MARK: - List pane
@@ -64,12 +111,31 @@ struct PeopleView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(filteredPeople) { person in
-                            PersonRow(person: person, isSelected: selection == person.id)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
+                            HStack(spacing: 0) {
+                                if isSelecting {
+                                    Image(systemName: checked.contains(person.id) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(checked.contains(person.id) ? Theme.Palette.accent : .secondary)
+                                        .font(Theme.Typography.body)
+                                        .padding(.leading, Theme.Spacing.medium)
+                                }
+                                PersonRow(person: person, isSelected: !isSelecting && selection == person.id)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if isSelecting {
+                                    toggleChecked(person.id)
+                                } else {
                                     if selection != person.id { isEditing = false }
                                     selection = person.id
                                 }
+                            }
+                            .contextMenu {
+                                if person.contact != nil {
+                                    Button("Delete “\(person.displayName)” from Rolodex…", role: .destructive) {
+                                        requestDelete([person.displayName])
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -129,15 +195,41 @@ struct PeopleView: View {
                 }
                 .help("\(staleCount) voiceprint\(staleCount == 1 ? "" : "s") use an outdated model and won't match until re-enrolled. Select each person to re-enroll.")
             }
-            Button {
-                showVoiceprintTransfer = true
-            } label: {
-                Label("Backup", systemImage: "arrow.up.arrow.down.circle")
-                    .font(Theme.Typography.caption)
-                    .labelStyle(.iconOnly)
+            if isSelecting {
+                Button("Delete (\(checked.count))", role: .destructive) {
+                    requestDelete(deletableNames(in: checked))
+                }
+                .buttonStyle(.borderless)
+                .disabled(deletableNames(in: checked).isEmpty)
+                .help("Delete the checked people from your Rolodex")
+                Button("Done") {
+                    isSelecting = false
+                    checked.removeAll()
+                }
+                .buttonStyle(.borderless)
+                .font(Theme.Typography.caption)
+            } else {
+                Button {
+                    isSelecting = true
+                    selection = nil
+                    isEditing = false
+                } label: {
+                    Label("Select", systemImage: "checkmark.circle")
+                        .font(Theme.Typography.caption)
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .help("Select multiple people to delete")
+                Button {
+                    showVoiceprintTransfer = true
+                } label: {
+                    Label("Backup", systemImage: "arrow.up.arrow.down.circle")
+                        .font(Theme.Typography.caption)
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .help("Export or import voiceprints for backup and transfer")
             }
-            .buttonStyle(.borderless)
-            .help("Export or import voiceprints for backup and transfer")
         }
         .padding(.horizontal, Theme.Spacing.medium)
         .padding(.vertical, Theme.Spacing.xSmall)

@@ -56,6 +56,18 @@ enum MeetingParsers {
         return words.joined(separator: " ")
     }
 
+    /// New Teams can render names surname-first ("Rosen, Adam"). Flip to natural
+    /// order so no comma survives in a name — attendees are stored comma-delimited
+    /// downstream (see `TranscriptWriter.splitAttendees`), and a comma would split
+    /// one person into two chips. Only flips a clean two-part "Last, First"; anything
+    /// else (no comma, extra commas, an empty side) is returned untouched.
+    static func normalizeDisplayName(_ name: String) -> String {
+        let parts = name.components(separatedBy: ", ")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return name }
+        return "\(parts[1]) \(parts[0])"
+    }
+
     // MARK: Teams roster (People pane open)
 
     /// Rows under `AXOutline desc="Attendees"`. The clean display name is each
@@ -100,7 +112,8 @@ enum MeetingParsers {
             if name == nil { name = parts.first }
             if role == nil { role = parts.dropFirst().first(where: roles.contains) }
 
-            if let nm = name.map(stripStatusBadges), !nm.isEmpty, seen.insert(nm.lowercased()).inserted {
+            if let nm = name.map({ normalizeDisplayName(stripStatusBadges($0)) }),
+               !nm.isEmpty, seen.insert(nm.lowercased()).inserted {
                 entries.append(RosterEntry(name: nm, role: role))
             }
             i = j   // skip past this row's subtree

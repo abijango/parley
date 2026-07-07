@@ -28,7 +28,13 @@ struct TokenField: View {
                 inputField
             }
             .padding(Theme.Spacing.xSmall)
-            .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 22, alignment: .topLeading)
+            // Take the full chip height and refuse vertical compression: in the
+            // inspector VStack, `notesField` claims all leftover height, so a short
+            // window would otherwise squeeze this field below its content and the
+            // chips would paint over the "Attendees"/"Suggested" labels. The deficit
+            // now goes to `notesField`, which scrolls internally.
+            .fixedSize(horizontal: false, vertical: true)
             // Measure the BOX width — always the available width, because the frame
             // above is `maxWidth: .infinity` — and feed it back (minus the horizontal
             // padding) as FlowLayout's wrap width. Measuring the constrained box, NOT

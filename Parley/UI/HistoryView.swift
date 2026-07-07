@@ -607,6 +607,7 @@ struct HistoryView: View {
                 .menuStyle(.borderlessButton).fixedSize()
                 .help("Rename, refile, or delete this meeting")
             }
+            attendeesEditor(item)
             filesStrip(item)
             if item.hasUnnamedSpeakers {
                 StatusBanner(.warning,
@@ -626,14 +627,40 @@ struct HistoryView: View {
         .padding(Theme.Spacing.large)
     }
 
+    /// Editable attendee list for a filed/processed call. Writes straight through to the
+    /// transcript's frontmatter + body header via `setAttendees`, so a polluted list (e.g.
+    /// speaker-split "Rosen"/"Adam" duplicates) can be cleaned without opening the file.
+    /// Persisted immediately on every add/remove — there is no separate "Save".
+    @ViewBuilder private func attendeesEditor(_ item: TranscriptItem) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+            Text("Attendees").font(Theme.Typography.fieldLabel).foregroundStyle(.secondary)
+            TokenField(tokens: attendeesBinding(for: item),
+                       completions: vault.people,
+                       placeholder: "Add attendees",
+                       onCreateNew: { name in
+                           recording.setAttendees(on: item.url, to: item.meta.attendees + [name])
+                       })
+            if !item.meta.attendees.isEmpty {
+                Button("Clear all attendees") { recording.setAttendees(on: item.url, to: []) }
+                    .buttonStyle(.chip)
+                    .help("Remove every attendee from this meeting")
+            }
+        }
+    }
+
+    /// Reads the item's current attendees; every mutation persists through `setAttendees`,
+    /// which refreshes the store so the detail re-renders from the freshly-written note.
+    private func attendeesBinding(for item: TranscriptItem) -> Binding<[String]> {
+        Binding(
+            get: { item.meta.attendees },
+            set: { recording.setAttendees(on: item.url, to: $0) }
+        )
+    }
+
     private func metadataLine(_ item: TranscriptItem) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
             Text(Self.dateString(item.meta.date))
                 .font(Theme.Typography.caption).foregroundStyle(.secondary)
-            if !item.meta.attendees.isEmpty {
-                Text("Attendees: \(item.meta.attendees.joined(separator: ", "))")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
-            }
             if !item.meta.filing.trimmingCharacters(in: .whitespaces).isEmpty {
                 Text("Filing: \(item.meta.filing)")
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
