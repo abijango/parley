@@ -11,14 +11,8 @@ struct MainWindowView: View {
     @State private var selection: SidebarSection? = .record
     @State private var showingRecovery = false
     @AppStorage("parley.sidebarCollapsed") private var sidebarCollapsed = false
-
-    /// Badge on the History nav item: notes needing the user (unassigned speakers,
-    /// summaries to review, failures) — matching the "Needs you" tab.
-    private var historyBadge: Int {
-        store.items.filter {
-            PipelineStage.derive(item: $0, offline: offline, summary: summaryService).needsYou
-        }.count
-    }
+    /// Cached count for the History nav badge — recomputed only when store/offline/summary change.
+    @State private var historyBadge = 0
 
     enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
         case record = "Record", history = "History", people = "People"
@@ -99,7 +93,17 @@ struct MainWindowView: View {
         }
         .onAppear {
             if !recording.pendingRecoveries.isEmpty { showingRecovery = true }
+            refreshHistoryBadge()
         }
+        .onChange(of: store.items) { refreshHistoryBadge() }
+        .onReceive(offline.objectWillChange) { _ in refreshHistoryBadge() }
+        .onReceive(summaryService.objectWillChange) { _ in refreshHistoryBadge() }
+    }
+
+    private func refreshHistoryBadge() {
+        historyBadge = store.items.filter {
+            PipelineStage.derive(item: $0, offline: offline, summary: summaryService).needsYou
+        }.count
     }
 
     /// Navigation sidebar (Record / History) with Settings pinned at the bottom.
@@ -182,7 +186,9 @@ private struct WindowConfigurator: NSViewRepresentable {
         DispatchQueue.main.async { configure(nsView.window) }
     }
     private func configure(_ window: NSWindow?) {
-        window?.titleVisibility = .hidden
+        guard let window else { return }
+        window.titleVisibility = .hidden
+        window.title = ""
     }
 }
 
@@ -190,6 +196,8 @@ private struct WindowConfigurator: NSViewRepresentable {
 /// the live transcription stream filling the body, and a result/footer bar.
 struct RecordDetailView: View {
     @EnvironmentObject private var recording: RecordingController
+    @ObservedObject private var live = RecordingController.shared.live
+    @ObservedObject private var meeting = RecordingController.shared.meeting
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var models: ModelManager
     @EnvironmentObject private var vault: VaultDirectory
@@ -207,9 +215,16 @@ struct RecordDetailView: View {
     /// state — deliberately not in AppSettings. Default 340 (a touch roomier than
     /// the old fixed 300); double-clicking the divider resets to it.
     @AppStorage("parley.inspectorWidth") private var inspectorWidth: Double = 340
+    @AppStorage("parley.meetingDetailsExpanded") private var meetingDetailsExpanded = false
+    @AppStorage("parley.audioSettingsExpanded") private var audioSettingsExpanded = false
     @State private var dragBaseWidth: Double?
     private static let inspectorWidthRange: ClosedRange<Double> = 280...440
     private static let defaultInspectorWidth: Double = 340
+
+    /// Pre-first-recording: no live segments yet and not actively recording.
+    private var isPreRecordIdle: Bool {
+        mode == .live && !recording.isRecording && live.segments.isEmpty
+    }
 
     enum WindowMode: String, CaseIterable, Identifiable {
         case live = "Live", preview = "Preview"
@@ -254,7 +269,10 @@ struct RecordDetailView: View {
         // Auto-record used to leave the window on whatever it was (often the prior
         // call's Preview), so live text appeared to be "missing" until you switched tabs.
         .onChange(of: recording.isRecording) {
-            if recording.isRecording { mode = .live }
+            if recording.isRecording {
+                mode = .live
+                withAnimation(Theme.Motion.quick) { meetingDetailsExpanded = true }
+            }
         }
         // At-stop "Assign speakers" review (FluidAudio).
         // Speaker review is opt-in (a footer button), not an auto-popup after every call.
@@ -283,34 +301,53 @@ struct RecordDetailView: View {
 
     /// The customer/leaf of the current filing path, used to prefill Company.
     private var currentCustomerLeaf: String {
-        recording.destinationPath.split(separator: "/").last.map(String.init) ?? ""
+        meeting.destinationPath.split(separator: "/").last.map(String.init) ?? ""
     }
 
     @ViewBuilder private var content: some View {
         switch mode {
         case .live:
-            LiveTranscriptView(
-                segments: recording.segments,
-                isRecording: recording.isRecording,
-                people: vault.people,
-                attendees: TranscriptWriter.splitAttendees(recording.attendees),
-                onNameSpeaker: settings.transcriptionEngine == .fluidAudio
-                    ? { id, name in recording.nameSpeaker(id, as: name) } : nil,
-                liveDisabled: settings.transcriptionEngine == .whisperKit && !settings.liveTranscriptEnabled
-            )
+            VStack(spacing: 0) {
+                recordControlStrip
+                if let load = modelLoadingInfo {
+                    modelLoadingBar(stage: load.stage, fraction: load.fraction)
+                        .padding(.horizontal, Theme.Spacing.large)
+                        .padding(.bottom, Theme.Spacing.small)
+                }
+                Divider()
+                ZStack {
+                    LiveTranscriptView(
+                        segments: live.segments,
+                        isRecording: recording.isRecording,
+                        people: vault.people,
+                        attendees: TranscriptWriter.splitAttendees(meeting.attendees),
+                        onNameSpeaker: settings.transcriptionEngine == .fluidAudio
+                            ? { id, name in recording.nameSpeaker(id, as: name) } : nil,
+                        liveDisabled: settings.transcriptionEngine == .whisperKit && !settings.liveTranscriptEnabled,
+                        hidesEmptyState: isPreRecordIdle
+                    )
+                    .equatable()
+                    if isPreRecordIdle {
+                        preRecordIdleMessage
+                            .transition(.opacity)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .animation(Theme.Motion.spring, value: isPreRecordIdle)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .preview:
             VStack(spacing: 0) {
                 NotesActionBar(
                     generator: recording.notes,
-                    destination: recording.destinationPath,
-                    attendees: recording.attendees,
+                    destination: meeting.destinationPath,
+                    attendees: meeting.attendees,
                     model: settings.claudeModel,
                     onGenerate: {
                         recording.notes.generate(
                             transcriptURL: recording.lastTranscriptURL,
-                            destination: recording.destinationPath,
-                            attendees: recording.attendees,
+                            destination: meeting.destinationPath,
+                            attendees: meeting.attendees,
                             settings: settings
                         )
                     }
@@ -323,42 +360,109 @@ struct RecordDetailView: View {
 
     // MARK: Inspector rail
 
-    /// The right-hand control rail: record button, status + model, then the meeting
-    /// metadata and audio controls. The transcript is the main pane to its left, so
-    /// setup recedes and the transcript stays the star.
+    /// The right-hand setup rail: audio + meeting metadata. Start/Stop lives in the
+    /// persistent `recordControlStrip` above the transcript so the action never moves.
     private var inspector: some View {
         // A VStack (not a ScrollView): the controls + metadata keep their natural
         // size and the Notes editor fills the remaining height. (A ScrollView would
         // give every child only its ideal height, so Notes could never grow.)
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
-            recordButton
-            timerView
-            levelMeters
-            audioControls
-
-            statusRow
-
-            if let load = modelLoadingInfo {
-                modelLoadingBar(stage: load.stage, fraction: load.fraction)
+            if isPreRecordIdle {
+                idleInspectorSections
+            } else {
+                audioControls
+                Divider().padding(.vertical, Theme.Spacing.xSmall)
+                metadataFields   // editable during recording too (e.g. a mid-call joiner)
+                notesField       // fills the rest of the rail
             }
 
             advisoryRows
 
-            if case .error(let message) = recording.state {
+            if case .error(let message) = live.state {
                 StatusBanner(.danger, message,
                              actionLabel: message.localizedCaseInsensitiveContains("microphone") ? "Open Settings" : nil,
                              action: message.localizedCaseInsensitiveContains("microphone") ? PermissionManager.openMicrophoneSettings : nil)
             }
-
-            Divider().padding(.vertical, Theme.Spacing.xSmall)
-
-            metadataFields   // editable during recording too (e.g. a mid-call joiner)
-            notesField       // fills the rest of the rail
         }
         .padding(Theme.Spacing.large)
         .frame(width: inspectorWidth)
         .frame(maxHeight: .infinity, alignment: .top)
         .chromeSurface()
+    }
+
+    /// Persistent transport bar: Start/Stop always sits here, above the transcript.
+    private var recordControlStrip: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+            HStack(alignment: .center, spacing: Theme.Spacing.medium) {
+                recordButton
+                    .frame(width: 120)
+
+                statusBadge
+
+                timerView
+
+                Spacer(minLength: Theme.Spacing.medium)
+
+                Text(audioModelLabel)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            levelMeters
+        }
+        .padding(.horizontal, Theme.Spacing.large)
+        .padding(.vertical, Theme.Spacing.small)
+        .chromeSurface()
+    }
+
+    /// Pre-record: tuck audio + metadata behind disclosures so the hero owns attention.
+    private var idleInspectorSections: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            DisclosureGroup(isExpanded: $audioSettingsExpanded) {
+                audioControls
+                    .padding(.top, Theme.Spacing.xSmall)
+            } label: {
+                Label("Audio", systemImage: "speaker.wave.2")
+                    .font(Theme.Typography.controlLabel)
+            }
+
+            DisclosureGroup(isExpanded: $meetingDetailsExpanded) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+                    metadataFields
+                    notesField
+                }
+                .padding(.top, Theme.Spacing.xSmall)
+            } label: {
+                Label("Meeting details", systemImage: "doc.text")
+                    .font(Theme.Typography.controlLabel)
+            }
+        }
+    }
+
+    /// Informational empty state; Start/Stop is in `recordControlStrip` above.
+    private var preRecordIdleMessage: some View {
+        VStack(spacing: Theme.Spacing.large) {
+            Image(systemName: "text.bubble")
+                .font(.system(size: 30, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Theme.Palette.accent)
+                .frame(width: 76, height: 76)
+                .background(Theme.Palette.accent.opacity(Theme.Opacity.tintFill), in: Circle())
+
+            VStack(spacing: Theme.Spacing.xSmall) {
+                Text("Ready to record")
+                    .font(Theme.Typography.sectionHeader)
+                    .foregroundStyle(.primary)
+                Text("Your live transcript will appear here as people speak.")
+                    .font(Theme.Typography.secondary)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(Theme.Spacing.xLarge)
     }
 
     /// The divider between the transcript and the inspector, doubled as a resize
@@ -388,19 +492,6 @@ struct RecordDetailView: View {
             }
     }
 
-    /// Status dot + text on the left, the active model on the right.
-    private var statusRow: some View {
-        HStack(spacing: Theme.Spacing.small) {
-            statusBadge
-            Spacer()
-            Text(audioModelLabel)
-                .font(Theme.Typography.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-        }
-    }
-
     /// Persistent warnings the user should fix before recording: denied
     /// permissions and a memory guard for heavy model loads. Shown whenever the
     /// condition holds (not only after a failed Start), each with a one-tap fix.
@@ -417,7 +508,7 @@ struct RecordDetailView: View {
                          symbol: "speaker.slash.fill",
                          actionLabel: "Open Settings", action: PermissionManager.openPrivacySettings)
         }
-        if recording.micSeemsSilent {
+        if live.micSeemsSilent {
             StatusBanner(.danger,
                          "Your mic has been silent while the call has audio — check the input device.",
                          symbol: "mic.slash.fill",
@@ -469,12 +560,7 @@ struct RecordDetailView: View {
     }
 
     private var recordButton: some View {
-        Button {
-            Task {
-                if recording.isRecording { recording.stop() }
-                else { mode = .live; await recording.start() }
-            }
-        } label: {
+        Button(action: toggleRecording) {
             Label(recording.isRecording ? "Stop" : "Start",
                   systemImage: recording.isRecording ? "stop.fill" : "record.circle")
                 .frame(maxWidth: .infinity)
@@ -482,19 +568,25 @@ struct RecordDetailView: View {
         .controlSize(.large)
         .glassProminentButton()
         .tint(recording.isRecording ? .red : .green)
-        .disabled(recording.state == .preparing || recording.state == .stopping)
+        .disabled(live.state == .preparing || live.state == .stopping)
+    }
+
+    private func toggleRecording() {
+        Task {
+            if recording.isRecording { recording.stop() }
+            else { mode = .live; await recording.start() }
+        }
     }
 
     /// Live elapsed timer, ticking once a second while recording.
     @ViewBuilder private var timerView: some View {
-        if let started = recording.recordingStarted {
+        if let started = live.recordingStarted {
             TimelineView(.periodic(from: started, by: 1)) { context in
                 Text(Self.elapsed(from: started, to: context.date))
                     .font(Theme.Typography.monoLarge)
                     .monospacedDigit()
                     .contentTransition(.numericText())
             }
-            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -503,11 +595,10 @@ struct RecordDetailView: View {
     /// sustained-silence heuristic (`micSeemsSilent`) trips.
     @ViewBuilder private var levelMeters: some View {
         if recording.isRecording {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
-                InputLevelBar(label: "Mic", level: recording.micLevel, warn: recording.micSeemsSilent)
-                InputLevelBar(label: "Remote", level: recording.remoteLevel)
-            }
-            .frame(maxWidth: .infinity)
+            RecordLevelMeters(
+                micLevel: live.micLevel,
+                remoteLevel: live.remoteLevel,
+                micSeemsSilent: live.micSeemsSilent)
         }
     }
 
@@ -555,18 +646,18 @@ struct RecordDetailView: View {
     private var metadataFields: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             railField("Title") {
-                TextField("Meeting title", text: $recording.meetingTitle)
+                TextField("Meeting title", text: $meeting.meetingTitle)
                     .textFieldStyle(.roundedBorder)
                     .focused($titleFocused)
-                    .onChange(of: recording.meetingTitle) {
+                    .onChange(of: meeting.meetingTitle) {
                         if titleFocused { recording.userEditedTitle() }
                         recording.scheduleMetadataSync()
                         recording.userInteracted()
                     }
                 // Discovery found a (different) title after the user edited the
                 // field — offer it without overwriting.
-                if let discovered = recording.discoveredTitle,
-                   discovered != recording.meetingTitle {
+                if let discovered = meeting.discoveredTitle,
+                   discovered != meeting.meetingTitle {
                     Button {
                         recording.acceptDiscoveredTitle()
                     } label: {
@@ -582,10 +673,10 @@ struct RecordDetailView: View {
                 }
             }
             railField("Filing") {
-                DestinationField(path: $recording.destinationPath,
+                DestinationField(path: $meeting.destinationPath,
                                  destinations: vault.destinations,
                                  firstRoot: settings.scanRoots.first ?? "Internal")
-                    .onChange(of: recording.destinationPath) {
+                    .onChange(of: meeting.destinationPath) {
                         recording.scheduleMetadataSync()
                         recording.userInteracted()
                     }
@@ -595,16 +686,16 @@ struct RecordDetailView: View {
                            completions: vault.people,
                            placeholder: "Add attendees",
                            onCreateNew: { name in pendingPerson = PendingPerson(name: name) })
-                    .onChange(of: recording.attendees) {
+                    .onChange(of: meeting.attendees) {
                         recording.scheduleMetadataSync()
                         recording.userInteracted()
                     }
                 if !attendeesBinding.wrappedValue.isEmpty {
-                    Button("Clear all attendees") { recording.attendees = "" }
+                    Button("Clear all attendees") { meeting.attendees = "" }
                         .buttonStyle(.chip)
                         .help("Remove every attendee (call suggestions below are kept)")
                 }
-                SuggestionChips(recording: recording)
+                SuggestionChips(meeting: meeting, recording: recording)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -615,11 +706,13 @@ struct RecordDetailView: View {
     /// `TextEditor` scrolls its own content internally once notes exceed the frame.
     private var notesField: some View {
         railField("Notes") {
-            TextEditor(text: $recording.manualNotes)
+            TextEditor(text: $meeting.manualNotes)
                 .font(Theme.Typography.body)
-                .frame(maxWidth: .infinity, minHeight: 140, maxHeight: .infinity)
+                .frame(maxWidth: .infinity,
+                       minHeight: isPreRecordIdle ? 100 : 140,
+                       maxHeight: .infinity)
                 .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
-                .onChange(of: recording.manualNotes) { recording.userInteracted() }
+                .onChange(of: meeting.manualNotes) { recording.userInteracted() }
         }
         .frame(maxHeight: .infinity)
     }
@@ -637,12 +730,12 @@ struct RecordDetailView: View {
     private var attendeesBinding: Binding<[String]> {
         Binding(
             get: {
-                recording.attendees
+                meeting.attendees
                     .split(separator: ",")
                     .map { $0.trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty }
             },
-            set: { recording.attendees = $0.joined(separator: ", ") }
+            set: { meeting.attendees = $0.joined(separator: ", ") }
         )
     }
 
@@ -706,20 +799,15 @@ struct RecordDetailView: View {
         }
     }
 
-    /// Live word count across all transcript segments (shown until a result line appears).
-    private var wordCount: Int {
-        recording.segments.reduce(0) { $0 + $1.text.split(whereSeparator: { $0.isWhitespace }).count }
-    }
-
     private var footer: some View {
         HStack(spacing: Theme.Spacing.medium) {
             // Word count is always shown; the saved-path line sits beneath it once a
             // transcript has been written (own line, so the two never collide).
             VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                // Word count matches the sidebar nav type (body) so the bottom row
-                // reads consistently with "Settings" beside it.
-                Text("\(wordCount) \(wordCount == 1 ? "word" : "words")")
-                    .font(Theme.Typography.body).foregroundStyle(.secondary)
+                if live.liveWordCount > 0 {
+                    Text("\(live.liveWordCount) \(live.liveWordCount == 1 ? "word" : "words")")
+                        .font(Theme.Typography.body).foregroundStyle(.secondary)
+                }
                 if let result = recording.lastResult {
                     Text(result)
                         .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
@@ -763,7 +851,7 @@ struct RecordDetailView: View {
     // MARK: Status helpers
 
     private var statusText: String {
-        switch recording.state {
+        switch live.state {
         case .preparing: return "Preparing…"
         case .recording: return "Recording"
         case .stopping: return "Stopping…"
@@ -779,7 +867,7 @@ struct RecordDetailView: View {
     }
 
     private var statusColor: Color {
-        switch recording.state {
+        switch live.state {
         case .recording: return .red
         case .preparing, .stopping: return .orange
         case .error: return .red
@@ -798,5 +886,21 @@ struct RecordDetailView: View {
         return h > 0
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%02d:%02d", m, s)
+    }
+}
+
+/// Level meters isolated from `RecordingController` observation — parent passes
+/// scalar values so only meter ticks refresh this subtree.
+private struct RecordLevelMeters: View {
+    let micLevel: Float
+    let remoteLevel: Float
+    let micSeemsSilent: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+            InputLevelBar(label: "Mic", level: micLevel, warn: micSeemsSilent)
+            InputLevelBar(label: "Remote", level: remoteLevel)
+        }
+        .frame(maxWidth: .infinity)
     }
 }

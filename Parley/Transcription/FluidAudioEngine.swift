@@ -77,11 +77,19 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// re-splitting doesn't churn SwiftUI identities or the recovery journal.
     private var runIds: [String: UUID] = [:]
     private var streamStart: Date?
+    /// Cached confirmed display segments — rebuilt incrementally on new ASR units;
+    /// invalidated when diarization or speaker labels change.
+    private var derivedConfirmedCache: [Segment] = []
+    private var derivedConfirmedUnitCount = 0
+    private var deriveCacheValid = false
 
     /// Diarized speaker turns on the session timeline (speakerId + start/end seconds).
     private var diarSegments: [(speakerId: String, start: TimeInterval, end: TimeInterval)] = []
     /// Quality-gated per-speaker embeddings + speech duration, for identification + enrollment.
     private var speakerEmbeddings: [String: [[Float]]] = [:]
+    /// Mean embedding per speaker once enough quality-gated samples exist — raw
+    /// vectors are dropped afterward to cap long-session memory.
+    private var speakerCentroids: [String: [Float]] = [:]
     private var speakerGatedSeconds: [String: TimeInterval] = [:]
     /// speakerId → resolved person name (auto-identified or manually assigned).
     private var resolvedNames: [String: String] = [:]
@@ -92,6 +100,9 @@ final class FluidAudioEngine: TranscriptionEngine {
     private var loadTask: Task<Void, Never>?
     private var mixerTask: Task<Void, Never>?
     private var diarTask: Task<Void, Never>?
+    private var lastPublishTime = Date.distantPast
+    private let publishMinInterval: TimeInterval = 0.2
+    private var publishDeferredTask: Task<Void, Never>?
 
     /// 16 kHz mono — the format every FluidAudio model consumes.
     private static let format = AVAudioFormat(
@@ -111,7 +122,17 @@ final class FluidAudioEngine: TranscriptionEngine {
 
     func confirmedTimeline() -> [Segment] { derive(confirmedUnits, volatile: nil) }
     func finalTimeline() -> [Segment] { derive(confirmedUnits, volatile: volatileUnit) }
-    func seed(_ segments: [Segment]) { seeded = segments; publish() }
+    func seed(_ segments: [Segment]) {
+        seeded = segments
+        invalidateDerivedCache()
+        publish(immediate: true)
+    }
+
+    private func invalidateDerivedCache() {
+        deriveCacheValid = false
+        derivedConfirmedCache = []
+        derivedConfirmedUnitCount = 0
+    }
 
     /// Derive display segments. When a diarization timeline exists, attribution is
     /// DIARIZATION-FIRST: the diarized turns are authoritative for who/when, and ASR
@@ -121,8 +142,21 @@ final class FluidAudioEngine: TranscriptionEngine {
         guard !diarSegments.isEmpty else {
             return build(units: confirmed + (volatile.map { [$0] } ?? []))
         }
+
+        if !deriveCacheValid || derivedConfirmedUnitCount != confirmed.count {
+            if deriveCacheValid, derivedConfirmedUnitCount < confirmed.count {
+                let newUnits = Array(confirmed.suffix(confirmed.count - derivedConfirmedUnitCount))
+                let newSegs = diarizationFirst(newUnits)
+                derivedConfirmedCache = Self.mergeAdjacentSegments(derivedConfirmedCache, newSegs)
+            } else {
+                derivedConfirmedCache = diarizationFirst(confirmed)
+            }
+            derivedConfirmedUnitCount = confirmed.count
+            deriveCacheValid = true
+        }
+
         var out = seeded
-        out.append(contentsOf: diarizationFirst(confirmed))
+        out.append(contentsOf: derivedConfirmedCache)
         // Keep the in-progress tail as a SINGLE stable row (splitting it each update
         // caused the earlier flicker); label it by the speaker at its midpoint.
         if let v = volatile, let f = v.tokens.first, let l = v.tokens.last {
@@ -131,6 +165,26 @@ final class FluidAudioEngine: TranscriptionEngine {
                                confirmed: false, speakerId: spk, speakerName: spk.flatMap { resolvedNames[$0] }))
         }
         return out.sorted { $0.start < $1.start }
+    }
+
+    /// Merge consecutive same-speaker segments when incremental units continue a run.
+    private static func mergeAdjacentSegments(_ existing: [Segment], _ appended: [Segment]) -> [Segment] {
+        guard !appended.isEmpty else { return existing }
+        var out = existing
+        for seg in appended {
+            if let last = out.last,
+               last.speakerId == seg.speakerId,
+               last.speakerName == seg.speakerName,
+               seg.start <= last.end + 0.5 {
+                out[out.count - 1] = Segment(
+                    id: last.id, track: last.track, start: last.start, end: max(last.end, seg.end),
+                    text: last.text + " " + seg.text, confirmed: true,
+                    speakerId: last.speakerId, speakerName: last.speakerName)
+            } else {
+                out.append(seg)
+            }
+        }
+        return out
     }
 
     /// Build segments from ALL confirmed tokens + the diarization timeline: group
@@ -174,13 +228,38 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// that mixed speakers within a line. Boundary distance fixes it.)
     private func speakerAt(_ t: TimeInterval) -> String? {
         guard !diarSegments.isEmpty else { return nil }
-        for d in diarSegments where t >= d.start && t <= d.end { return d.speakerId }
-        var best: (id: String, dist: TimeInterval)?
-        for d in diarSegments {
+        var lo = 0, hi = diarSegments.count - 1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            let d = diarSegments[mid]
+            if t < d.start { hi = mid - 1 }
+            else if t > d.end { lo = mid + 1 }
+            else { return d.speakerId }
+        }
+         var best: (id: String, dist: TimeInterval)?
+        for idx in [max(0, lo - 1), min(diarSegments.count - 1, lo)] {
+            let d = diarSegments[idx]
             let dist = min(abs(t - d.start), abs(t - d.end))
             if dist < (best?.dist ?? .greatestFiniteMagnitude) { best = (d.speakerId, dist) }
         }
         return best?.id
+    }
+
+    /// Merge adjacent same-speaker turns (non-overlapping) to cap scan work.
+    private func compactDiarSegments() {
+        guard diarSegments.count > 1 else { return }
+        var out: [(speakerId: String, start: TimeInterval, end: TimeInterval)] = []
+        out.reserveCapacity(diarSegments.count)
+        for d in diarSegments {
+            if let last = out.last,
+               last.speakerId == d.speakerId,
+               d.start >= last.end {
+                out[out.count - 1].end = max(last.end, d.end)
+            } else {
+                out.append(d)
+            }
+        }
+        diarSegments = out
     }
 
     /// Derive display segments: seeded segments + each ASR unit split into runs of
@@ -464,6 +543,7 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Merge newly-diarized turns, accumulate quality-gated per-speaker embeddings,
     /// auto-identify against saved voiceprints, then re-derive segments.
     private func ingestDiarization(_ segs: [(speakerId: String, start: TimeInterval, end: TimeInterval, embedding: [Float], quality: Float)]) {
+        invalidateDerivedCache()
         for s in segs {
             diarSegments.append((s.speakerId, s.start, s.end))
             if s.quality >= minSegmentQuality, !s.embedding.isEmpty {
@@ -471,6 +551,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                 speakerGatedSeconds[s.speakerId, default: 0] += max(0, s.end - s.start)
             }
         }
+        compactDiarSegments()
         autoIdentify()
         publish()
     }
@@ -507,6 +588,7 @@ final class FluidAudioEngine: TranscriptionEngine {
             }
             guard best.score >= identificationThreshold else { continue }
             resolvedNames[id] = best.voiceprint.name
+            compactSpeakerEmbeddings(for: id, centroid: centroid)
             AppLog.log("FluidAudio auto-identified a speaker as \(best.voiceprint.name) (score \(String(format: "%.2f", best.score)))", category: "record")
             onSpeakerIdentified?(best.voiceprint.name)
             // Backfill a retained clip for a known voice that has none yet
@@ -590,7 +672,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         // exists (clips can't be captured mid-call, before the clean mix is built).
         guard let segs = pass.segs, !segs.isEmpty else {
             AppLog.log("finalizeDiarization: no final segments — keeping live labels", category: "record")
-            publish()
+            publish(immediate: true)
             await backfillClips()
             let n = callSpeakerIds().count
             let suffix = repassed ? " · transcript re-passed" : ""
@@ -599,6 +681,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         }
         // Time-ordered so the diarization-first attribution scans turns in order.
         diarSegments = segs.map { ($0.id, $0.start, $0.end) }.sorted { $0.start < $1.start }
+        compactDiarSegments()
         var emb: [String: [[Float]]] = [:]
         var secs: [String: TimeInterval] = [:]
         for s in segs where s.q >= minSegmentQuality && !s.emb.isEmpty {
@@ -608,7 +691,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         speakerEmbeddings = emb
         speakerGatedSeconds = secs
         autoIdentify(verbose: true)   // re-applies known names by voice (ids may differ from the live pass)
-        publish()        // re-renders the transcript with the cleaned-up speaker labels
+        publish(immediate: true)   // re-renders the transcript with the cleaned-up speaker labels
         await backfillClips()
         let n = Set(segs.map(\.id)).count
         let elapsed = Date().timeIntervalSince(startedAt)
@@ -670,6 +753,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         confirmedUnits = units
         volatileUnit = nil
         runIds.removeAll()   // fresh, stable ids for the final transcript
+        invalidateDerivedCache()
     }
 
     /// After stop (mixed.caf now exists), retain a short voice clip for every
@@ -702,8 +786,11 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Reading the system ring up to the mic's count keeps the mixed stream at true
     /// real-time length — `max()` + zero-pad would over-count when the rings are out
     /// of phase, stretching the ASR timeline out of sync with the clean mixed file.
+    /// Cap per-tick drain so a ring backlog clears gradually (~1s) instead of one huge read.
+    nonisolated private static let maxMixSamplesPerTick = 16_000
+
     nonisolated private static func mix(mic: AudioRingBuffer, system: AudioRingBuffer) -> [Float]? {
-        let n = mic.availableToRead
+        let n = min(mic.availableToRead, maxMixSamplesPerTick)
         guard n > 0 else { return nil }
         var micBuf = [Float](), sysBuf = [Float]()
         let rm = mic.read(maxCount: n, into: &micBuf)
@@ -791,6 +878,7 @@ final class FluidAudioEngine: TranscriptionEngine {
             confirmedUnits.removeAll()
             runIds.removeAll()
             liveSegStart = startElapsed
+            invalidateDerivedCache()
         }
 
         let startIdx = text.index(text.startIndex, offsetBy: min(liveCommittedChars, text.count))
@@ -801,6 +889,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         // promote it to a confirmed unit stamped with its wall-clock span and start
         // a fresh span. A single Tok per unit (no sub-token timings) means each unit
         // attributes to one diarized speaker at its midpoint — coarse but fine live.
+        let didConfirm: Bool
         if now - liveSegStart >= liveConfirmInterval {
             let unit = ASRUnit(id: UUID(),
                                tokens: Self.wordToks(tail, start: liveSegStart, end: now),
@@ -810,21 +899,47 @@ final class FluidAudioEngine: TranscriptionEngine {
             liveSegStart = now
             volatileUnit = nil
             AppLog.log("FluidAudio streaming: confirmed \(tail.count) chars", category: "record")
+            didConfirm = true
         } else {
             // Reuse the volatile unit's id across updates so the in-progress row
             // keeps a stable identity (content updates in place).
             volatileUnit = ASRUnit(id: volatileUnit?.id ?? UUID(),
                                    tokens: Self.wordToks(tail, start: liveSegStart, end: now),
                                    text: tail, confirmed: false)
+            didConfirm = false
         }
-        publish()
+        publish(immediate: didConfirm)
     }
 
     private func elapsedNow(_ startElapsed: TimeInterval) -> TimeInterval {
         startElapsed + Date().timeIntervalSince(streamStart ?? Date())
     }
 
-    private func publish() { onSegmentsChanged?(finalTimeline()) }
+    private func publish(immediate: Bool = false) {
+        if immediate {
+            publishDeferredTask?.cancel()
+            publishDeferredTask = nil
+            lastPublishTime = Date()
+            onSegmentsChanged?(finalTimeline())
+            return
+        }
+        let elapsed = Date().timeIntervalSince(lastPublishTime)
+        if elapsed >= publishMinInterval {
+            publishDeferredTask?.cancel()
+            publishDeferredTask = nil
+            lastPublishTime = Date()
+            onSegmentsChanged?(finalTimeline())
+        } else if publishDeferredTask == nil {
+            let delay = publishMinInterval - elapsed
+            publishDeferredTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, !Task.isCancelled else { return }
+                self.publishDeferredTask = nil
+                self.lastPublishTime = Date()
+                self.onSegmentsChanged?(self.finalTimeline())
+            }
+        }
+    }
 
     // MARK: - Speaker naming (Phase 5)
 
@@ -839,12 +954,17 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Per-speaker centroids built from quality-gated embeddings (same rule as
     /// `setSpeakerName`), for persisting a review cache so assignment needs no re-run.
     func centroidsByID() -> [String: [Float]] {
-        var out: [String: [Float]] = [:]
-        for (id, embs) in speakerEmbeddings
-        where !embs.isEmpty && (speakerGatedSeconds[id] ?? 0) >= minSecondsToEnroll {
+        var out = speakerCentroids
+        for (id, embs) in speakerEmbeddings where out[id] == nil && !embs.isEmpty
+            && (speakerGatedSeconds[id] ?? 0) >= minSecondsToEnroll {
             out[id] = VoiceprintStore.normalized(VoiceprintStore.mean(embs))
         }
         return out
+    }
+
+    private func compactSpeakerEmbeddings(for id: String, centroid: [Float]) {
+        speakerCentroids[id] = centroid
+        speakerEmbeddings[id] = nil
     }
 
     /// Manually assign a name to a speaker: relabel their lines (via re-derive) and
@@ -853,12 +973,16 @@ final class FluidAudioEngine: TranscriptionEngine {
     @discardableResult
     func setSpeakerName(_ speakerId: String, as name: String) -> [Float]? {
         resolvedNames[speakerId] = name
-        publish()
+        invalidateDerivedCache()
+        publish(immediate: true)
         // Only enroll a voiceprint from enough clean, quality-gated speech — don't
         // pollute the store with a centroid built from a tiny/low-quality clip.
+        if let c = speakerCentroids[speakerId], !c.isEmpty { return c }
         let embs = speakerEmbeddings[speakerId] ?? []
         guard !embs.isEmpty, (speakerGatedSeconds[speakerId] ?? 0) >= minSecondsToEnroll else { return nil }
-        return VoiceprintStore.normalized(VoiceprintStore.mean(embs))
+        let centroid = VoiceprintStore.normalized(VoiceprintStore.mean(embs))
+        compactSpeakerEmbeddings(for: speakerId, centroid: centroid)
+        return centroid
     }
 
     /// Extract a short (<=4s) audio clip of a speaker's longest segment from the

@@ -32,36 +32,23 @@ final class RecordingController: ObservableObject {
             .store(in: &cancellables)
     }
 
-    @Published private(set) var state: RecordingState = .idle
-    @Published private(set) var segments: [Segment] = []
-
-    // Session metadata (fed to the transcript + the Claude prompt).
-    @Published var meetingTitle = ""
-    /// Vault-relative folder the note should be filed under, e.g. "Internal/Customers/Vanguard".
-    @Published var destinationPath = ""
-    @Published var attendees = ""
+    /// Live capture UI state (segments, meters, recording status).
+    let live = RecordingLiveState()
+    /// Per-meeting metadata (title, filing, attendees, notes, discovery).
+    let meeting = MeetingSessionState()
     /// Chosen app for per-app capture (when capture mode is `.perApp`).
     @Published var selectedAppPID: pid_t?
     /// Status of the last finalize (transcript write / Claude run), for the UI.
     @Published private(set) var lastResult: String?
-    /// When the current recording started (nil when not recording) — drives the live timer.
-    @Published private(set) var recordingStarted: Date?
+
     /// URL of the most recently written transcript (for "Reveal in Finder").
     @Published private(set) var lastTranscriptURL: URL?
-    /// Live capture levels (0…1) for the meters, while recording.
-    @Published private(set) var micLevel: Float = 0
-    @Published private(set) var remoteLevel: Float = 0
-    /// True while the remote (call) track is carrying audio but the mic has stayed
-    /// effectively silent for a sustained stretch — the classic "wrong input device
-    /// / muted mic" case where *your* half of the conversation is being lost.
-    /// Drives a live advisory banner and turns the mic meter red. Self-clearing:
-    /// the moment the mic registers audio again it drops back to false.
-    @Published private(set) var micSeemsSilent: Bool = false
-
     /// Silent-mic heuristic thresholds (on the 0…1 smoothed meter scale).
     private static let micSilenceFloor: Float = 0.03    // at/under this the mic is effectively silent
     private static let remoteActiveFloor: Float = 0.06  // over this the call track has real audio
     private static let silenceGrace: TimeInterval = 12   // how long the mic may stay silent before warning
+    private static let meterPublishThreshold: Float = 0.02
+    private static let meterInterval: TimeInterval = 0.2   // 5 Hz
 
     /// Permission state surfaced after launch warmup, so the UI can show a
     /// persistent "fix this" banner instead of only failing at record time.
@@ -73,23 +60,6 @@ final class RecordingController: ObservableObject {
     @Published private(set) var pendingRecoveries: [RecoverableSession] = []
     /// True while a recover-by-re-transcribe is running (UI feedback).
     @Published private(set) var isRecovering = false
-
-    /// Manual notes jotted during a recording; merged into the saved transcript.
-    @Published var manualNotes: String = ""
-
-    // Meeting-metadata discovery (Accessibility) — suggestions for the fields above.
-    /// Roster discovered for the current/last call; the UI offers these as chips
-    /// (never auto-added to `attendees` — conference-room entries etc. are the
-    /// user's call). Kept after stop so chips remain usable while assigning speakers.
-    @Published private(set) var suggestedAttendees: [SuggestedAttendee] = []
-    /// Title discovered via AX. Auto-applied only while the user hasn't edited
-    /// the field; otherwise surfaced as an accept chip.
-    @Published private(set) var discoveredTitle: String?
-    private var discoveredTitleSource: String?
-    /// Where the current title came from (persisted in the session manifest).
-    private(set) var titleSource: String?
-    /// Set on focused typing in the Title field; blocks auto-fill from then on.
-    private var titleWasUserEdited = false
 
     /// After a FluidAudio recording stops, the discovered speakers offered for naming
     /// in the "Assign speakers" sheet (nil when there's nothing to review).
@@ -191,14 +161,19 @@ final class RecordingController: ObservableObject {
     /// for the silent-mic heuristic. Nil until the meter timer starts.
     private var micLastActive: Date?
     private var remoteLastActive: Date?
-    private var partialTimer: Timer?
+    private var partialAppender: PartialTranscriptAppender?
     /// Fires after a stretch of inactivity to unload the model and reclaim RAM.
     private var idleUnloadTimer: Timer?
     /// The active session's durable manifest + its heartbeat (crash recovery).
     private var manifest: SessionManifest?
     private var heartbeatTimer: Timer?
-    /// Append-only confirmed-segment journal for the active session.
+    /// Append-only confirmed-segment journal for the active meeting.
     private var journal: SegmentJournal?
+    private var segmentRelay: SegmentPublishRelay?
+    private var journaledSegmentIDs = Set<UUID>()
+    private var wordCountBySegmentID: [UUID: Int] = [:]
+    private var lastPublishedMicLevel: Float = 0
+    private var lastPublishedRemoteLevel: Float = 0
     /// True when the current recording was auto-started by call detection (so it
     /// may be auto-stopped on call end; user-started recordings are not).
     private var startedByDetection = false
@@ -208,7 +183,7 @@ final class RecordingController: ObservableObject {
     // equivalents) and reports the merged timeline back via `onSegmentsChanged`.
     private var engine: TranscriptionEngine?
 
-    var isRecording: Bool { state == .recording }
+    var isRecording: Bool { live.isRecording }
 
     /// The session currently being recorded (nil when idle) — so the Storage
     /// manager can refuse to delete the in-progress recording's audio.
@@ -233,13 +208,69 @@ final class RecordingController: ObservableObject {
             fluid.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
             engine = fluid
         }
+        wireSegmentPublishing(to: engine)
+        return engine
+    }
+
+    /// Throttle UI publishes and journal only newly-confirmed segments (skip the
+    /// per-tick `confirmedTimeline()` rebuild).
+    private func wireSegmentPublishing(to engine: TranscriptionEngine) {
+        segmentRelay?.reset()
+        segmentRelay = SegmentPublishRelay { [weak self] merged in
+            guard let self else { return }
+            self.live.segmentStore.apply(merged)
+            self.updateLiveWordCount(from: merged)
+        }
         engine.onSegmentsChanged = { [weak self] merged in
             guard let self else { return }
-            self.segments = merged
-            // Persist confirmed segments as they land (near-zero crash loss).
-            self.journal?.append(confirmed: self.engine?.confirmedTimeline() ?? [])
+            let newConfirmed = merged.filter { $0.confirmed && !self.journaledSegmentIDs.contains($0.id) }
+            if !newConfirmed.isEmpty {
+                self.journal?.append(confirmed: newConfirmed)
+                self.journaledSegmentIDs.formUnion(newConfirmed.map(\.id))
+                self.appendPartialTranscript(confirmed: newConfirmed)
+            }
+            self.segmentRelay?.submit(merged, immediate: !newConfirmed.isEmpty)
         }
-        return engine
+    }
+
+    private static func wordCount(in text: String) -> Int {
+        text.split(whereSeparator: \.isWhitespace).count
+    }
+
+    private func updateLiveWordCount(from merged: [Segment]) {
+        var byID = wordCountBySegmentID
+        let ids = Set(merged.map(\.id))
+        for id in byID.keys where !ids.contains(id) {
+            byID.removeValue(forKey: id)
+        }
+        for seg in merged {
+            byID[seg.id] = Self.wordCount(in: seg.text)
+        }
+        wordCountBySegmentID = byID
+        live.liveWordCount = byID.values.reduce(0, +)
+    }
+
+    private func resetSegmentPublishState() {
+        segmentRelay?.reset()
+        journaledSegmentIDs.removeAll()
+        wordCountBySegmentID.removeAll()
+        live.liveWordCount = 0
+        live.segmentStore.reset()
+    }
+
+    private func appendPartialTranscript(confirmed: [Segment]) {
+        guard let partialAppender else { return }
+        let title = meeting.meetingTitle
+        let date = recordingStartDate ?? Date()
+        let attendees = meeting.attendees
+        let destination = meeting.destinationPath
+        partialAppender.append(confirmed: confirmed) {
+            var header = TranscriptWriter.makeBody(
+                title: title.isEmpty ? "Recovered recording" : title,
+                date: date, attendees: attendees, destination: destination, segments: [])
+            if !header.hasSuffix("\n") { header += "\n" }
+            return header
+        }
     }
 
     // MARK: Speaker naming / enrollment (FluidAudio engine)
@@ -281,7 +312,7 @@ final class RecordingController: ObservableObject {
             AppLog.log("Named speaker \(speakerId) as \(name) but not enough clean audio — labeled, not enrolled", category: "record")
         }
         // Add to the right attendee target: the review's own snapshot (queued/History
-        // flow), or the live Record field when naming during a live session.
+        // flow), or the live Record field when naming during a live meeting.
         if pendingSpeakerReview != nil {
             pendingSpeakerReview?.attendees = OfflineProcessingService.merge(
                 pendingSpeakerReview?.attendees ?? "", with: [name])
@@ -380,28 +411,12 @@ final class RecordingController: ObservableObject {
     private func addAttendeeIfAbsent(_ rawName: String) {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-        let current = TranscriptWriter.splitAttendees(attendees)
+        let current = TranscriptWriter.splitAttendees(meeting.attendees)
         guard !current.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) else { return }
-        attendees = current.isEmpty ? name : attendees + ", " + name
+        meeting.attendees = current.isEmpty ? name : meeting.attendees + ", " + name
     }
 
     // MARK: Meeting-metadata discovery (title/attendee suggestions)
-
-    private func resetDiscovery() {
-        suggestedAttendees = []
-        discoveredTitle = nil
-        discoveredTitleSource = nil
-        titleSource = nil
-        titleWasUserEdited = false
-    }
-
-    /// Titles the app set itself ("Teams call", "Recorded call", empty) — safe
-    /// to replace with a discovered one. Anything the user typed is protected
-    /// separately by `titleWasUserEdited`.
-    private func isDefaultTitle(_ title: String) -> Bool {
-        let t = title.trimmingCharacters(in: .whitespaces)
-        return t.isEmpty || t == "Recorded call" || t.hasSuffix(" call")
-    }
 
     /// Union a roster snapshot into the suggestions, stamping `firstSeen` (the
     /// join timestamp) only on first sighting; entries never disappear (someone
@@ -410,15 +425,15 @@ final class RecordingController: ObservableObject {
         for entry in roster {
             let name = entry.name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { continue }
-            if let idx = suggestedAttendees.firstIndex(where: {
+            if let idx = meeting.suggestedAttendees.firstIndex(where: {
                 $0.name.caseInsensitiveCompare(name) == .orderedSame
             }) {
-                if suggestedAttendees[idx].role == nil, let role = entry.role {
-                    suggestedAttendees[idx].role = role
+                if meeting.suggestedAttendees[idx].role == nil, let role = entry.role {
+                    meeting.suggestedAttendees[idx].role = role
                 }
             } else {
                 AppLog.log("Roster: \(name)\(entry.role.map { " (\($0))" } ?? "") joined", category: "detect")
-                suggestedAttendees.append(SuggestedAttendee(name: name, role: entry.role, firstSeen: Date()))
+                meeting.suggestedAttendees.append(SuggestedAttendee(name: name, role: entry.role, firstSeen: Date()))
             }
         }
     }
@@ -426,40 +441,40 @@ final class RecordingController: ObservableObject {
     /// Called by the Title field on focused (user) edits — from then on,
     /// discovery offers instead of overwriting.
     func userEditedTitle() {
-        titleWasUserEdited = true
-        titleSource = "user"
+        meeting.titleWasUserEdited = true
+        meeting.titleSource = "user"
     }
 
     /// The title accept-chip action (shown when discovery found a title after
     /// the user had already edited the field).
     func acceptDiscoveredTitle() {
-        guard let title = discoveredTitle else { return }
-        meetingTitle = title
-        titleSource = discoveredTitleSource
+        guard let title = meeting.discoveredTitle else { return }
+        meeting.meetingTitle = title
+        meeting.titleSource = meeting.discoveredTitleSource
         scheduleMetadataSync()
     }
 
     func acceptSuggestion(_ name: String) {
-        guard let idx = suggestedAttendees.firstIndex(where: {
+        guard let idx = meeting.suggestedAttendees.firstIndex(where: {
             $0.name.caseInsensitiveCompare(name) == .orderedSame
         }) else { return }
-        suggestedAttendees[idx].accepted = true
-        suggestedAttendees[idx].dismissed = false
-        addAttendeeIfAbsent(suggestedAttendees[idx].name)
+        meeting.suggestedAttendees[idx].accepted = true
+        meeting.suggestedAttendees[idx].dismissed = false
+        addAttendeeIfAbsent(meeting.suggestedAttendees[idx].name)
         scheduleMetadataSync()
     }
 
     func acceptAllSuggestions() {
-        for s in suggestedAttendees where !s.accepted && !s.dismissed {
+        for s in meeting.suggestedAttendees where !s.accepted && !s.dismissed {
             acceptSuggestion(s.name)
         }
     }
 
     func dismissSuggestion(_ name: String) {
-        guard let idx = suggestedAttendees.firstIndex(where: {
+        guard let idx = meeting.suggestedAttendees.firstIndex(where: {
             $0.name.caseInsensitiveCompare(name) == .orderedSame
         }) else { return }
-        suggestedAttendees[idx].dismissed = true
+        meeting.suggestedAttendees[idx].dismissed = true
     }
 
     private var didWarmup = false
@@ -506,7 +521,7 @@ final class RecordingController: ObservableObject {
     private func wireBackgroundQueues() {
         let idle: () -> Bool = { [weak self] in
             guard let self else { return false }
-            return self.state == .idle && !self.isRecording
+            return self.live.state == .idle && !self.isRecording
         }
         offlineService.isIdle = idle
         summaryService.isIdle = idle
@@ -531,14 +546,13 @@ final class RecordingController: ObservableObject {
         metadataResolver.onUpdate = { [weak self] meta in
             guard let self else { return }
             if let title = meta.title {
-                self.discoveredTitle = title
-                self.discoveredTitleSource = meta.titleSource
+                self.meeting.setDiscoveredTitle(title, source: meta.titleSource ?? "")
                 // Auto-fill only while the title is still an untouched default;
                 // after a manual edit, the chip UI offers it instead.
-                if !self.titleWasUserEdited, self.isDefaultTitle(self.meetingTitle) {
+                if !self.meeting.titleWasUserEdited, self.meeting.isDefaultTitle(self.meeting.meetingTitle) {
                     AppLog.log("Discovered title (\(meta.titleSource ?? "?")): \(title)", category: "detect")
-                    self.meetingTitle = title
-                    self.titleSource = meta.titleSource
+                    self.meeting.meetingTitle = title
+                    self.meeting.titleSource = meta.titleSource
                     self.scheduleMetadataSync()
                 }
             }
@@ -557,7 +571,7 @@ final class RecordingController: ObservableObject {
             self.cancelIdleUnload()
             self.preloadModel()
             // New call context: reset the last call's discoveries, start fresh.
-            self.resetDiscovery()
+            self.meeting.resetDiscovery()
             self.metadataResolver.start(for: call)
             // If the app crashed mid-call and that same call is the one now live,
             // resume INTO that note rather than starting a competing new recording
@@ -576,7 +590,7 @@ final class RecordingController: ObservableObject {
                 }
             } else if call.known && self.settings.autoRecordEnabled {
                 AppLog.log("AUTO-RECORD starting for \(call.displayName)", category: "detect")
-                self.meetingTitle = "\(call.displayName) call"   // sensible default; user can edit
+                self.meeting.meetingTitle = "\(call.displayName) call"   // sensible default; user can edit
                 Task { await self.start(detectionInitiated: true) }
             } else {
                 AppLog.log("Notifying — \(call.displayName) (known=\(call.known), autoRecord=\(self.settings.autoRecordEnabled))", category: "detect")
@@ -612,33 +626,33 @@ final class RecordingController: ObservableObject {
     // MARK: Start / stop
 
     func start(detectionInitiated: Bool = false) async {
-        guard state == .idle || isErrorState else { return }
+        guard live.state == .idle || isErrorState else { return }
         cancelIdleUnload()
         startedByDetection = detectionInitiated
-        if detectionInitiated, meetingTitle.trimmingCharacters(in: .whitespaces).isEmpty {
-            meetingTitle = "Recorded call"   // fallback for the notification-Start path
+        if detectionInitiated, meeting.meetingTitle.trimmingCharacters(in: .whitespaces).isEmpty {
+            meeting.meetingTitle = "Recorded call"   // fallback for the notification-Start path
         }
-        state = .preparing
+        live.state = .preparing
         cancelPendingClear(); clearArmable = false   // a new recording supersedes any pending auto-clear
-        segments = []
+        resetSegmentPublishState()
         lastResult = nil
         lastTranscriptURL = nil
-        manualNotes = ""
+        meeting.manualNotes = ""
         // Discovery context: a detected call already reset + started the
         // resolver in onCallStart, and its pre-record findings (title, early
         // roster) belong to this session — keep them. Only a pure manual start
-        // clears leftovers from the previous session.
+        // clears leftovers from the previous meeting.
         if let call = callDetector.activeCall {
             if !metadataResolver.isPolling { metadataResolver.start(for: call) }
         } else {
-            resetDiscovery()
+            meeting.resetDiscovery()
             metadataResolver.stop()
         }
         engine = makeEngine()
 
         guard await PermissionManager.requestMicrophone() else {
             micDenied = true
-            state = .error("Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone.")
+            live.state = .error("Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone.")
             startedByDetection = false
             return
         }
@@ -654,6 +668,8 @@ final class RecordingController: ObservableObject {
         AppPaths.ensureDirectory(sessionDir)
         sessionDirectory = sessionDir
         journal = SegmentJournal(url: sessionDir.appendingPathComponent("segments.jsonl"))
+        partialAppender = PartialTranscriptAppender(
+            url: sessionDir.appendingPathComponent("transcript.partial.md"))
 
         launchCapture(sessionDir: sessionDir,
                       micArchive: sessionDir.appendingPathComponent("mic.caf"),
@@ -665,29 +681,30 @@ final class RecordingController: ObservableObject {
     /// the journaled segments, mark the interruption, and capture fresh audio
     /// timed after the prior recording. Finalizes into one combined transcript.
     func resume(_ session: RecoverableSession) async {
-        guard state == .idle || isErrorState else { return }
+        guard live.state == .idle || isErrorState else { return }
         cancelIdleUnload()
         let m = session.manifest
         startedByDetection = false          // user-driven resume → manual stop
-        state = .preparing
+        live.state = .preparing
         cancelPendingClear(); clearArmable = false   // a resumed recording supersedes any pending auto-clear
-        meetingTitle = m.title
-        attendees = m.attendees
-        destinationPath = m.filing
-        manualNotes = m.manualNotes
+        meeting.meetingTitle = m.title
+        meeting.attendees = m.attendees
+        meeting.destinationPath = m.filing
+        meeting.manualNotes = m.manualNotes
         lastResult = nil
         lastTranscriptURL = nil
         engine = makeEngine()
 
         guard await PermissionManager.requestMicrophone() else {
             micDenied = true
-            state = .error("Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone.")
+            live.state = .error("Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone.")
             return
         }
         micDenied = false
 
         let dir = session.dir
         sessionDirectory = dir
+        let partialURL = dir.appendingPathComponent("transcript.partial.md")
 
         // Reload prior confirmed segments; seed them (shown + finalized) and mark
         // the gap. New audio is timed to start where the prior recording ended.
@@ -697,8 +714,12 @@ final class RecordingController: ObservableObject {
         let marker = Segment(track: .me, start: offset, end: offset,
                              text: "— recording resumed after interruption —", confirmed: true)
         engine?.seed(prior + [marker])
-        journal = SegmentJournal(url: journalURL, alreadyWritten: Set(prior.map(\.id)))
+        journaledSegmentIDs = Set(prior.map(\.id))
+        journal = SegmentJournal(url: journalURL, alreadyWritten: journaledSegmentIDs)
         journal?.append(confirmed: [marker])
+        journaledSegmentIDs.insert(marker.id)
+        partialAppender = PartialTranscriptAppender(
+            url: partialURL, alreadyWritten: journaledSegmentIDs, headerExists: true)
 
         // Can't append to a closed .caf → write a new audio segment in the dir.
         let idx = nextAudioIndex(in: dir)
@@ -719,7 +740,7 @@ final class RecordingController: ObservableObject {
         let clock = RecordingClock()
         self.clock = clock
         recordingStartDate = Date()
-        recordingStarted = recordingStartDate
+        live.recordingStarted = recordingStartDate
 
         do {
             try mic.start()
@@ -731,7 +752,7 @@ final class RecordingController: ObservableObject {
             mic.stop()
             system.stop()
             AppLog.log("Capture failed to start: \(error.localizedDescription)", category: "record")
-            state = .error(error.localizedDescription)
+            live.state = .error(error.localizedDescription)
             startedByDetection = false
             return
         }
@@ -749,10 +770,9 @@ final class RecordingController: ObservableObject {
         engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
 
         startMeterTimer()
-        startPartialTimer()
         if reactivate { reactivateSessionManifest(dir: sessionDir) }
         else { beginSessionManifest(dir: sessionDir) }
-        state = .recording
+        live.state = .recording
     }
 
     /// Next free audio-segment index in a session dir (resume writes mic.2.caf, …).
@@ -765,13 +785,22 @@ final class RecordingController: ObservableObject {
     // MARK: Meters + crash-recovery autosave
 
     private func startMeterTimer() {
-        micLastActive = Date(); remoteLastActive = nil; micSeemsSilent = false
-        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        micLastActive = Date(); remoteLastActive = nil; live.micSeemsSilent = false
+        lastPublishedMicLevel = 0; lastPublishedRemoteLevel = 0
+        meterTimer = Timer.scheduledTimer(withTimeInterval: Self.meterInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.micLevel = self.micCapture?.level ?? 0
-                self.remoteLevel = self.systemCapture?.level ?? 0
-                self.evaluateMicSilence()
+                let mic = self.micCapture?.level ?? 0
+                let remote = self.systemCapture?.level ?? 0
+                if abs(mic - self.lastPublishedMicLevel) > Self.meterPublishThreshold {
+                    self.live.micLevel = mic
+                    self.lastPublishedMicLevel = mic
+                }
+                if abs(remote - self.lastPublishedRemoteLevel) > Self.meterPublishThreshold {
+                    self.live.remoteLevel = remote
+                    self.lastPublishedRemoteLevel = remote
+                }
+                self.evaluateMicSilence(mic: mic, remote: remote)
             }
         }
     }
@@ -781,39 +810,20 @@ final class RecordingController: ObservableObject {
     /// device selected. Self-clearing: any real mic level resets the timer and the
     /// warning. Suppressed when the mic is outright denied (a separate banner
     /// already covers that).
-    private func evaluateMicSilence() {
+    private func evaluateMicSilence(mic: Float, remote: Float) {
         let now = Date()
-        if micLevel >= Self.micSilenceFloor { micLastActive = now }
-        if remoteLevel >= Self.remoteActiveFloor { remoteLastActive = now }
+        if mic >= Self.micSilenceFloor { micLastActive = now }
+        if remote >= Self.remoteActiveFloor { remoteLastActive = now }
         let remoteActiveRecently = remoteLastActive.map { now.timeIntervalSince($0) < 4 } ?? false
         let micSilentFor = micLastActive.map { now.timeIntervalSince($0) } ?? 0
-        micSeemsSilent = !micDenied && remoteActiveRecently && micSilentFor >= Self.silenceGrace
-    }
-
-    private func startPartialTimer() {
-        partialTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.writePartial() }
-        }
+        live.micSeemsSilent = !micDenied && remoteActiveRecently && micSilentFor >= Self.silenceGrace
     }
 
     private func stopTimers() {
         meterTimer?.invalidate(); meterTimer = nil
-        partialTimer?.invalidate(); partialTimer = nil
-        micLevel = 0; remoteLevel = 0
-        micSeemsSilent = false; micLastActive = nil; remoteLastActive = nil
-    }
-
-    /// Periodically dumps the confirmed transcript to a `.partial` file so a
-    /// crash mid-recording can be recovered on next launch.
-    private func writePartial() {
-        guard let dir = sessionDirectory else { return }
-        let segments = engine?.finalTimeline() ?? []
-        guard !segments.isEmpty else { return }
-        let body = TranscriptWriter.makeBody(
-            title: meetingTitle.isEmpty ? "Recovered recording" : meetingTitle,
-            date: recordingStartDate ?? Date(), attendees: attendees,
-            destination: destinationPath, segments: segments)
-        try? body.write(to: dir.appendingPathComponent("transcript.partial.md"), atomically: true, encoding: .utf8)
+        live.micLevel = 0; live.remoteLevel = 0
+        lastPublishedMicLevel = 0; lastPublishedRemoteLevel = 0
+        live.micSeemsSilent = false; micLastActive = nil; remoteLastActive = nil
     }
 
     private func partialURL() -> URL? {
@@ -869,10 +879,14 @@ final class RecordingController: ObservableObject {
     }
 
     func stop() {
-        guard state == .recording else { return }
-        state = .stopping
-        recordingStarted = nil
+        guard live.state == .recording else { return }
+        live.state = .stopping
+        live.recordingStarted = nil
+        partialAppender = nil
         startedByDetection = false
+        if let merged = engine?.finalTimeline() {
+            segmentRelay?.submit(merged, immediate: true)
+        }
         stopTimers()
         // Freeze discovery; suggestions stay for the preview/speaker-assignment UI.
         metadataResolver.enterPreviewMode()
@@ -905,8 +919,8 @@ final class RecordingController: ObservableObject {
         // its audio stays linked in History — rather than silently discarded.
 
         // Write new destination/attendees back to the vault so they're indexed next time.
-        if !destinationPath.isEmpty { vault.ensureDestination(destinationPath) }
-        let attendeeNames = attendees
+        if !meeting.destinationPath.isEmpty { vault.ensureDestination(meeting.destinationPath) }
+        let attendeeNames = meeting.attendees
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
@@ -914,10 +928,10 @@ final class RecordingController: ObservableObject {
 
         let date = recordingStartDate ?? Date()
         let folder = AppPaths.unprocessedURL
-        let title = meetingTitle
-        let destination = destinationPath
-        let attendees = self.attendees
-        let manual = manualNotes
+        let title = meeting.meetingTitle
+        let destination = meeting.destinationPath
+        let attendees = meeting.attendees
+        let manual = meeting.manualNotes
         // Snapshot session identity into LOCALS before the async Task, so a new recording
         // starting immediately (which reassigns `sessionDirectory`/`engine`) can never
         // redirect this session's offline job — the root cause of the data-loss bug.
@@ -1006,7 +1020,7 @@ final class RecordingController: ObservableObject {
             }
         }
 
-        state = .idle
+        live.state = .idle
         // Now idle again — drain any work that was waiting for a live recording to end.
         offlineService.runNextIfIdle()
         summaryService.runNextIfIdle()
@@ -1199,7 +1213,7 @@ final class RecordingController: ObservableObject {
     /// Finish the review: rewrite the review's transcript with the (possibly newly-named)
     /// speakers + attendees, then clear the sheet. The review carries its OWN engine +
     /// target file (it came from the offline queue / History), so this never touches the
-    /// live Record session.
+    /// live Record meeting.
     func finishSpeakerReview() {
         let review = pendingSpeakerReview
         pendingSpeakerReview = nil
@@ -1341,7 +1355,7 @@ final class RecordingController: ObservableObject {
         guard pendingClear == nil else { return }            // never restart a live countdown
         guard clearArmable else { return }                   // only after a live recording finished
         guard settings.autoClearSeconds > 0 else { return }  // 0 = feature off
-        guard state == .idle else { return }
+        guard live.state == .idle else { return }
         guard lastTranscriptURL != nil else { return }       // nothing was saved → nothing to clear
         guard !clearIsBusy else { return }                   // a busy gate will re-arm us later
         startClearCountdown(seconds: Int(settings.autoClearSeconds))
@@ -1400,19 +1414,19 @@ final class RecordingController: ObservableObject {
     /// call. Re-guards the token + idle state so a stale timer or a recording that
     /// started in the meantime can't clobber live state.
     private func clearForNextMeeting(token: Int) {
-        guard token == clearToken, state == .idle else { return }
+        guard token == clearToken, live.state == .idle else { return }
         clearTimer?.invalidate(); clearTimer = nil
         pendingClear = nil
-        segments = []
-        meetingTitle = ""
-        attendees = ""
-        destinationPath = ""
-        manualNotes = ""
+        resetSegmentPublishState()
+        meeting.meetingTitle = ""
+        meeting.attendees = ""
+        meeting.destinationPath = ""
+        meeting.manualNotes = ""
         lastResult = nil
         lastTranscriptURL = nil
         autoPresentSpeakerReview = false
         clearArmable = false
-        resetDiscovery()
+        meeting.resetDiscovery()
         notes.reset()
         AppLog.log("Auto-cleared Record view for the next meeting", category: "record")
     }
@@ -1430,7 +1444,7 @@ final class RecordingController: ObservableObject {
         // The live (non-deferred) path requires a non-empty timeline; a deferred call
         // targets a file already saved to disk, so it skips the live-engine check.
         if targetURL == nil {
-            guard !(engine?.finalTimeline() ?? segments).isEmpty else { return }
+            guard !(engine?.finalTimeline() ?? live.segments).isEmpty else { return }
         }
         store.refresh()
         guard let item = store.items.first(where: { $0.url == url })
@@ -1447,13 +1461,13 @@ final class RecordingController: ObservableObject {
         // The record view's Title / Filing / Attendees fields stay editable after stopping —
         // they are the source of truth, so pull the LIVE values (not the saved meta) so a
         // title/destination set or changed post-recording actually reaches disk + History.
-        let liveTitle = meetingTitle.trimmingCharacters(in: .whitespaces)
+        let liveTitle = meeting.meetingTitle.trimmingCharacters(in: .whitespaces)
         if !liveTitle.isEmpty { meta.title = liveTitle }
-        let liveDest = destinationPath.trimmingCharacters(in: .whitespaces)
+        let liveDest = meeting.destinationPath.trimmingCharacters(in: .whitespaces)
         if !liveDest.isEmpty { meta.filing = liveDest }
-        meta.attendees = TranscriptWriter.splitAttendees(attendees)
+        meta.attendees = TranscriptWriter.splitAttendees(meeting.attendees)
 
-        let segs = engine?.finalTimeline() ?? segments
+        let segs = engine?.finalTimeline() ?? live.segments
         if segs.isEmpty {
             // No transcript body to regenerate (e.g. metadata-only edit) — just re-stamp.
             TranscriptWriter.updateFrontmatter(at: url) { m in
@@ -1461,11 +1475,11 @@ final class RecordingController: ObservableObject {
             }
         } else {
             let body = TranscriptWriter.makeBody(
-                title: meta.title, date: meta.date, attendees: attendees, destination: meta.filing,
-                segments: segs, manualNotes: manualNotes.isEmpty ? nil : manualNotes, meta: meta)
+                title: meta.title, date: meta.date, attendees: meeting.attendees, destination: meta.filing,
+                segments: segs, manualNotes: meeting.manualNotes.isEmpty ? nil : meeting.manualNotes, meta: meta)
             try? body.write(to: url, atomically: true, encoding: .utf8)
         }
-        vault.addPeople(TranscriptWriter.splitAttendees(attendees))
+        vault.addPeople(TranscriptWriter.splitAttendees(meeting.attendees))
         if !liveDest.isEmpty { vault.ensureDestination(liveDest) }
         store.refresh()
         transcriptRevision += 1
@@ -1491,9 +1505,9 @@ final class RecordingController: ObservableObject {
     /// live engine timeline, so this preserves it verbatim.
     private func syncMetadataToTranscript() {
         guard let url = lastTranscriptURL else { return }
-        let liveTitle = meetingTitle.trimmingCharacters(in: .whitespaces)
-        let liveDest = destinationPath.trimmingCharacters(in: .whitespaces)
-        let names = TranscriptWriter.splitAttendees(attendees)
+        let liveTitle = meeting.meetingTitle.trimmingCharacters(in: .whitespaces)
+        let liveDest = meeting.destinationPath.trimmingCharacters(in: .whitespaces)
+        let names = TranscriptWriter.splitAttendees(meeting.attendees)
 
         TranscriptWriter.updateFrontmatter(at: url) { m in
             if !liveTitle.isEmpty { m.title = liveTitle }
@@ -1539,7 +1553,7 @@ final class RecordingController: ObservableObject {
     /// Schedule unloading the model after the configured idle stretch, freeing
     /// its ~1 GB+ of resident memory. Reset whenever activity resumes. The model
     /// reloads on the next call/record while capture proceeds, so the only cost
-    /// is a short catch-up at the start of that session.
+    /// is a short catch-up at the start of that meeting.
     private func scheduleIdleUnload() {
         idleUnloadTimer?.invalidate(); idleUnloadTimer = nil
         // Idle-unload only applies to the persistent WhisperKit model. FluidAudio
@@ -1550,7 +1564,7 @@ final class RecordingController: ObservableObject {
         idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.settings.idleUnloadEnabled,
-                      self.state == .idle, !self.isRecording else { return }
+                      self.live.state == .idle, !self.isRecording else { return }
                 // Don't unload while the offline queue has work — it needs the heavier
                 // batch model and would just have to reload it immediately.
                 if self.offlineService.hasWork {
@@ -1575,12 +1589,12 @@ final class RecordingController: ObservableObject {
         let call = callDetector.activeCall
         let m = SessionManifest(
             id: dir.lastPathComponent,
-            title: meetingTitle, attendees: attendees, filing: destinationPath,
+            title: meeting.meetingTitle, attendees: meeting.attendees, filing: meeting.destinationPath,
             model: settings.model.rawValue, computeMode: settings.computeMode.rawValue,
             startedAt: recordingStartDate ?? Date(), lastHeartbeat: Date(),
             status: .active, startedByDetection: startedByDetection,
             callBundleID: call?.bundleID, callDisplayName: call?.displayName,
-            manualNotes: manualNotes, audioTracks: ["mic.caf", "system.caf"])
+            manualNotes: meeting.manualNotes, audioTracks: ["mic.caf", "system.caf"])
         manifest = m
         SessionStore.write(m, to: dir)
         AppLog.log("Session manifest written (active) — \(dir.lastPathComponent)", category: "record")
@@ -1620,12 +1634,12 @@ final class RecordingController: ObservableObject {
     /// (so a mid-call title/attendee/notes edit survives a crash), or finalize it.
     private func persistManifest(status: SessionManifest.Status) {
         guard var m = manifest, let dir = sessionDirectory else { return }
-        m.title = meetingTitle
-        m.attendees = attendees
-        m.filing = destinationPath
-        m.manualNotes = manualNotes
-        m.titleSource = titleSource
-        m.suggestedAttendees = suggestedAttendees.isEmpty ? nil : suggestedAttendees
+        m.title = meeting.meetingTitle
+        m.attendees = meeting.attendees
+        m.filing = meeting.destinationPath
+        m.manualNotes = meeting.manualNotes
+        m.titleSource = meeting.titleSource
+        m.suggestedAttendees = meeting.suggestedAttendees.isEmpty ? nil : meeting.suggestedAttendees
         m.lastHeartbeat = Date()
         m.status = status
         manifest = m
@@ -1670,7 +1684,7 @@ final class RecordingController: ObservableObject {
     /// through the model for the complete text. Idempotent: marks the manifest
     /// finalized so it won't reappear.
     func recover(_ session: RecoverableSession, reTranscribe: Bool) {
-        guard state == .idle || isErrorState else { return }
+        guard live.state == .idle || isErrorState else { return }
         let dir = session.dir
         let m = session.manifest
         Task {
@@ -1799,7 +1813,7 @@ final class RecordingController: ObservableObject {
     // MARK: Helpers
 
     private var isErrorState: Bool {
-        if case .error = state { return true }
+        if case .error = live.state { return true }
         return false
     }
 

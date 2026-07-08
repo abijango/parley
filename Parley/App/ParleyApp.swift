@@ -23,7 +23,7 @@ struct ParleyApp: App {
         // compact + with the title text hidden (see WindowConfigurator) and the sidebar
         // toggle living in the toolbar — the Cursor/Finder idiom: one thin top bar with
         // the traffic lights, columns beneath.
-        .windowToolbarStyle(.unifiedCompact)
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
 
         // Menu-bar companion: quick controls + status without opening the window.
         MenuBarExtra {
@@ -48,7 +48,7 @@ struct ParleyApp: App {
     static let mainWindowID = "main"
 
     private var menuBarSymbol: String {
-        switch recording.state {
+        switch recording.live.state {
         case .recording: return "record.circle.fill"
         case .preparing, .stopping: return "waveform.circle"
         case .error: return "exclamationmark.triangle"

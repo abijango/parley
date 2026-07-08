@@ -4,6 +4,7 @@ import SwiftUI
 /// window. Full controls (metadata, live transcript) live in the window.
 struct MenuBarView: View {
     @EnvironmentObject private var recording: RecordingController
+    @ObservedObject private var live = RecordingController.shared.live
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.openWindow) private var openWindow
 
@@ -16,7 +17,7 @@ struct MenuBarView: View {
                 statusBadge
             }
 
-            if case .error(let message) = recording.state {
+            if case .error(let message) = live.state {
                 StatusBanner(.danger, message)
             } else if let result = recording.lastResult {
                 Text(result).font(Theme.Typography.caption).foregroundStyle(.secondary)
@@ -65,7 +66,7 @@ struct MenuBarView: View {
         .controlSize(.large)
         .glassProminentButton()
         .tint(recording.isRecording ? .red : .green)
-        .disabled(recording.state == .preparing || recording.state == .stopping)
+        .disabled(live.state == .preparing || live.state == .stopping)
     }
 
     private var footer: some View {
@@ -86,7 +87,7 @@ struct MenuBarView: View {
     }
 
     private var statusText: String {
-        switch recording.state {
+        switch live.state {
         case .idle: return "Ready"
         case .preparing: return "Preparing…"
         case .recording: return "Recording"
@@ -96,7 +97,7 @@ struct MenuBarView: View {
     }
 
     private var statusColor: Color {
-        switch recording.state {
+        switch live.state {
         case .recording: return .red
         case .preparing, .stopping: return .orange
         case .error: return .red

@@ -118,8 +118,10 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
 
     /// Sum the mic + system rings into one mono buffer, anchored to the mic ring as the
     /// real-time clock (the mic tap runs continuously at 16 kHz even during silence).
+    nonisolated private static let maxMixSamplesPerTick = 16_000
+
     nonisolated private static func mixLive(mic: AudioRingBuffer, system: AudioRingBuffer) -> [Float]? {
-        let n = mic.availableToRead
+        let n = min(mic.availableToRead, maxMixSamplesPerTick)
         guard n > 0 else { return nil }
         var micBuf = [Float](), sysBuf = [Float]()
         let rm = mic.read(maxCount: n, into: &micBuf)

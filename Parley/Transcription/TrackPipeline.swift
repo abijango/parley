@@ -33,6 +33,7 @@ actor TrackPipeline {
     private var lastDecodedCount = 0               // buffer-relative sample count at last decode
     private var lastConfirmedTrackEnd: Float = 0   // track-relative seconds
     private var confirmedOut: [Segment] = []       // absolute (shared-clock) confirmed segments
+    private var drainScratch = [Float]()           // reused by `drain()` to avoid per-tick allocs
     private var running = false
 
     init(track: SpeakerTrack,
@@ -84,11 +85,20 @@ actor TrackPipeline {
 
             lastDecodedCount = audioSamples.count
             let clipFrom = max(0, Float(Double(lastConfirmedTrackEnd) - windowOffset))
+            let clipSampleIndex = min(audioSamples.count, Int(Double(clipFrom) * sampleRate))
+            let slice = clipSampleIndex < audioSamples.count
+                ? Array(audioSamples[clipSampleIndex...])
+                : [Float]()
+            guard !slice.isEmpty else {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                continue
+            }
+            let sliceOffset = Double(clipSampleIndex) / sampleRate
             let started = Date()
             do {
-                let segments = try await service.transcribe(audioSamples, clipFrom: clipFrom)
+                let segments = try await service.transcribe(slice, clipFrom: 0)
                 logLatencyIfBehind(decodeSeconds: Date().timeIntervalSince(started), newSeconds: newSeconds)
-                await applyConfirmation(segments)
+                await applyConfirmation(segments, audioOffsetSeconds: sliceOffset)
                 maybeTrim()
             } catch {
                 try? await Task.sleep(nanoseconds: 200_000_000)
@@ -105,10 +115,9 @@ actor TrackPipeline {
     private func drain() {
         let available = ring.availableToRead
         guard available > 0 else { return }
-        var buffer = [Float]()
-        let count = ring.read(maxCount: available, into: &buffer)
+        let count = ring.read(maxCount: available, into: &drainScratch)
         if count > 0 {
-            audioSamples.append(contentsOf: buffer.prefix(count))
+            audioSamples.append(contentsOf: drainScratch.prefix(count))
         }
     }
 
@@ -165,7 +174,7 @@ actor TrackPipeline {
     /// WhisperKit's rule: confirm all but the last `requiredSegmentsForConfirmation`
     /// segments; the tail stays tentative. Operates in track-relative time so it
     /// survives buffer trimming.
-    private func applyConfirmation(_ segments: [TranscriptionSegment]) async {
+    private func applyConfirmation(_ segments: [TranscriptionSegment], audioOffsetSeconds: Double = 0) async {
         let unconfirmedSegs: [TranscriptionSegment]
         if segments.count > requiredSegmentsForConfirmation {
             let confirmCount = segments.count - requiredSegmentsForConfirmation
@@ -176,7 +185,9 @@ actor TrackPipeline {
             for seg in prefix {
                 let trackEnd = Float(windowOffset) + seg.end
                 guard trackEnd > lastConfirmedTrackEnd else { continue }   // already confirmed
-                if let converted = convert(seg, confirmed: true) { confirmedOut.append(converted) }
+                if let converted = convert(seg, confirmed: true, audioOffsetSeconds: audioOffsetSeconds) {
+                    confirmedOut.append(converted)
+                }
                 maxEnd = max(maxEnd, trackEnd)
             }
             lastConfirmedTrackEnd = maxEnd
@@ -184,19 +195,20 @@ actor TrackPipeline {
             unconfirmedSegs = segments
         }
 
-        let unconfirmedOut = unconfirmedSegs.compactMap { convert($0, confirmed: false) }
-        await merger.update(track: track, confirmed: confirmedOut, unconfirmed: unconfirmedOut)
+        let unconfirmedOut = unconfirmedSegs.compactMap { convert($0, confirmed: false, audioOffsetSeconds: audioOffsetSeconds) }
+        merger.update(track: track, confirmed: confirmedOut, unconfirmed: unconfirmedOut)
     }
 
     /// Maps a WhisperKit segment (buffer-relative) onto the shared clock:
     /// track time = buffer time + windowOffset; shared time = + startElapsed.
-    private func convert(_ seg: TranscriptionSegment, confirmed: Bool) -> Segment? {
+    private func convert(_ seg: TranscriptionSegment, confirmed: Bool, audioOffsetSeconds: Double = 0) -> Segment? {
         let text = Self.cleanText(seg.text)
         guard !text.isEmpty else { return nil }
+        let base = windowOffset + audioOffsetSeconds
         return Segment(
             track: track,
-            start: startElapsed + windowOffset + TimeInterval(seg.start),
-            end: startElapsed + windowOffset + TimeInterval(seg.end),
+            start: startElapsed + base + TimeInterval(seg.start),
+            end: startElapsed + base + TimeInterval(seg.end),
             text: text,
             confirmed: confirmed
         )

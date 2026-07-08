@@ -291,3 +291,59 @@ final class JobProgressRelay: @unchecked Sendable {
     }
 
 }
+
+// MARK: - SegmentPublishRelay
+
+/// Throttles high-rate live-transcript timeline updates before they hit SwiftUI.
+/// Mirrors `JobProgressRelay`: ≤5 Hz for partial updates; `immediate` bypasses the
+/// throttle (confirm boundaries, seed/resume, stop).
+@MainActor
+final class SegmentPublishRelay {
+    private let onPublish: ([Segment]) -> Void
+    private var pending: [Segment]?
+    private var lastPublishTime = Date.distantPast
+    private let minInterval: TimeInterval = 0.2
+    private var deferredTask: Task<Void, Never>?
+
+    init(onPublish: @escaping ([Segment]) -> Void) {
+        self.onPublish = onPublish
+    }
+
+    /// Queue a timeline snapshot. Partial updates are coalesced; confirm boundaries
+    /// should pass `immediate: true` so the UI and journal stay in sync.
+    func submit(_ segments: [Segment], immediate: Bool = false) {
+        pending = segments
+        if immediate {
+            flush()
+            return
+        }
+        let elapsed = Date().timeIntervalSince(lastPublishTime)
+        if elapsed >= minInterval {
+            flush()
+        } else if deferredTask == nil {
+            let delay = minInterval - elapsed
+            deferredTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, !Task.isCancelled else { return }
+                self.deferredTask = nil
+                self.flush()
+            }
+        }
+    }
+
+    func reset() {
+        deferredTask?.cancel()
+        deferredTask = nil
+        pending = nil
+        lastPublishTime = .distantPast
+    }
+
+    private func flush() {
+        deferredTask?.cancel()
+        deferredTask = nil
+        guard let pending else { return }
+        lastPublishTime = Date()
+        self.pending = nil
+        onPublish(pending)
+    }
+}

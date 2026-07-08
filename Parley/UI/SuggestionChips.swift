@@ -8,6 +8,7 @@ import SwiftUI
 /// the roster) and stay available after the call ends, which helps when
 /// matching diarized speakers to names.
 struct SuggestionChips: View {
+    @ObservedObject var meeting: MeetingSessionState
     @ObservedObject var recording: RecordingController
 
     private static let joinFormatter: DateFormatter = {
@@ -17,7 +18,7 @@ struct SuggestionChips: View {
     }()
 
     private var pending: [SuggestedAttendee] {
-        recording.suggestedAttendees.filter { !$0.accepted && !$0.dismissed }
+        meeting.suggestedAttendees.filter { !$0.accepted && !$0.dismissed }
     }
 
     var body: some View {

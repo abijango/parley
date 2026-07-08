@@ -7,7 +7,7 @@ import SwiftUI
 /// When `onNameSpeaker` is set (FluidAudio engine), the speaker label is a tappable
 /// chip — clicking it names that speaker (free text or a Rolodex contact), which
 /// relabels all their lines and enrols their voiceprint.
-struct LiveTranscriptView: View {
+struct LiveTranscriptView: View, Equatable {
     let segments: [Segment]
     let isRecording: Bool
     var people: [String] = []
@@ -17,12 +17,53 @@ struct LiveTranscriptView: View {
     /// Offline-only mode: no live stream is produced; show a "generated at stop"
     /// placeholder while recording instead of "Listening…".
     var liveDisabled: Bool = false
+    /// When the parent shows a pre-record hero with the primary action, suppress the
+    /// duplicate empty-state overlay.
+    var hidesEmptyState: Bool = false
+
+    /// Default number of trailing rows rendered; older rows load on demand.
+    static let defaultVisibleTail = 300
+    @State private var visibleTail = Self.defaultVisibleTail
+
+    private var displayedSegments: [Segment] {
+        guard segments.count > visibleTail else { return segments }
+        return Array(segments.suffix(visibleTail))
+    }
+
+    private var hiddenEarlierCount: Int {
+        max(0, segments.count - visibleTail)
+    }
+
+    static func == (lhs: LiveTranscriptView, rhs: LiveTranscriptView) -> Bool {
+        lhs.segments.count == rhs.segments.count
+            && lhs.segments.last?.id == rhs.segments.last?.id
+            && lhs.segments.last?.text == rhs.segments.last?.text
+            && lhs.isRecording == rhs.isRecording
+            && lhs.liveDisabled == rhs.liveDisabled
+            && lhs.hidesEmptyState == rhs.hidesEmptyState
+            && lhs.people == rhs.people
+            && lhs.attendees == rhs.attendees
+            && (lhs.onNameSpeaker != nil) == (rhs.onNameSpeaker != nil)
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Theme.Spacing.small) {
-                    ForEach(segments) { segment in
+                    if hiddenEarlierCount > 0 {
+                        Button {
+                            visibleTail = min(segments.count, visibleTail + 200)
+                        } label: {
+                            Label("Show earlier (\(hiddenEarlierCount) hidden)", systemImage: "arrow.up.circle")
+                                .font(Theme.Typography.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.bottom, Theme.Spacing.xSmall)
+                    }
+
+                    ForEach(displayedSegments) { segment in
                         TranscriptRow(segment: segment, people: people, attendees: attendees, onNameSpeaker: onNameSpeaker)
                             .id(segment.id)
                     }
@@ -31,8 +72,14 @@ struct LiveTranscriptView: View {
                 .padding(Theme.Spacing.large)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .overlay { if segments.isEmpty { emptyState } }
-            .onChange(of: segments.count) {
+            .overlay { if segments.isEmpty, !hidesEmptyState { emptyState } }
+            .onChange(of: segments.count) { _, newCount in
+                if newCount < visibleTail { visibleTail = Self.defaultVisibleTail }
+                withAnimation(Theme.Motion.gentle) {
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+            }
+            .onChange(of: segments.last?.text) {
                 withAnimation(Theme.Motion.gentle) {
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
@@ -40,8 +87,8 @@ struct LiveTranscriptView: View {
         }
     }
 
-    // The primary action (Start recording) lives in the always-visible control bar
-    // above, so these empty states are informational — no redundant action button.
+    // The pre-record hero owns the Start action; these empty states cover in-session
+    // cases (listening, offline-only) without duplicating that button.
     @ViewBuilder private var emptyState: some View {
         if liveDisabled {
             EmptyStateView(
