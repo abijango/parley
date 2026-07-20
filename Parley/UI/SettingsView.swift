@@ -178,7 +178,7 @@ struct SettingsView: View {
     private var summaryTab: some View {
         Form {
             Section("Meeting summaries") {
-                helpText("After a recording's speakers are assigned, Claude writes a summary in the background. When it's ready, review it in History → \"Review\", set where it's filed, then commit it to your vault.")
+                helpText("After a recording's speakers are assigned, a summary is written in the background (Claude or Grok — your choice below). When it's ready, review it in History → \"Review\", set where it's filed, then commit it to your vault.")
                 SettingRow("Auto-summarize after speakers are assigned",
                            description: "When off, summaries only run when you press Summarize on a transcript in History.") {
                     Toggle("", isOn: $settings.autoRunClaude).labelsHidden()
@@ -188,34 +188,60 @@ struct SettingsView: View {
                     Toggle("", isOn: $settings.deleteAudioAfterFiling).labelsHidden()
                 }
                 SettingRow("Ask before summarizing a batch",
-                           description: "When several notes become ready at once (a backlog, or naming speakers across many), ask once rather than running them all silently — so a burst never unexpectedly uses up Claude.") {
+                           description: "When several notes become ready at once (a backlog, or naming speakers across many), ask once rather than running them all silently — so a burst never unexpectedly burns API usage.") {
                     Stepper(value: $settings.summaryBulkThreshold, in: 2...50) {
                         Text("\(settings.summaryBulkThreshold) notes").font(Theme.Typography.body)
                     }
                     .frame(maxWidth: 150)
                 }
                 SettingRow("Auto-resume after a usage limit",
-                           description: "If Claude hits a usage/rate limit, the summary queue pauses and resumes automatically when the limit lifts. Off keeps it paused until you press Resume.") {
+                           description: "If the summary CLI hits a usage/rate limit, the queue pauses and resumes automatically when the limit lifts. Off keeps it paused until you press Resume.") {
                     Toggle("", isOn: $settings.summaryAutoResumeAfterLimit).labelsHidden()
                 }
             }
 
-            Section("Claude") {
-                ClaudeConnectionView()
-                LabeledContent("Model") {
-                    TextField("sonnet", text: $settings.claudeModel)
-                        .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
-                        .frame(maxWidth: 220)
+            Section("Provider") {
+                Picker("Summarize with", selection: $settings.summaryBackendRaw) {
+                    ForEach(SummaryBackend.allCases) { backend in
+                        Text(backend.displayName).tag(backend.rawValue)
+                    }
                 }
-                LabeledContent("CLI") {
-                    TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
-                        .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                .pickerStyle(.segmented)
+                helpText(settings.summaryBackend.blurb)
+            }
+
+            if settings.summaryBackend == .claude {
+                Section("Claude") {
+                    ClaudeConnectionView()
+                    LabeledContent("Model") {
+                        TextField("sonnet", text: $settings.claudeModel)
+                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                            .frame(maxWidth: 220)
+                    }
+                    LabeledContent("CLI") {
+                        TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
+                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                    }
+                    helpText("Runs `claude -p` (raw prompt, no skill/tools). The status above shows whether the CLI is installed and logged in.")
                 }
-                helpText("Runs `claude -p` (raw prompt, no skill/tools; extended thinking left on). The status above shows whether the CLI is installed and logged in.")
+            } else {
+                Section("Grok") {
+                    GrokConnectionView()
+                    LabeledContent("Model") {
+                        TextField("grok-4.5", text: $settings.grokModel)
+                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                            .frame(maxWidth: 220)
+                    }
+                    LabeledContent("CLI") {
+                        TextField("~/.grok/bin/grok", text: $settings.grokBinaryPath)
+                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                    }
+                    helpText("Runs `grok -p` (raw prompt, no vault tools; JSON on stdout). The status above shows whether the CLI is installed and logged in.")
+                }
             }
 
             Section("Prompt") {
-                helpText("The instructions Claude follows. Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
+                helpText("The instructions the summarizer follows (same for Claude and Grok). Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
                 editorStyle(TextEditor(text: $settings.summaryPromptTemplate), height: 220)
                 HStack {
                     Spacer()

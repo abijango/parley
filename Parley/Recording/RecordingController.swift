@@ -283,14 +283,21 @@ final class RecordingController: ObservableObject {
 
         // Cache-backed review (no live engine): enrol the voiceprint from the persisted
         // centroid and record the assignment — the transcript is relabeled on Done.
-        if let review = pendingSpeakerReview, let cache = review.cache {
-            if let c = cache.speakers.first(where: { $0.id == speakerId })?.centroid, !c.isEmpty {
-                enrollVoiceprint(name: name, centroid: c, model: cache.embeddingModelID)
+        if let review = pendingSpeakerReview, review.cache != nil {
+            if let c = review.cache?.speakers.first(where: { $0.id == speakerId })?.centroid, !c.isEmpty,
+               let model = review.cache?.embeddingModelID {
+                enrollVoiceprint(name: name, centroid: c, model: model)
             } else {
                 AppLog.log("Named speaker \(speakerId) as \(name) (cache) — no centroid, labeled only", category: "record")
             }
             pendingSpeakerReview?.assignments[speakerId] = name
             pendingSpeakerReview?.attendees = OfflineProcessingService.merge(review.attendees, with: [name])
+            // Persist immediately so reopening Assign Speakers shows the name.
+            if var cache = pendingSpeakerReview?.cache {
+                cache.applyAssignments([speakerId: name])
+                pendingSpeakerReview?.cache = cache
+                if let dir = review.sessionDir { cache.write(to: dir) }
+            }
             return
         }
 
@@ -684,7 +691,9 @@ final class RecordingController: ObservableObject {
         guard live.state == .idle || isErrorState else { return }
         cancelIdleUnload()
         let m = session.manifest
-        startedByDetection = false          // user-driven resume → manual stop
+        // Preserve detection origin so call-end can still auto-stop (AUTO-RESUME and
+        // Recovery-sheet resume of an auto-started meeting both land here).
+        startedByDetection = m.startedByDetection
         live.state = .preparing
         cancelPendingClear(); clearArmable = false   // a resumed recording supersedes any pending auto-clear
         meeting.meetingTitle = m.title
@@ -1052,15 +1061,18 @@ final class RecordingController: ObservableObject {
         /// Cache-backed review (opened from a persisted pass — no live engine). When set,
         /// naming enrols from the cached centroid and finishing relabels the transcript by
         /// text substitution, so assignment needs no re-run of the offline pass.
-        let cache: SpeakerCache?
+        /// Mutable so naming can update `resolvedName` and write `speakers.json` immediately.
+        var cache: SpeakerCache?
         let sessionDir: URL?
         /// speakerId → assigned name, accumulated during a cache-backed review.
+        /// Seeded from cache auto-ids when the sheet opens so Done always applies them.
         var assignments: [String: String] = [:]
 
         init(speakers: [CallSpeakerSummary], mixedCaf: URL?,
              engine: SpeakerCapableEngine? = nil, transcriptURL: URL? = nil,
              title: String = "", filing: String = "", attendees: String = "", autoSummarize: Bool = false,
-             cache: SpeakerCache? = nil, sessionDir: URL? = nil) {
+             cache: SpeakerCache? = nil, sessionDir: URL? = nil,
+             assignments: [String: String] = [:]) {
             self.speakers = speakers
             self.mixedCaf = mixedCaf
             self.engine = engine
@@ -1071,6 +1083,7 @@ final class RecordingController: ObservableObject {
             self.autoSummarize = autoSummarize
             self.cache = cache
             self.sessionDir = sessionDir
+            self.assignments = assignments
         }
     }
 
@@ -1091,10 +1104,19 @@ final class RecordingController: ObservableObject {
                 CallSpeakerSummary(id: $0.id, resolvedName: $0.resolvedName, talkSeconds: $0.talkSeconds,
                                    sampleStart: $0.sampleStart, sampleEnd: $0.sampleEnd, firstLine: $0.firstLine)
             }
+            // Seed assignments from auto-resolved + previously-persisted names so Done
+            // always applies them even if the user doesn't re-tap Name.
+            var seeded: [String: String] = [:]
+            for s in cache.speakers {
+                if let n = s.resolvedName?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty {
+                    seeded[s.id] = n
+                }
+            }
             pendingSpeakerReview = SpeakerReview(
                 speakers: summaries, mixedCaf: mixed, engine: nil, transcriptURL: transcript,
                 title: title, filing: filing, attendees: attendees,
-                autoSummarize: settings.autoRunClaude, cache: cache, sessionDir: dir)
+                autoSummarize: settings.autoRunClaude, cache: cache, sessionDir: dir,
+                assignments: seeded)
             autoPresentSpeakerReview = true
             AppLog.log("Assign speakers from cache (\(cache.speakers.count)) — \(transcript.lastPathComponent)", category: "record")
         } else {
@@ -1220,12 +1242,18 @@ final class RecordingController: ObservableObject {
         autoPresentSpeakerReview = false
 
         if let review, review.cache != nil, let url = review.transcriptURL {
-            // Cache-backed: relabel the transcript by substituting "Speaker N" → name
-            // (no engine, no re-run). Voiceprints were already enrolled in nameSpeaker.
-            if !review.assignments.isEmpty,
+            // Cache-backed: merge auto-resolved + user assignments, then text-substitute
+            // "Speaker N" → name (no engine). Voiceprints enrolled in nameSpeaker.
+            let assignments = SpeakerCache.mergedAssignments(cache: review.cache, user: review.assignments)
+            if !assignments.isEmpty,
                let body = try? String(contentsOf: url, encoding: .utf8) {
-                let relabeled = SpeakerCache.relabel(body, assignments: review.assignments)
+                let relabeled = SpeakerCache.relabel(body, assignments: assignments)
                 if relabeled != body { try? relabeled.write(to: url, atomically: true, encoding: .utf8) }
+            }
+            // Persist resolved names so reopening the sheet keeps them.
+            if var cache = review.cache, let dir = review.sessionDir {
+                cache.applyAssignments(assignments)
+                cache.write(to: dir)
             }
             TranscriptWriter.updateFrontmatter(at: url) {
                 $0.attendees = TranscriptWriter.splitAttendees(review.attendees)
@@ -1234,15 +1262,13 @@ final class RecordingController: ObservableObject {
             store.refresh()
             transcriptRevision += 1
             AppLog.log("Assigned speakers from cache: \(url.lastPathComponent)", category: "record")
-            if !TranscriptStore.bodyHasGenericLabels(at: url),
-               let item = store.items.first(where: { $0.url == url })
-                ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) {
-                summaryService.enqueueIfPolicyAllows(item, trigger: .speakerReviewCompleted)
-            }
+            enqueueSummaryAfterSpeakerReview(url: url)
         } else if let review, let url = review.transcriptURL, let eng = review.engine {
             let segs = eng.finalTimeline()
-            let audioDuration = SessionStore.audioDuration(url.deletingLastPathComponent()
-                .appendingPathComponent("mic.caf"))
+            let sessionDir = url.deletingLastPathComponent()
+            // Prefer multi-leg full duration when the session was resumed mid-call.
+            let micLegs = MeetingFiles.audioSegmentURLs(in: sessionDir, base: "mic")
+            let audioDuration = micLegs.map(SessionStore.audioDuration).reduce(0, +)
             if TranscriptCoverage.isSafeReplacement(offline: segs, existingFile: url, audioDuration: audioDuration) {
                 TranscriptWriter.rewriteTranscriptFile(at: url, segments: segs, title: review.title,
                                                        filing: review.filing, attendees: review.attendees)
@@ -1254,13 +1280,7 @@ final class RecordingController: ObservableObject {
             store.refresh()
             transcriptRevision += 1
             AppLog.log("Rewrote transcript (reviewed speakers): \(url.lastPathComponent)", category: "record")
-            // Becoming fully-named is the moment a note is summary-ready — enqueue it
-            // (policy-gated), unless generic labels remain after a coverage-kept rewrite.
-            if !TranscriptStore.bodyHasGenericLabels(at: url),
-               let item = store.items.first(where: { $0.url == url })
-                ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) {
-                summaryService.enqueueIfPolicyAllows(item, trigger: .speakerReviewCompleted)
-            }
+            enqueueSummaryAfterSpeakerReview(url: url)
         } else {
             // Fallback (no decoupled context): rewrite the live transcript.
             rewriteLastTranscript(reason: "reviewed speakers")
@@ -1774,15 +1794,21 @@ final class RecordingController: ObservableObject {
     /// All audio segment files for a track base name, in capture order
     /// (`mic.caf`, `mic.2.caf`, …).
     private func audioSegmentURLs(in dir: URL, base: String) -> [URL] {
-        var urls: [URL] = []
-        let first = dir.appendingPathComponent("\(base).caf")
-        if FileManager.default.fileExists(atPath: first.path) { urls.append(first) }
-        var idx = 2
-        while case let u = dir.appendingPathComponent("\(base).\(idx).caf"),
-              FileManager.default.fileExists(atPath: u.path) {
-            urls.append(u); idx += 1
+        MeetingFiles.audioSegmentURLs(in: dir, base: base)
+    }
+
+    /// Enqueue a summary when the body is fully named; otherwise log why it was skipped.
+    private func enqueueSummaryAfterSpeakerReview(url: URL) {
+        if TranscriptStore.bodyHasGenericLabels(at: url) {
+            AppLog.log("Speaker review done but summary not enqueued — generic labels remain in \(url.lastPathComponent)", category: "record")
+            return
         }
-        return urls
+        if let item = store.items.first(where: { $0.url == url })
+            ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) {
+            summaryService.enqueueIfPolicyAllows(item, trigger: .speakerReviewCompleted)
+        } else {
+            AppLog.log("Speaker review done but summary not enqueued — transcript not in store: \(url.lastPathComponent)", category: "record")
+        }
     }
 
     /// Marks a transcript processed after a successful Claude run: moves it into

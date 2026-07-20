@@ -27,9 +27,9 @@ packages:
     from: "2.4.0"           # SwiftUI GitHub-flavored markdown renderer
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio.git
-    from: "0.15.2"          # native Parakeet ASR + diarization + speaker embeddings (Apache-2.0).
-                            # 0.15.0 "Multistreamer" adds the multilingual Nemotron streaming
-                            # ASR used for low-latency (~560ms) live transcription.
+    from: "0.15.5"          # native Parakeet ASR + diarization + speaker embeddings (Apache-2.0).
+                            # 0.15.5: unified Parakeet ASR, Sortformer v3 diar fixes, resumable
+                            # ModelHub downloads, custom vocabulary hooks, streaming seam fixes.
 
 targets:
   Parley:                 # TODO(app-name)

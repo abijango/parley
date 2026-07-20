@@ -81,4 +81,18 @@ enum MeetingFiles {
             return false
         }
     }
+
+    /// All audio segment files for a track base name, in capture order
+    /// (`mic.caf`, `mic.2.caf`, …). Used by offline multi-leg concat after a mid-call resume.
+    static func audioSegmentURLs(in dir: URL, base: String) -> [URL] {
+        var urls: [URL] = []
+        let first = dir.appendingPathComponent("\(base).caf")
+        if FileManager.default.fileExists(atPath: first.path) { urls.append(first) }
+        var idx = 2
+        while case let u = dir.appendingPathComponent("\(base).\(idx).caf"),
+              FileManager.default.fileExists(atPath: u.path) {
+            urls.append(u); idx += 1
+        }
+        return urls
+    }
 }

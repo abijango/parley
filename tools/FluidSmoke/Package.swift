@@ -7,7 +7,7 @@ let package = Package(
     name: "FluidSmoke",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.14.8")
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.5")
     ],
     targets: [
         .executableTarget(

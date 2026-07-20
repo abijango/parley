@@ -48,4 +48,27 @@ struct SpeakerCache: Codable, Equatable {
         }
         return out
     }
+
+    /// Merge user-assigned names with any auto-resolved names already on the cache.
+    /// User assignments win on id collision so a rename sticks.
+    static func mergedAssignments(cache: SpeakerCache?, user: [String: String]) -> [String: String] {
+        var out = user
+        guard let cache else { return out }
+        for s in cache.speakers {
+            guard let name = s.resolvedName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty else { continue }
+            if out[s.id] == nil { out[s.id] = name }
+        }
+        return out
+    }
+
+    /// Write `assignments` into each matching speaker's `resolvedName` (in place).
+    mutating func applyAssignments(_ assignments: [String: String]) {
+        for i in speakers.indices {
+            if let raw = assignments[speakers[i].id] {
+                let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !name.isEmpty { speakers[i].resolvedName = name }
+            }
+        }
+    }
 }

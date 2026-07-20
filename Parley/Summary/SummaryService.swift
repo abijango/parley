@@ -2,11 +2,12 @@ import Foundation
 import AppKit
 import UserNotifications
 
-/// Drives the single (Claude, raw-prompt) meeting-summary flow asynchronously:
+/// Drives the meeting-summary flow asynchronously via Claude or Grok CLI (raw prompt):
 /// generate in the background → stage the result → user reviews in History → commit to the
 /// vault (or discard / regenerate). Replaces the old skill-based auto-run. "Ready for review"
 /// is represented purely by the presence of a staging file (`.staging/<transcript>.md`), so it
 /// survives app restarts; in-flight jobs are tracked in `jobs` only while running.
+/// Backend is selected in Settings (`summaryBackend`).
 @MainActor
 final class SummaryService: ObservableObject, ProcessingQueue {
     enum JobState: Equatable {
@@ -257,7 +258,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         lastSummaryStartedAt = Date()
         let item = queue.removeFirst()
         runningID = item.id
-        runningActivity = "Starting Claude…"
+        let backend = settings.summaryBackend
+        runningActivity = backend == .grok ? "Starting Grok…" : "Starting Claude…"
         setSummaryStatus(.running, for: item)
         let built = SummaryPromptBuilder.build(
             template: settings.summaryPromptTemplate,
@@ -265,17 +267,27 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             attendees: item.meta.attendees.joined(separator: ", "),
             destination: item.meta.filing,
             contactsURL: settings.contactsURL)
-        let binary = settings.claudeBinaryPath
-        let model = settings.claudeModel
+        let claudeBinary = settings.claudeBinaryPath
+        let claudeModel = settings.claudeModel
+        let grokBinary = settings.grokBinaryPath
+        let grokModel = settings.grokModel
         let staged = Self.stagingURL(for: item.url)
         let failureTrip = settings.summaryFailureTripThreshold
-        AppLog.log("Summary: started for \(item.url.lastPathComponent) (model=\(model))", category: "summary")
+        let backendLabel = backend.displayName
+        AppLog.log("Summary: started for \(item.url.lastPathComponent) (backend=\(backend.rawValue), model=\(backend == .grok ? grokModel : claudeModel))", category: "summary")
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            let result = Self.runClaudeStreaming(binary: binary, prompt: built.prompt, model: model,
-                onActivity: { line in
-                    Task { @MainActor [weak self] in self?.runningActivity = line }
-                })
+            let result: RunResult
+            switch backend {
+            case .claude:
+                result = Self.runClaudeStreaming(binary: claudeBinary, prompt: built.prompt, model: claudeModel,
+                    onActivity: { line in
+                        Task { @MainActor [weak self] in self?.runningActivity = line }
+                    })
+            case .grok:
+                Task { @MainActor [weak self] in self?.runningActivity = "Grok is writing…" }
+                result = Self.runGrok(binary: grokBinary, prompt: built.prompt, model: grokModel)
+            }
             await MainActor.run {
                 guard let self else { return }
                 switch result {
@@ -287,10 +299,14 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                         self.setSummaryStatus(.done, for: item)
                         self.consecutiveFailures = 0
                         self.backoffAttempt = 0
-                        ClaudeUsageStore.shared.record(usage)         // tally what the app spent
-                        ClaudeConnection.shared.noteRunSucceeded()    // a real success ⇒ connected
+                        if backend == .claude {
+                            ClaudeUsageStore.shared.record(usage)         // tally Claude spend only
+                            ClaudeConnection.shared.noteRunSucceeded()
+                        } else {
+                            GrokConnection.shared.noteRunSucceeded()
+                        }
                         Self.notifyReady(title: item.meta.title)
-                        AppLog.log("Summary: ready for review — \(staged.lastPathComponent)", category: "summary")
+                        AppLog.log("Summary: ready for review — \(staged.lastPathComponent) (\(backendLabel))", category: "summary")
                     } catch {
                         self.jobs[item.id] = .failed("Couldn't write the summary: \(error.localizedDescription)")
                         self.setSummaryStatus(.failed, for: item)
@@ -301,20 +317,26 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     self.queue.insert(item, at: 0)
                     self.jobs[item.id] = .pending(since: Date())
                     self.setSummaryStatus(.paused, for: item)
-                    ClaudeConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
-                    AppLog.log("Summary: Claude usage/rate limit hit (\(trip.matchedPhrase)) — pausing queue", category: "summary")
+                    if backend == .claude {
+                        ClaudeConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
+                    } else {
+                        GrokConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
+                    }
+                    AppLog.log("Summary: \(backendLabel) usage/rate limit hit (\(trip.matchedPhrase)) — pausing queue", category: "summary")
                     self.tripThrottle(reason: .usageLimit, resumeAt: trip.resumeAt)
                 case .failure(let reason, let setupIssue):
                     self.jobs[item.id] = .failed(reason)
                     self.setSummaryStatus(.failed, for: item)
                     self.consecutiveFailures += 1
                     // Keep the connection badge honest so the user is pointed at setup.
-                    switch setupIssue {
-                    case .notInstalled:  ClaudeConnection.shared.refresh()
-                    case .notLoggedIn:   ClaudeConnection.shared.noteAuthFailure(detail: reason)
-                    case .none:          break
+                    switch (backend, setupIssue) {
+                    case (.claude, .notInstalled):  ClaudeConnection.shared.refresh()
+                    case (.claude, .notLoggedIn):   ClaudeConnection.shared.noteAuthFailure(detail: reason)
+                    case (.grok, .notInstalled):    GrokConnection.shared.refresh()
+                    case (.grok, .notLoggedIn):     GrokConnection.shared.noteAuthFailure(detail: reason)
+                    default: break
                     }
-                    AppLog.log("Summary: failed for \(item.url.lastPathComponent) — \(reason)", category: "summary")
+                    AppLog.log("Summary: failed for \(item.url.lastPathComponent) (\(backendLabel)) — \(reason)", category: "summary")
                     if self.consecutiveFailures >= failureTrip {
                         self.tripThrottle(reason: .repeatedFailures, resumeAt: nil)
                     }
@@ -500,6 +522,93 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                                 : .success(noteText, usage)
     }
 
+    /// Runs `grok -p` with `--output-format json`, parsing the final `.text` field as
+    /// the staged note body. Same timeout / usage-limit / auth classification as Claude.
+    private nonisolated static func runGrok(binary: String, prompt: String, model: String) -> RunResult {
+        let built: (process: Process, stdout: Pipe, stderr: Pipe)
+        do {
+            built = try GrokRunner.makeRawSummaryProcess(binaryPath: binary, prompt: prompt, model: model)
+        } catch let e as GrokRunner.RunError {
+            if case .binaryNotFound = e {
+                return .failure(reason: e.localizedDescription, setupIssue: .notInstalled)
+            }
+            return .failure(reason: e.localizedDescription, setupIssue: nil)
+        } catch {
+            return .failure(reason: error.localizedDescription, setupIssue: nil)
+        }
+        do { try built.process.run() }
+        catch { return .failure(reason: "Failed to launch grok: \(error.localizedDescription)", setupIssue: nil) }
+
+        let flag = TimeoutFlag()
+        let watchdog = DispatchWorkItem {
+            guard built.process.isRunning else { return }
+            flag.trip()
+            built.process.terminate()
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + runTimeout, execute: watchdog)
+
+        let outData = built.stdout.fileHandleForReading.readDataToEndOfFile()
+        let errData = built.stderr.fileHandleForReading.readDataToEndOfFile()
+        built.process.waitUntilExit()
+        watchdog.cancel()
+
+        if flag.tripped {
+            return .failure(reason: "Summary timed out after \(Int(runTimeout / 60)) min — retry.", setupIssue: nil)
+        }
+
+        let code = built.process.terminationStatus
+        let out = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let err = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if let trip = ClaudeUsageLimit.detect(stdout: out, stderr: err, exitCode: code) {
+            return .usageLimited(trip)
+        }
+
+        let lower = (out + "\n" + err).lowercased()
+        let looksAuth = lower.contains("not logged in")
+            || lower.contains("please log in")
+            || lower.contains("unauthorized")
+            || lower.contains("authentication")
+            || lower.contains("sign in")
+            || lower.contains("login required")
+
+        switch GrokRunner.parseJSONResult(stdout: out) {
+        case .text(let note) where code == 0:
+            return .success(GrokRunner.sanitizeNoteText(note), nil)
+        case .error(let msg):
+            if looksAuth || Self.looksLikeAuthMessage(msg) {
+                return .failure(
+                    reason: "Grok isn't logged in. Open Settings → Summary → Grok to log in, then retry.",
+                    setupIssue: .notLoggedIn)
+            }
+            return .failure(reason: String(msg.prefix(240)), setupIssue: nil)
+        case .text, .unparseable:
+            if code != 0 {
+                if looksAuth {
+                    return .failure(
+                        reason: "Grok isn't logged in. Open Settings → Summary → Grok to log in, then retry.",
+                        setupIssue: .notLoggedIn)
+                }
+                let detail = err.isEmpty ? (out.isEmpty ? "grok exited with code \(code)" : out) : err
+                return .failure(reason: String(detail.prefix(240)), setupIssue: nil)
+            }
+            // Exit 0 but non-JSON: treat raw stdout as the note if it looks like markdown.
+            let plain = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !plain.isEmpty, plain.first != "{" {
+                return .success(GrokRunner.sanitizeNoteText(plain), nil)
+            }
+            return .failure(reason: "grok produced no usable output.", setupIssue: nil)
+        }
+    }
+
+    nonisolated private static func looksLikeAuthMessage(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("not logged in")
+            || lower.contains("unauthorized")
+            || lower.contains("authentication")
+            || lower.contains("login")
+    }
+
     /// Blocking text-output variant — kept for reference while streaming is validated.
     private nonisolated static func runClaude(binary: String, prompt: String, model: String) -> RunResult {
         let built: (process: Process, stdout: Pipe, stderr: Pipe)
@@ -548,8 +657,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         case failure(reason: String, setupIssue: SetupIssue?)
     }
 
-    /// A failure that maps to a Claude Code connection problem the user can fix, so the
-    /// badge + History message can point them at Settings → Summary → Claude.
+    /// A failure that maps to a CLI connection problem the user can fix, so the
+    /// badge + History message can point them at Settings → Summary.
     private enum SetupIssue { case notInstalled, notLoggedIn }
 
     /// Local notification when a summary lands, since runs take a minute or two and the user

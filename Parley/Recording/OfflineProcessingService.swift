@@ -177,9 +177,13 @@ final class OfflineProcessingService: ObservableObject {
         relay.set(stage: .mix, fraction: nil, sublabel: nil)
         progress[jobID] = JobProgress(stage: .mix, fraction: nil, sublabel: nil, startedAt: Date())
 
+        // Mid-call resume writes mic.2.caf / system.2.caf; concat legs so offline
+        // diarization covers the full meeting, not just the pre-resume segment.
+        let archives = await Self.resolveArchives(for: job)
+
         // Transient engine bound to THIS job's audio; collect auto-identified names.
         var identified: [String] = []
-        let eng = makeOfflineEngine(for: job) { name in
+        let eng = makeOfflineEngine(for: job, archives: archives) { name in
             let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !n.isEmpty, !identified.contains(where: { $0.caseInsensitiveCompare(n) == .orderedSame }) else { return }
             identified.append(n)
@@ -195,7 +199,7 @@ final class OfflineProcessingService: ObservableObject {
 
         // GUARDED rewrite: never let a thin offline pass shrink a fuller transcript.
         let segs = eng.finalTimeline()
-        let audioDuration = SessionStore.audioDuration(job.micArchiveURL)
+        let audioDuration = SessionStore.audioDuration(archives.mic)
         let mergedAttendees = Self.merge(job.attendees, with: identified)
         if TranscriptCoverage.isSafeReplacement(offline: segs, existingFile: job.transcriptURL,
                                                 audioDuration: audioDuration) {
@@ -291,6 +295,8 @@ final class OfflineProcessingService: ObservableObject {
                 if let item = transcriptItem(for: job.transcriptURL) {
                     summaryService.enqueueIfPolicyAllows(item, trigger: .offlinePassCompleted)
                 }
+            } else {
+                AppLog.log("Offline job \(job.id): summary not enqueued — hasUnnamed=\(hasUnnamed) bodyAttributed=\(bodyAttributed)", category: "offline")
             }
         }
 
@@ -309,7 +315,79 @@ final class OfflineProcessingService: ObservableObject {
 
     // MARK: Helpers
 
+    /// Mic / system / mixed paths for one offline pass. Multi-leg sessions use
+    /// concatenated `*.full.caf` archives so coverage spans the whole recording.
+    struct ResolvedArchives: Sendable {
+        let mic: URL
+        let system: URL
+        let mixed: URL
+    }
+
+    /// Resolve archives for offline: single-leg uses the job's standard paths; multi-leg
+    /// (resume mid-call) concatenates `mic.caf`+`mic.2.caf`… into `mic.full.caf` (and same
+    /// for system), then offline rebuilds `mixed.caf` from those full tracks.
+    nonisolated static func resolveArchives(for job: OfflineJob) async -> ResolvedArchives {
+        let dir = job.sessionDir
+        let micLegs = MeetingFiles.audioSegmentURLs(in: dir, base: "mic")
+        let sysLegs = MeetingFiles.audioSegmentURLs(in: dir, base: "system")
+        guard micLegs.count > 1 else {
+            return ResolvedArchives(mic: job.micArchiveURL, system: job.systemArchiveURL, mixed: job.mixedURL)
+        }
+
+        // Pair as many legs as both tracks share (asymmetric rare; take the min).
+        let n = min(micLegs.count, max(sysLegs.count, 1))
+        let micUse = Array(micLegs.prefix(n))
+        let sysUse: [URL] = {
+            if sysLegs.count >= n { return Array(sysLegs.prefix(n)) }
+            // System missing later legs: fall back to first system only + zero-fill is wrong;
+            // use whatever system legs exist and pad with the last one for length match? Safer:
+            // concat available system legs only; if shorter, still better than first-leg-only.
+            return sysLegs.isEmpty ? [job.systemArchiveURL] : sysLegs
+        }()
+
+        let micFull = dir.appendingPathComponent("mic.full.caf")
+        let sysFull = dir.appendingPathComponent("system.full.caf")
+        let gapsMic = Array(repeating: TimeInterval(0), count: micUse.count)
+        let gapsSys = Array(repeating: TimeInterval(0), count: sysUse.count)
+
+        let needMic = !Self.fullArchiveIsCurrent(legs: micUse, full: micFull)
+        let needSys = !Self.fullArchiveIsCurrent(legs: sysUse, full: sysFull)
+
+        if needMic {
+            let ok = await Task.detached(priority: .userInitiated) {
+                AudioConcatenator.concatenate(micUse, gaps: gapsMic, output: micFull)
+            }.value
+            if !ok {
+                AppLog.log("Offline job \(job.id): multi-leg mic concat failed — falling back to first leg", category: "offline")
+                return ResolvedArchives(mic: job.micArchiveURL, system: job.systemArchiveURL, mixed: job.mixedURL)
+            }
+        }
+        if needSys {
+            let ok = await Task.detached(priority: .userInitiated) {
+                AudioConcatenator.concatenate(sysUse, gaps: gapsSys, output: sysFull)
+            }.value
+            if !ok {
+                AppLog.log("Offline job \(job.id): multi-leg system concat failed — falling back to first leg", category: "offline")
+                return ResolvedArchives(mic: job.micArchiveURL, system: job.systemArchiveURL, mixed: job.mixedURL)
+            }
+        }
+
+        let total = Int(SessionStore.audioDuration(micFull))
+        AppLog.log("Offline job \(job.id): multi-leg archives ready — \(micUse.count) mic leg(s), \(sysUse.count) system leg(s), ~\(total)s", category: "offline")
+        // Always rebuild mixed.caf from the full tracks (stale short mix is common after resume).
+        return ResolvedArchives(mic: micFull, system: sysFull, mixed: job.mixedURL)
+    }
+
+    /// True when `full` already exists and its duration matches the sum of leg durations.
+    nonisolated private static func fullArchiveIsCurrent(legs: [URL], full: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: full.path) else { return false }
+        let sum = legs.map(SessionStore.audioDuration).reduce(0, +)
+        let have = SessionStore.audioDuration(full)
+        return abs(have - sum) < 1.5
+    }
+
     private func makeOfflineEngine(for job: OfflineJob,
+                                   archives: ResolvedArchives,
                                    onIdentified: @escaping (String) -> Void) -> SpeakerCapableEngine {
         let eng: SpeakerCapableEngine
         switch settings.transcriptionEngine {
@@ -321,9 +399,9 @@ final class OfflineProcessingService: ObservableObject {
                                    identificationThreshold: settings.identificationThreshold)
         }
         eng.onSpeakerIdentified = onIdentified
-        eng.mixedAudioURL = job.mixedURL
-        eng.micArchiveURL = job.micArchiveURL
-        eng.systemArchiveURL = job.systemArchiveURL
+        eng.mixedAudioURL = archives.mixed
+        eng.micArchiveURL = archives.mic
+        eng.systemArchiveURL = archives.system
         eng.forceOfflineAsr = true   // no live streaming units for a saved call
         // Clustering hint from user-accepted meeting metadata: tell the diarizer how many
         // distinct speakers to expect so it doesn't merge two people into one cluster or

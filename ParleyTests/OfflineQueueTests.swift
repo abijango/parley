@@ -117,6 +117,31 @@ final class OfflineQueueTests: XCTestCase {
     //  pure-SwiftUI TokenField has no sync logic; its commit classification is covered
     //  in TokenFieldTests.)
 
+    // MARK: multi-leg audio discovery
+
+    func testAudioSegmentURLsOrdered() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("legs-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Touch empty files (existence-only for URL discovery).
+        for name in ["mic.caf", "mic.2.caf", "mic.3.caf", "system.caf", "system.2.caf"] {
+            FileManager.default.createFile(atPath: dir.appendingPathComponent(name).path, contents: Data())
+        }
+        let mic = MeetingFiles.audioSegmentURLs(in: dir, base: "mic")
+        XCTAssertEqual(mic.map(\.lastPathComponent), ["mic.caf", "mic.2.caf", "mic.3.caf"])
+        let sys = MeetingFiles.audioSegmentURLs(in: dir, base: "system")
+        XCTAssertEqual(sys.map(\.lastPathComponent), ["system.caf", "system.2.caf"])
+        // Single-leg session: only the first file.
+        let solo = FileManager.default.temporaryDirectory
+            .appendingPathComponent("solo-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: solo, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: solo) }
+        FileManager.default.createFile(atPath: solo.appendingPathComponent("mic.caf").path, contents: Data())
+        XCTAssertEqual(MeetingFiles.audioSegmentURLs(in: solo, base: "mic").map(\.lastPathComponent),
+                       ["mic.caf"])
+    }
+
     // MARK: OfflineProcessingService.merge
 
     func testAttendeeMergeIsCaseInsensitiveAndOrdered() {

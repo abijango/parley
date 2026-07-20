@@ -124,6 +124,26 @@ enum FluidStreamingTier: Int, CaseIterable, Identifiable {
     }
 }
 
+/// Which CLI generates meeting summaries. Shared prompt; different binary/auth.
+enum SummaryBackend: String, CaseIterable, Identifiable {
+    case claude
+    case grok
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .claude: return "Claude"
+        case .grok: return "Grok"
+        }
+    }
+    var blurb: String {
+        switch self {
+        case .claude: return "Runs `claude -p` with your Claude Code login."
+        case .grok: return "Runs `grok -p` with your Grok CLI login."
+        }
+    }
+}
+
 /// App-wide settings persisted via UserDefaults (`@AppStorage`).
 /// TODO(app-name): the AppStorage keys are namespaced with a literal prefix below.
 @MainActor
@@ -138,9 +158,12 @@ final class AppSettings: ObservableObject {
         static let computeMode = "parley.computeMode"
         static let captureMode = "parley.captureMode"
         static let autoRunClaude = "parley.autoRunClaude"
+        static let summaryBackend = "parley.summaryBackend"
         static let claudeBinaryPath = "parley.claudeBinaryPath"
         static let claudePromptTemplate = "parley.claudePromptTemplate"
         static let claudeModel = "parley.claudeModel"
+        static let grokBinaryPath = "parley.grokBinaryPath"
+        static let grokModel = "parley.grokModel"
         static let summaryBulkThreshold = "parley.summaryBulkThreshold"
         static let summaryFailureTripThreshold = "parley.summaryFailureTripThreshold"
         static let summaryAutoResumeAfterLimit = "parley.summaryAutoResumeAfterLimit"
@@ -259,11 +282,21 @@ final class AppSettings: ObservableObject {
     /// accurate, so live text is opt-in; turning it off removes all live-decode load.
     @AppStorage(Key.liveTranscriptEnabled) var liveTranscriptEnabled: Bool = false
     /// Auto-summarize: after a recording's speakers are assigned, fire the background
-    /// Claude summary automatically (result is staged for review in History). Default on.
+    /// summary automatically (result is staged for review in History). Default on.
+    /// Key name is historical (`autoRunClaude`); applies to whichever `summaryBackend` is set.
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = true
+    /// Which CLI generates summaries: Claude Code or Grok.
+    @AppStorage(Key.summaryBackend) var summaryBackendRaw: String = SummaryBackend.claude.rawValue
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt
     @AppStorage(Key.claudeModel) var claudeModel: String = "sonnet"
+    @AppStorage(Key.grokBinaryPath) var grokBinaryPath: String = "\(NSHomeDirectory())/.grok/bin/grok"
+    @AppStorage(Key.grokModel) var grokModel: String = "grok-4.5"
+
+    var summaryBackend: SummaryBackend {
+        get { SummaryBackend(rawValue: summaryBackendRaw) ?? .claude }
+        set { summaryBackendRaw = newValue.rawValue }
+    }
     /// Ask before auto-summarizing a wave of ≥ this many notes at once (backlog / bulk
     /// speaker-naming) so a burst never silently burns Claude usage.
     @AppStorage(Key.summaryBulkThreshold) var summaryBulkThreshold: Int = 3

@@ -35,6 +35,55 @@ final class SpeakerCacheTests: XCTestCase {
         XCTAssertTrue(out.contains("Speaker 1"))   // still unassigned
     }
 
+    // MARK: merged assignments + persist
+
+    func testMergedAssignmentsUserOverridesCache() {
+        let cache = SpeakerCache(
+            embeddingModelID: "m", mixedCafName: "mixed.caf",
+            speakers: [
+                .init(id: "1", resolvedName: "Auto Alice", talkSeconds: 10,
+                      sampleStart: 0, sampleEnd: 4, firstLine: "hi", centroid: []),
+                .init(id: "2", resolvedName: "Auto Bob", talkSeconds: 10,
+                      sampleStart: 5, sampleEnd: 9, firstLine: "yo", centroid: []),
+            ])
+        let merged = SpeakerCache.mergedAssignments(
+            cache: cache, user: ["1": "User Alice", "3": "Carol"])
+        XCTAssertEqual(merged["1"], "User Alice")   // user wins
+        XCTAssertEqual(merged["2"], "Auto Bob")     // cache fills gap
+        XCTAssertEqual(merged["3"], "Carol")        // user-only id kept
+    }
+
+    func testApplyAssignmentsWritesResolvedNames() {
+        var cache = SpeakerCache(
+            embeddingModelID: "m", mixedCafName: "mixed.caf",
+            speakers: [
+                .init(id: "1", resolvedName: nil, talkSeconds: 10,
+                      sampleStart: 0, sampleEnd: 4, firstLine: "hi", centroid: []),
+                .init(id: "2", resolvedName: "Old", talkSeconds: 10,
+                      sampleStart: 5, sampleEnd: 9, firstLine: "yo", centroid: []),
+            ])
+        cache.applyAssignments(["1": "Alice", "2": "Bob"])
+        XCTAssertEqual(cache.speakers[0].resolvedName, "Alice")
+        XCTAssertEqual(cache.speakers[1].resolvedName, "Bob")
+    }
+
+    func testApplyAssignmentsRoundTripsToDisk() throws {
+        var cache = SpeakerCache(
+            embeddingModelID: "m", mixedCafName: "mixed.caf",
+            speakers: [
+                .init(id: "1", resolvedName: nil, talkSeconds: 10,
+                      sampleStart: 0, sampleEnd: 4, firstLine: "hi", centroid: [0.1]),
+            ])
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sc-assign-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        cache.applyAssignments(["1": "Naufal Mir"])
+        cache.write(to: dir)
+        let back = SpeakerCache.read(dir)
+        XCTAssertEqual(back?.speakers.first?.resolvedName, "Naufal Mir")
+    }
+
     // MARK: cache round-trip
 
     func testCacheRoundTrips() throws {
