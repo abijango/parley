@@ -6,6 +6,7 @@ import AppKit
 struct PeopleView: View {
     @EnvironmentObject private var vault: VaultDirectory
     @ObservedObject var voiceprintStore: VoiceprintStore
+    @StateObject private var peopleIndex = PeopleIndex()
 
     @State private var selection: String?   // Person.id (lowercased displayName)
     @State private var searchQuery = ""
@@ -25,9 +26,7 @@ struct PeopleView: View {
 
     // MARK: - Derived data
 
-    private var allPeople: [Person] {
-        PeopleJoin.build(contacts: vault.contacts, voiceprints: voiceprintStore.voiceprints)
-    }
+    private var allPeople: [Person] { peopleIndex.allPeople }
 
     private var filteredPeople: [Person] {
         let q = searchQuery.trimmingCharacters(in: .whitespaces).lowercased()
@@ -55,6 +54,7 @@ struct PeopleView: View {
                 .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { peopleIndex.observe(vault: vault, voiceprints: voiceprintStore) }
         .sheet(isPresented: $showVoiceprintTransfer) {
             VoiceprintTransferSheet(store: voiceprintStore)
         }

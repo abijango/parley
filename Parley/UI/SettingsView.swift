@@ -383,7 +383,7 @@ struct SettingsView: View {
                 HStack {
                     Text("Recordings")
                     Spacer()
-                    Text("\(recordings.sessions.count) · \(byteText(recordings.totalBytes))")
+                    Text("\(recordings.sessions.count) · \(storageTotalLabel)")
                         .foregroundStyle(.secondary).monospacedDigit()
                 }
             }
@@ -400,10 +400,12 @@ struct SettingsView: View {
                 }
                 let orphans = orphanedSessions
                 if !orphans.isEmpty {
+                    let orphanBytes = orphans.compactMap(\.sizeBytes).reduce(Int64(0), +)
+                    let orphanSuffix = orphans.contains { $0.sizeBytes == nil } ? "+" : ""
                     HStack(spacing: Theme.Spacing.small) {
                         Image(systemName: "questionmark.folder")
                             .foregroundStyle(Theme.Severity.warning.color)
-                        Text("\(orphans.count) orphaned · \(byteText(orphans.reduce(Int64(0)) { $0 + $1.sizeBytes }))")
+                        Text("\(orphans.count) orphaned · \(byteText(orphanBytes))\(orphanSuffix)")
                             .font(Theme.Typography.secondary).foregroundStyle(.secondary).monospacedDigit()
                         Text("audio with no transcript in History")
                             .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
@@ -440,7 +442,7 @@ struct SettingsView: View {
             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
             presenting: pendingDelete
         ) { folder in
-            Button("Move \(byteText(folder.sizeBytes)) to Trash", role: .destructive) {
+            Button("Move \(byteText(folder.sizeBytes ?? 0)) to Trash", role: .destructive) {
                 recordings.delete(folder); pendingDelete = nil
             }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
@@ -452,7 +454,7 @@ struct SettingsView: View {
             isPresented: Binding(get: { pendingBulkDelete != nil }, set: { if !$0 { pendingBulkDelete = nil } })
         ) {
             if let folders = pendingBulkDelete, !folders.isEmpty {
-                let bytes = folders.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                let bytes = folders.compactMap(\.sizeBytes).reduce(Int64(0), +)
                 Button("Move \(folders.count) · \(byteText(bytes)) to Trash", role: .destructive) {
                     recordings.delete(folders)
                     selectedSessions.removeAll()
@@ -522,7 +524,7 @@ struct SettingsView: View {
                 }
             }
             Spacer()
-            Text(byteText(folder.sizeBytes))
+            Text(folder.sizeBytes.map(byteText) ?? "…")
                 .font(Theme.Typography.caption).foregroundStyle(.secondary).monospacedDigit()
             Button { NSWorkspace.shared.activateFileViewerSelecting([folder.url]) } label: {
                 Image(systemName: "folder")
@@ -536,6 +538,13 @@ struct SettingsView: View {
             .help(isCurrent ? "Can't delete the recording in progress" : "Delete this session's audio")
         }
         .padding(.vertical, Theme.Spacing.xxSmall)
+    }
+
+    private var storageTotalLabel: String {
+        if recordings.sizesPending {
+            return "\(byteText(recordings.totalBytes))+"
+        }
+        return byteText(recordings.totalBytes)
     }
 
     private func byteText(_ bytes: Int64) -> String {

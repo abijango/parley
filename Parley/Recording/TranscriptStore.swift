@@ -33,20 +33,27 @@ struct TranscriptItem: Identifiable, Equatable {
 final class TranscriptStore: ObservableObject {
     @Published private(set) var items: [TranscriptItem] = []
 
+    private var scanTask: Task<Void, Never>?
+
     /// Rescans both folders and republishes `items`.
+    ///
+    /// Callers observe the result via the `@Published` property; `refresh()` returns
+    /// immediately and does not block the caller. In-flight scans are cancelled and
+    /// superseded so bursty vnode events cannot publish out of order.
     func refresh() {
-        AppPaths.ensureVaultFolders()
-        var found: [TranscriptItem] = []
-        found.append(contentsOf: scan(AppPaths.unprocessedURL, processed: false))
-        found.append(contentsOf: scan(AppPaths.processedURL, processed: true))
-        // Newest first; filename is a stable tiebreaker so same-minute items don't
-        // reorder between refreshes.
-        found.sort {
-            $0.meta.date != $1.meta.date
-                ? $0.meta.date > $1.meta.date
-                : $0.url.lastPathComponent > $1.url.lastPathComponent
+        scanTask?.cancel()
+        let vaultURL = AppSettings.shared.vaultURL
+        AppPaths.ensureVaultFolders(vault: vaultURL)
+        let unprocessed = AppPaths.unprocessedURL(vault: vaultURL)
+        let processed = AppPaths.processedURL(vault: vaultURL)
+        let staging = AppPaths.stagingURL(vault: vaultURL)
+        scanTask = Task { [weak self] in
+            let found = await Task.detached {
+                Self.buildSnapshot(unprocessed: unprocessed, processed: processed, staging: staging)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            if found != items { items = found }
         }
-        if found != items { items = found }   // avoid needless republish when nothing changed
     }
 
     // MARK: Live folder watching
@@ -331,7 +338,22 @@ final class TranscriptStore: ObservableObject {
 
     // MARK: Scanning
 
-    private func scan(_ folder: URL, processed: Bool) -> [TranscriptItem] {
+    /// Directory walk + per-file parse, safe to run off the main actor.
+    nonisolated private static func buildSnapshot(
+        unprocessed: URL, processed: URL, staging: URL
+    ) -> [TranscriptItem] {
+        var found: [TranscriptItem] = []
+        found.append(contentsOf: scan(unprocessed, processed: false, staging: staging))
+        found.append(contentsOf: scan(processed, processed: true, staging: staging))
+        found.sort {
+            $0.meta.date != $1.meta.date
+                ? $0.meta.date > $1.meta.date
+                : $0.url.lastPathComponent > $1.url.lastPathComponent
+        }
+        return found
+    }
+
+    nonisolated private static func scan(_ folder: URL, processed: Bool, staging: URL) -> [TranscriptItem] {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: nil,
@@ -350,7 +372,7 @@ final class TranscriptStore: ObservableObject {
             meta.date = resolvedDate(url, meta.date)
             let unnamed = text.map(Self.hasGenericSpeakerLabels) ?? false
             // A staged summary (.staging/<base>.md) means "ready for review".
-            let stageURL = AppPaths.stagingURL.appendingPathComponent(
+            let stageURL = staging.appendingPathComponent(
                 url.deletingPathExtension().lastPathComponent + ".md")
             let summaryReady = fm.fileExists(atPath: stageURL.path) ? stageURL : nil
             result.append(TranscriptItem(url: url, meta: meta, isProcessed: processed,
@@ -361,7 +383,7 @@ final class TranscriptStore: ObservableObject {
 
     /// Best-effort metadata when a file has no frontmatter: title/date from the
     /// filename, status from the folder, type "recording".
-    private func fallbackMeta(_ url: URL, processed: Bool) -> TranscriptMeta {
+    nonisolated private static func fallbackMeta(_ url: URL, processed: Bool) -> TranscriptMeta {
         let stem = url.deletingPathExtension().lastPathComponent
         var title = stem
         var date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
@@ -423,7 +445,7 @@ final class TranscriptStore: ObservableObject {
     /// which makes same-day items tie and sort arbitrarily and shows "00:00" in the
     /// list. When the parsed date has no time component, recover the real recording
     /// time from the filename stamp (`yyyy-MM-dd-HHmm`) or the file's creation date.
-    private func resolvedDate(_ url: URL, _ metaDate: Date) -> Date {
+    nonisolated private static func resolvedDate(_ url: URL, _ metaDate: Date) -> Date {
         let cal = Calendar.current
         let c = cal.dateComponents([.hour, .minute, .second], from: metaDate)
         guard (c.hour ?? 0) == 0, (c.minute ?? 0) == 0, (c.second ?? 0) == 0 else { return metaDate }
@@ -443,7 +465,7 @@ final class TranscriptStore: ObservableObject {
         return metaDate
     }
 
-    private func parseStampDate(_ s: String) -> Date? {
+    nonisolated private static func parseStampDate(_ s: String) -> Date? {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         for fmt in ["yyyy-MM-dd-HHmm", "yyyy-MM-dd-HHmmss", "yyyy-MM-dd"] {

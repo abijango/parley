@@ -62,7 +62,7 @@ final class VaultDirectoryTests: XCTestCase {
         try text.write(to: rolodexURL, atomically: true, encoding: .utf8)
 
         let vault = VaultDirectory()
-        vault.refresh()
+        vault.refresh(waitForCompletion: true)
         try body(vault, rolodexURL)
     }
 

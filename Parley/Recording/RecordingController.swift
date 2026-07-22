@@ -239,15 +239,26 @@ final class RecordingController: ObservableObject {
 
     private func updateLiveWordCount(from merged: [Segment]) {
         var byID = wordCountBySegmentID
-        let ids = Set(merged.map(\.id))
-        for id in byID.keys where !ids.contains(id) {
+        var total = live.liveWordCount
+        for seg in merged {
+            let newCount = Self.wordCount(in: seg.text)
+            if let old = byID[seg.id] {
+                if old != newCount {
+                    byID[seg.id] = newCount
+                    total += newCount - old
+                }
+            } else {
+                byID[seg.id] = newCount
+                total += newCount
+            }
+        }
+        let currentIDs = Set(merged.map(\.id))
+        for id in byID.keys where !currentIDs.contains(id) {
+            total -= byID[id] ?? 0
             byID.removeValue(forKey: id)
         }
-        for seg in merged {
-            byID[seg.id] = Self.wordCount(in: seg.text)
-        }
         wordCountBySegmentID = byID
-        live.liveWordCount = byID.values.reduce(0, +)
+        live.liveWordCount = total
     }
 
     private func resetSegmentPublishState() {
@@ -499,26 +510,27 @@ final class RecordingController: ObservableObject {
         VaultMigration.runIfNeeded(vault: settings.vaultURL)
         SystemAudioCapture.cleanupLeakedAggregates()    // destroy any aggregate device a crash left behind
         ModelManager.recoverFromCrashedLoadIfNeeded()   // self-heal a corrupt compiled-model cache
-        gatherRecoveries()        // crashed sessions (with a manifest) → Recovery sheet
-        recoverOrphanedPartials() // legacy crashed sessions (no manifest) → auto-salvage
-        vault.refresh()
-        store.refresh()
         wireBackgroundQueues()    // offline + summary services gate on idle, host reviews
-        offlineService.enqueuePendingFromDisk()   // resume offline passes interrupted by a quit/crash
-        summaryService.enqueuePendingFromDisk()   // resume queued summaries (bulk-confirmed, not a burst)
         preloadModel()
         scheduleIdleUnload()   // if nothing happens for a while, free the model's RAM
         startCallDetection()
         Task {
             let micGranted = await PermissionManager.requestMicrophone()          // mic prompt
             micDenied = !micGranted
-            // audio prompt — off-main, can block until the user answers; the
-            // result tells us whether system-audio capture/detection is usable.
             let audioOK = await Task.detached { SystemAudioCapture.primeAudioCapturePermission() }.value
             systemAudioAvailable = audioOK
             if !audioOK {
                 AppLog.log("System-audio capture unavailable after prime — remote-track capture and call detection by mic-signal may not work until the audio-recording permission is granted", category: "audio")
             }
+        }
+        // Deferred hydration: vault/transcript scans and recovery can wait until after first paint.
+        Task {
+            gatherRecoveries()
+            recoverOrphanedPartials()
+            vault.refresh()
+            store.refresh()
+            offlineService.enqueuePendingFromDisk()
+            summaryService.enqueuePendingFromDisk()
         }
     }
 

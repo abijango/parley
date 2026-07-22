@@ -89,6 +89,8 @@ final class VaultDirectory: ObservableObject {
     /// Collision rule: if a name appears under two different sides, side returns nil (logged).
     private var sideIndex: [String: Set<Side>] = [:]
 
+    private var refreshTask: Task<Void, Never>?
+
     private let settings = AppSettings.shared
     private static let maxDepth = 4
     /// Folders never offered as destinations.
@@ -102,33 +104,87 @@ final class VaultDirectory: ObservableObject {
 
     // MARK: - Refresh
 
-    /// Rebuild indexes from disk. Cheap (hundreds of entries).
-    func refresh() {
+    /// Rebuild indexes from disk.
+    ///
+    /// Callers observe the result via the `@Published` properties; `refresh()` returns
+    /// immediately and does not block the caller. In-flight scans are cancelled and
+    /// superseded so overlapping calls cannot publish out of order.
+    ///
+    /// Pass `waitForCompletion: true` when the caller needs the indexes updated before
+    /// returning (tests, immediately after a local vault write).
+    func refresh(waitForCompletion: Bool = false) {
         migrateContactsFileIfNeeded()
-        destinations = loadDestinations()
+        if waitForCompletion {
+            refreshAfterMutation()
+        } else {
+            scheduleBackgroundRefresh()
+        }
+    }
 
-        // Parse contacts once; derive both people and the indexes from the
-        // same [Contact] slice to avoid a torn-read if the file changes mid-refresh.
-        let contactsText = (try? String(contentsOf: settings.contactsURL, encoding: .utf8)) ?? ""
-        let contacts = Self.parseContacts(contactsText)
+    /// Re-reads disk and publishes immediately — for callers that just wrote the vault
+    /// and need the in-memory index to match before returning.
+    private func refreshAfterMutation() {
+        refreshTask?.cancel()
+        migrateContactsFileIfNeeded()
+        applySnapshot(Self.buildSnapshot(
+            vaultURL: settings.vaultURL,
+            contactsURL: settings.contactsURL,
+            scanRoots: settings.scanRoots
+        ))
+    }
 
-        // Build people: deduplicated (first-wins, case-insensitive), sorted.
+    private func scheduleBackgroundRefresh() {
+        refreshTask?.cancel()
+        let vaultURL = settings.vaultURL
+        let contactsURL = settings.contactsURL
+        let scanRoots = settings.scanRoots
+        refreshTask = Task { [weak self] in
+            let snapshot = await Task.detached {
+                Self.buildSnapshot(vaultURL: vaultURL, contactsURL: contactsURL, scanRoots: scanRoots)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            applySnapshot(snapshot)
+        }
+    }
+
+    private func applySnapshot(_ snapshot: VaultRefreshSnapshot) {
+        destinations = snapshot.destinations
+        people = snapshot.people
+        contacts = snapshot.contacts
+        companyIndex = snapshot.companyIndex
+        sideIndex = snapshot.sideIndex
+        fileCustomers = snapshot.fileCustomers
+        AppLog.log("Vault index refreshed -- \(destinations.count) destinations, \(people.count) contacts", category: "vault")
+    }
+
+    private struct VaultRefreshSnapshot: Sendable {
+        let destinations: [VaultDestination]
+        let people: [String]
+        let contacts: [Contact]
+        let fileCustomers: [String]
+        let companyIndex: [String: Set<String>]
+        let sideIndex: [String: Set<Side>]
+    }
+
+    nonisolated private static func buildSnapshot(
+        vaultURL: URL, contactsURL: URL, scanRoots: [String]
+    ) -> VaultRefreshSnapshot {
+        let destinations = loadDestinations(vaultURL: vaultURL, scanRoots: scanRoots)
+        let contactsText = (try? String(contentsOf: contactsURL, encoding: .utf8)) ?? ""
+        let contacts = parseContacts(contactsText)
+
         var seen = Set<String>()
         var names: [String] = []
         for c in contacts {
             let key = c.name.lowercased()
             if seen.insert(key).inserted { names.append(c.name) }
-            // Also register each alias so people.contains covers alias lookups.
             for alias in c.aliases {
                 let aKey = alias.lowercased()
                 if seen.insert(aKey).inserted { names.append(alias) }
             }
         }
-        people = names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        let people = names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
 
-        // Build company + side indexes. Register canonical name AND every alias so
-        // company(for:) and side(for:) resolve both "Christina Wharf-Bulsara" and
-        // "Christina Wharf" (an alias) to the same Intellias entry.
         var cIndex: [String: Set<String>] = [:]
         var sIndex: [String: Set<Side>] = [:]
         for c in contacts {
@@ -142,16 +198,19 @@ final class VaultDirectory: ObservableObject {
                 }
             }
         }
-        // Log collisions (same name under 2+ different company sections).
         for (key, companies) in cIndex where companies.count >= 2 {
             AppLog.log("VaultDirectory: name collision -- \(key) appears under \(companies.sorted().joined(separator: ", "))", category: "vault")
         }
-        companyIndex = cIndex
-        sideIndex = sIndex
-        self.contacts = contacts
 
-        fileCustomers = loadFileCustomers(contacts: contacts)
-        AppLog.log("Vault index refreshed -- \(destinations.count) destinations, \(people.count) contacts", category: "vault")
+        let fileCustomers = loadFileCustomers(contacts: contacts)
+        return VaultRefreshSnapshot(
+            destinations: destinations,
+            people: people,
+            contacts: contacts,
+            fileCustomers: fileCustomers,
+            companyIndex: cIndex,
+            sideIndex: sIndex
+        )
     }
 
     // MARK: - Contact parsing (nonisolated static -- safe to call off @MainActor)
@@ -1209,7 +1268,7 @@ final class VaultDirectory: ObservableObject {
         } else {
             try? canonical.write(to: url, atomically: true, encoding: .utf8)
             AppLog.log("normalizeContacts: \(url.lastPathComponent) overwritten with canonical", category: "vault")
-            refresh()
+            refreshAfterMutation()
         }
     }
 
@@ -1233,18 +1292,26 @@ final class VaultDirectory: ObservableObject {
     // MARK: Destinations (folder tree)
 
     private func loadDestinations() -> [VaultDestination] {
+        Self.loadDestinations(vaultURL: settings.vaultURL, scanRoots: settings.scanRoots)
+    }
+
+    nonisolated private static func loadDestinations(
+        vaultURL: URL, scanRoots: [String]
+    ) -> [VaultDestination] {
         var result: [VaultDestination] = []
         let fm = FileManager.default
-        for root in settings.scanRoots {
-            let rootURL = settings.vaultURL.appendingPathComponent(root, isDirectory: true)
+        for root in scanRoots {
+            let rootURL = vaultURL.appendingPathComponent(root, isDirectory: true)
             guard fm.fileExists(atPath: rootURL.path) else { continue }
             walk(rootURL, relative: root, depth: 0, into: &result)
         }
         return result.sorted { $0.path.localizedCaseInsensitiveCompare($1.path) == .orderedAscending }
     }
 
-    private func walk(_ url: URL, relative: String, depth: Int, into result: inout [VaultDestination]) {
-        guard depth < Self.maxDepth else { return }
+    nonisolated private static func walk(
+        _ url: URL, relative: String, depth: Int, into result: inout [VaultDestination]
+    ) {
+        guard depth < maxDepth else { return }
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(
             at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
@@ -1253,7 +1320,7 @@ final class VaultDirectory: ObservableObject {
         for item in items {
             guard (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             let name = item.lastPathComponent
-            if Self.excludedNames.contains(name) || Self.isStatusFolder(name) { continue }
+            if excludedNames.contains(name) || isStatusFolder(name) { continue }
             let relPath = relative + "/" + name
             result.append(VaultDestination(path: relPath))
             walk(item, relative: relPath, depth: depth + 1, into: &result)
@@ -1261,7 +1328,7 @@ final class VaultDirectory: ObservableObject {
     }
 
     /// Pipeline-status groupers like "00 - Thesis Validation" are not destinations.
-    private static func isStatusFolder(_ name: String) -> Bool {
+    nonisolated private static func isStatusFolder(_ name: String) -> Bool {
         name.range(of: #"^\d+\s*-\s"#, options: .regularExpression) != nil
     }
 
@@ -1307,7 +1374,7 @@ final class VaultDirectory: ObservableObject {
         let rendered = Self.renderCanonical(parsed)
         writeContacts(rendered, to: url)
         AppLog.log("Added \(fresh.count) contacts under \(Self.otherSection) in \(url.lastPathComponent)", category: "vault")
-        refresh()
+        refreshAfterMutation()
     }
 
     /// Adds a single rich contact. Delegates to upsertPerson for dedup safety.
@@ -1336,7 +1403,7 @@ final class VaultDirectory: ObservableObject {
 
         writeContacts(Self.renderCanonical(kept), to: url)
         AppLog.log("Removed \(removed) contact(s) from \(url.lastPathComponent)", category: "vault")
-        refresh()
+        refreshAfterMutation()
         return removed
     }
 
@@ -1443,7 +1510,7 @@ final class VaultDirectory: ObservableObject {
         writeContacts(rendered, to: url)
         let section = company ?? Self.otherSection
         AppLog.log("Upserted contact \(name) under \(section) in \(url.lastPathComponent)", category: "vault")
-        refresh()
+        refreshAfterMutation()
     }
 
     /// Rename a contact in place, preserving all fields (aliases, company, side, title, linkedin).
@@ -1505,7 +1572,7 @@ final class VaultDirectory: ObservableObject {
         let rendered = Self.renderCanonical(parsed)
         writeContacts(rendered, to: url)
         AppLog.log("renameContact: \"\(oldTrimmed)\" -> \"\(newTrimmed)\" in \(url.lastPathComponent)", category: "vault")
-        refresh()
+        refreshAfterMutation()
     }
 
     /// Merge two contacts that collided on a rename, preferring the richer entry.
@@ -1605,7 +1672,7 @@ final class VaultDirectory: ObservableObject {
 
         writeContacts(lines, to: url)
         AppLog.log("addAlias: added alias \"\(alias)\" to \"\(canonicalName)\" in \(url.lastPathComponent)", category: "vault")
-        refresh()
+        refreshAfterMutation()
     }
 
     /// Insert a contact bullet directly under a plain-text section header, creating
@@ -1633,7 +1700,7 @@ final class VaultDirectory: ObservableObject {
         try? text.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private func loadFileCustomers(contacts: [Contact]) -> [String] {
+    nonisolated private static func loadFileCustomers(contacts: [Contact]) -> [String] {
         // Derive customer companies from the side index.
         var seen = Set<String>()
         var result: [String] = []

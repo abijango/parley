@@ -355,8 +355,16 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     /// The item is waiting in the summary queue, or in the pending bulk-confirm batch.
     func isPendingSummary(_ item: TranscriptItem) -> Bool {
-        queue.contains { $0.id == item.id }
-            || (pendingBulkConfirm?.items.contains { $0.id == item.id } ?? false)
+        pendingSummaryIDs.contains(item.id)
+    }
+
+    /// Transcript IDs waiting in the summary queue or bulk-confirm batch — O(1) membership.
+    var pendingSummaryIDs: Set<String> {
+        var ids = Set(queue.map(\.id))
+        if let bulk = pendingBulkConfirm {
+            ids.formUnion(bulk.items.map(\.id))
+        }
+        return ids
     }
 
     /// Hard wall-clock cap on a single `claude` run, so a wedged/stalled process (e.g.

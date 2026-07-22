@@ -665,7 +665,7 @@ final class RolodexNormalizeTests: XCTestCase {
         try text.write(to: rolodexURL, atomically: true, encoding: .utf8)
 
         let vault = VaultDirectory()
-        vault.refresh()
+        vault.refresh(waitForCompletion: true)
 
         XCTAssertEqual(vault.company(for: "Christina Wharf-Bulsara"), "Intellias",
                        "company(for:) must resolve canonical name")

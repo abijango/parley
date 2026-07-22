@@ -23,6 +23,67 @@ enum PipelineFailure: Equatable {
 }
 
 extension PipelineStage {
+    /// Precomputed summary/offline snapshot for batch stage derivation.
+    struct DeriveContext {
+        let summaryJobs: [String: SummaryService.JobState]
+        let runningSummaryID: String?
+        let pendingSummaryIDs: Set<String>
+        let throttle: SummaryService.ThrottleState
+
+        @MainActor
+        static func make(offline: OfflineProcessingService, summary: SummaryService) -> DeriveContext {
+            DeriveContext(
+                summaryJobs: summary.jobs,
+                runningSummaryID: summary.runningID,
+                pendingSummaryIDs: summary.pendingSummaryIDs,
+                throttle: summary.throttle
+            )
+        }
+    }
+
+    /// Derive stages for many items using one shared context — avoids O(N×queue) scans.
+    @MainActor
+    static func deriveBatch(
+        items: [TranscriptItem],
+        context: DeriveContext,
+        offline: OfflineProcessingService
+    ) -> [String: PipelineStage] {
+        var result: [String: PipelineStage] = [:]
+        result.reserveCapacity(items.count)
+        for item in items {
+            result[item.id] = derive(item: item, context: context, offline: offline)
+        }
+        return result
+    }
+
+    /// Fuse the three sources into one stage using a precomputed context.
+    @MainActor
+    static func derive(
+        item: TranscriptItem,
+        context: DeriveContext,
+        offline: OfflineProcessingService
+    ) -> PipelineStage {
+        if case .failed(let r)? = context.summaryJobs[item.id] { return .failed(.summary(r)) }
+        let offlineState = offline.jobState(forAudioPath: item.meta.audio)
+        if case .failed(let r)? = offlineState { return .failed(.speakerDetection(r)) }
+
+        if case .paused(let reason, let resumeAt) = context.throttle,
+           reason == .usageLimit, context.pendingSummaryIDs.contains(item.id) {
+            return .failed(.claudeUsageLimited(resumeAt: resumeAt))
+        }
+
+        if context.runningSummaryID == item.id { return .summarizing }
+        if offlineState == .running { return .detectingSpeakers }
+        if offlineState == .queued { return .queuedForSpeakers }
+
+        if item.summaryReadyURL != nil { return .reviewReady }
+        if context.pendingSummaryIDs.contains(item.id) { return .queuedForSummary }
+        if item.hasUnnamedSpeakers, let a = item.meta.audio, !a.isEmpty { return .needsSpeakerNames }
+
+        if item.isProcessed { return .processed }
+        return .idleUnprocessed
+    }
+
     /// Fuse the three sources into one stage. Precedence (first match wins) keeps
     /// in-flight/failed states ahead of file-derived flags — e.g. a running offline pass
     /// over a not-yet-rewritten transcript reads as `detectingSpeakers`, not

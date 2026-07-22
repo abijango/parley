@@ -24,6 +24,7 @@ struct LiveTranscriptView: View, Equatable {
     /// Default number of trailing rows rendered; older rows load on demand.
     static let defaultVisibleTail = 300
     @State private var visibleTail = Self.defaultVisibleTail
+    @State private var scrollScheduled = false
 
     private var displayedSegments: [Segment] {
         guard segments.count > visibleTail else { return segments }
@@ -75,14 +76,21 @@ struct LiveTranscriptView: View, Equatable {
             .overlay { if segments.isEmpty, !hidesEmptyState { emptyState } }
             .onChange(of: segments.count) { _, newCount in
                 if newCount < visibleTail { visibleTail = Self.defaultVisibleTail }
-                withAnimation(Theme.Motion.gentle) {
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                }
+                scheduleScroll(proxy: proxy)
             }
             .onChange(of: segments.last?.text) {
-                withAnimation(Theme.Motion.gentle) {
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                }
+                scheduleScroll(proxy: proxy)
+            }
+        }
+    }
+
+    private func scheduleScroll(proxy: ScrollViewProxy) {
+        guard !scrollScheduled else { return }
+        scrollScheduled = true
+        DispatchQueue.main.async {
+            scrollScheduled = false
+            withAnimation(Theme.Motion.gentle) {
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
             }
         }
     }

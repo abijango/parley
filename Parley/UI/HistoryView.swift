@@ -13,6 +13,7 @@ struct HistoryView: View {
     @ObservedObject private var summaryService = RecordingController.shared.summaryService
     /// Observed so the per-item "Detecting speakers…" state tracks the offline queue.
     @ObservedObject private var offline = RecordingController.shared.offlineService
+    @StateObject private var rowIndex = HistoryRowIndex()
     @State private var selection = Set<TranscriptItem.ID>()
     @State private var filter: HistoryFilter = .needsYou
     /// Search query, matched against title / attendees / filing (and bodies when enabled).
@@ -32,6 +33,7 @@ struct HistoryView: View {
     // The URL of the staged note for which the current inferred set was computed,
     // so we can reset deselections when the user navigates to a different note.
     @State private var inferredAffiliationStagedURL: URL?
+    @State private var stagedRawMarkdown: String?
 
     /// The active file-management sheet and its target(s).
     enum FileOp: Identifiable {
@@ -57,9 +59,9 @@ struct HistoryView: View {
         var id: String { rawValue }
     }
 
-    /// The fused pipeline stage for an item (file flags + offline queue + summary queue).
+    /// The fused pipeline stage for an item (reads the precomputed row index).
     func stage(_ item: TranscriptItem) -> PipelineStage {
-        PipelineStage.derive(item: item, offline: offline, summary: summaryService)
+        rowIndex.stage(for: item)
     }
 
     private var filteredItems: [TranscriptItem] {
@@ -67,8 +69,8 @@ struct HistoryView: View {
         switch filter {
         case .all: base = store.items
         case .processing: base = processingOrderedItems
-        case .needsYou: base = store.items.filter { stage($0).needsYou }
-        case .done: base = store.items.filter { stage($0) == .processed }
+        case .needsYou: base = store.items.filter { rowIndex.row(for: $0).needsYou }
+        case .done: base = store.items.filter { rowIndex.stage(for: $0) == .processed }
         }
         let q = searchQuery.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return base }
@@ -78,7 +80,7 @@ struct HistoryView: View {
     /// Items in the Processing tab, ordered to mirror the actual queues: summaries first
     /// (the scarce Claude resource — running, then queued), then speaker detection.
     private var processingOrderedItems: [TranscriptItem] {
-        let inflight = store.items.filter { stage($0).isProcessing }
+        let inflight = store.items.filter { rowIndex.row(for: $0).isProcessing }
         func rank(_ s: PipelineStage) -> Int {
             switch s {
             case .summarizing: return 0
@@ -89,24 +91,21 @@ struct HistoryView: View {
             }
         }
         return inflight.sorted {
-            let (a, b) = (rank(stage($0)), rank(stage($1)))
+            let (a, b) = (rank(rowIndex.stage(for: $0)), rank(rowIndex.stage(for: $1)))
             return a != b ? a < b : $0.meta.date > $1.meta.date
         }
     }
 
-    /// Title / attendees / filing match (cheap, in-memory); body match only when content
-    /// search is toggled on (reads the file — fine for the small number of meeting notes).
+    /// Title / attendees / filing match synchronously; body match uses the async index.
     private func matchesSearch(_ item: TranscriptItem, query q: String) -> Bool {
         if item.meta.title.lowercased().contains(q) { return true }
         if item.meta.filing.lowercased().contains(q) { return true }
         if item.meta.attendees.contains(where: { $0.lowercased().contains(q) }) { return true }
-        if searchInContents, let text = try? String(contentsOf: item.url, encoding: .utf8) {
-            return text.range(of: q, options: .caseInsensitive) != nil
-        }
+        if searchInContents { return rowIndex.contentMatchIDs.contains(item.id) }
         return false
     }
     /// Count of items needing the user (badge on the "Needs you" tab).
-    private var needsYouCount: Int { store.items.filter { stage($0).needsYou }.count }
+    private var needsYouCount: Int { store.items.filter { rowIndex.row(for: $0).needsYou }.count }
     /// Item awaiting the "speakers not assigned" confirmation before summarizing.
     @State private var pendingProcessItem: TranscriptItem?
     /// Add-attendee popover (for someone present who didn't speak / was forgotten).
@@ -127,7 +126,14 @@ struct HistoryView: View {
                 .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { store.refresh(); store.startWatching(); seedReviewDestination() }
+        .onAppear {
+            store.refresh()
+            store.startWatching()
+            rowIndex.observe(store: store, offline: offline, summary: summaryService)
+            seedReviewDestination()
+        }
+        .onChange(of: searchQuery) { updateContentSearch() }
+        .onChange(of: searchInContents) { updateContentSearch() }
         .onChange(of: selection) { seedReviewDestination() }
         .onChange(of: selectedItem?.summaryReadyURL) { seedReviewDestination() }
         // The "Detect speakers" review sheet is hosted at the window root
@@ -160,6 +166,14 @@ struct HistoryView: View {
         if let item = selectedItem, item.summaryReadyURL != nil {
             reviewDestination = item.meta.filing
         }
+    }
+
+    private func updateContentSearch() {
+        rowIndex.updateContentSearch(
+            query: searchQuery,
+            searchInContents: searchInContents,
+            items: store.items
+        )
     }
 
     /// Queue a background Claude summary. An explicit press is user-initiated — it
@@ -373,7 +387,7 @@ struct HistoryView: View {
     /// Warning/attention icons in the row; in-flight states render as the mini stage
     /// bar underline instead (see `row`).
     @ViewBuilder private func rowIndicator(_ item: TranscriptItem) -> some View {
-        switch stage(item) {
+        switch rowIndex.row(for: item).rowIndicator {
         case .needsSpeakerNames:
             Image(systemName: "person.crop.circle.badge.exclamationmark")
                 .foregroundStyle(Theme.Severity.warning.color).font(Theme.Typography.caption)
@@ -382,27 +396,15 @@ struct HistoryView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(Theme.Severity.warning.color).font(Theme.Typography.caption)
                 .help("Needs attention")
-        default:
+        case nil:
             EmptyView()
         }
     }
 
     /// Status chip mapped from the fused pipeline stage.
     private func statusBadge(_ item: TranscriptItem) -> some View {
-        let (label, severity): (String, Theme.Severity) = {
-            switch stage(item) {
-            case .detectingSpeakers: return ("Detecting", .info)
-            case .summarizing: return ("Summarizing", .info)
-            case .queuedForSpeakers, .queuedForSummary: return ("Queued", .info)
-            case .needsSpeakerNames: return ("Needs speakers", .warning)
-            case .reviewReady: return ("Review", .info)
-            case .processed: return ("Processed", .success)
-            case .idleUnprocessed: return ("Unprocessed", .warning)
-            case .failed(.claudeUsageLimited): return ("Paused", .warning)
-            case .failed: return ("Failed", .danger)
-            }
-        }()
-        return StatusBadge(label, severity: severity)
+        let model = rowIndex.row(for: item)
+        return StatusBadge(model.statusLabel, severity: model.statusSeverity)
     }
 
     // MARK: Detail
@@ -492,8 +494,7 @@ struct HistoryView: View {
     /// The review pane shown when a summary is staged: editable destination above the
     /// rendered note, with Commit / Discard / Regenerate.
     @ViewBuilder private func reviewPane(_ item: TranscriptItem, staged: URL) -> some View {
-        let body = (try? String(contentsOf: staged, encoding: .utf8)) ?? ""
-        let inferred = InferredAffiliationParser.parseInferred(markdown: body)
+        let inferred = InferredAffiliationParser.parseInferred(markdown: stagedRawMarkdown ?? "")
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: Theme.Spacing.small) {
                 Text("Summary ready — review, set where it's filed, then commit to your vault.")
@@ -509,7 +510,11 @@ struct HistoryView: View {
             .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
             .chromeSurface()
             Divider()
-            TranscriptPreviewView(url: staged, reloadToken: recording.transcriptRevision)
+            TranscriptPreviewView(
+                url: staged,
+                reloadToken: recording.transcriptRevision,
+                rawMarkdown: $stagedRawMarkdown
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             if !inferred.isEmpty {
@@ -539,9 +544,9 @@ struct HistoryView: View {
             .chromeSurface()
         }
         .onChange(of: staged) {
-            // Reset toggle state when the user reviews a different staged note.
             deselectedAffiliations.removeAll()
             inferredAffiliationStagedURL = staged
+            stagedRawMarkdown = nil
         }
     }
 

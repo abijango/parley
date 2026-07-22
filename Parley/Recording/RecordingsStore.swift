@@ -5,7 +5,8 @@ struct RecordingFolder: Identifiable, Equatable {
     let url: URL
     let title: String
     let date: Date
-    let sizeBytes: Int64
+    /// `nil` while the folder size is being computed asynchronously.
+    let sizeBytes: Int64?
     /// Manifest still `.active` — either the live recording or a crashed session.
     let isActive: Bool
 
@@ -20,9 +21,13 @@ struct RecordingFolder: Identifiable, Equatable {
 final class RecordingsStore: ObservableObject {
     @Published private(set) var sessions: [RecordingFolder] = []
 
-    var totalBytes: Int64 { sessions.reduce(0) { $0 + $1.sizeBytes } }
+    var totalBytes: Int64 { sessions.compactMap(\.sizeBytes).reduce(0, +) }
+    var sizesPending: Bool { sessions.contains { $0.sizeBytes == nil } }
+
+    private var sizeTask: Task<Void, Never>?
 
     func refresh() {
+        sizeTask?.cancel()
         let fm = FileManager.default
         let root = AppPaths.recordingsDirectory
         guard let entries = try? fm.contentsOfDirectory(
@@ -38,15 +43,34 @@ final class RecordingsStore: ObservableObject {
                 ?? (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate
                 ?? Date.distantPast
             return RecordingFolder(url: url, title: title, date: date,
-                                   sizeBytes: MeetingFiles.size(of: url),
+                                   sizeBytes: nil,
                                    isActive: manifest?.status == .active)
         }
         .sorted { $0.date > $1.date }
+
+        let folders = sessions
+        sizeTask = Task { [weak self] in
+            for folder in folders {
+                guard !Task.isCancelled else { return }
+                let bytes = await Task.detached { MeetingFiles.size(of: folder.url) }.value
+                guard !Task.isCancelled, let self else { return }
+                guard let idx = sessions.firstIndex(where: { $0.id == folder.id }) else { continue }
+                let current = sessions[idx]
+                sessions[idx] = RecordingFolder(
+                    url: current.url,
+                    title: current.title,
+                    date: current.date,
+                    sizeBytes: bytes,
+                    isActive: current.isActive
+                )
+            }
+        }
     }
 
     func delete(_ folder: RecordingFolder) {
         MeetingFiles.trash(folder.url)
-        AppLog.log("Trashed recording session \(folder.id) (\(ByteCountFormatter.string(fromByteCount: folder.sizeBytes, countStyle: .file)))", category: "record")
+        let bytes = folder.sizeBytes ?? 0
+        AppLog.log("Trashed recording session \(folder.id) (\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)))", category: "record")
         refresh()
     }
 
@@ -54,7 +78,7 @@ final class RecordingsStore: ObservableObject {
     /// (macOS Trash) for consistency with History's cascade delete.
     func delete(_ folders: [RecordingFolder]) {
         guard !folders.isEmpty else { return }
-        let bytes = folders.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        let bytes = folders.compactMap(\.sizeBytes).reduce(Int64(0), +)
         for folder in folders { MeetingFiles.trash(folder.url) }
         AppLog.log("Trashed \(folders.count) recording session(s) (\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)))", category: "record")
         refresh()
