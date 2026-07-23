@@ -34,6 +34,10 @@ struct HistoryView: View {
     // so we can reset deselections when the user navigates to a different note.
     @State private var inferredAffiliationStagedURL: URL?
     @State private var stagedRawMarkdown: String?
+    /// When multiple backends are staged, which one the review pane is showing.
+    @State private var reviewStagedURL: URL?
+    /// Opens the side-by-side model comparison window for this transcript.
+    @State private var compareItem: TranscriptItem?
 
     /// The active file-management sheet and its target(s).
     enum FileOp: Identifiable {
@@ -159,6 +163,11 @@ struct HistoryView: View {
             case .merge(let item): mergeSheetView(item)
             }
         }
+        .sheet(item: $compareItem) { item in
+            SummaryCompareView(item: item) { _ in
+                store.refresh()
+            }
+        }
     }
 
     /// Seed the editable review destination from the selected item's filing.
@@ -166,6 +175,12 @@ struct HistoryView: View {
         if let item = selectedItem, item.summaryReadyURL != nil {
             reviewDestination = item.meta.filing
         }
+    }
+
+    private func isV2Review(item _: TranscriptItem, staged: URL) -> Bool {
+        // Markup UI is only for Summary v2 staging files. Do not treat classic
+        // dual-staging as v2 merely because Settings → Pipeline is set to v2.
+        staged.lastPathComponent.hasSuffix(".v2.md")
     }
 
     private func updateContentSearch() {
@@ -337,7 +352,7 @@ struct HistoryView: View {
             HStack(spacing: Theme.Spacing.small) {
                 Image(systemName: "pause.circle.fill").foregroundStyle(Theme.Severity.warning.color)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(reason == .usageLimit ? "Summaries paused — Claude usage limit" : "Summaries paused")
+                    Text(reason == .usageLimit ? "Summaries paused — usage/rate limit" : "Summaries paused")
                         .font(Theme.Typography.caption)
                     if let resumeAt {
                         Text("Resumes \(Self.timeString(resumeAt))")
@@ -417,7 +432,11 @@ struct HistoryView: View {
                 detailHeader(item)
                 Divider()
                 if let staged = item.summaryReadyURL {
-                    reviewPane(item, staged: staged)
+                    if isV2Review(item: item, staged: staged) {
+                        SummaryMarkupReviewView(item: item, reviewDestination: $reviewDestination)
+                    } else {
+                        reviewPane(item, staged: staged)
+                    }
                 } else {
                     summaryStatusBar(item)
                     TranscriptPreviewView(url: item.url, reloadToken: recording.transcriptRevision)
@@ -473,7 +492,7 @@ struct HistoryView: View {
         case .pending:
             HStack(spacing: Theme.Spacing.small) {
                 ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center)
-                Text("Summarizing in the background…")
+                Text(StageBarModel.summarizeStatusLabel())
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 Spacer()
             }
@@ -492,13 +511,27 @@ struct HistoryView: View {
     }
 
     /// The review pane shown when a summary is staged: editable destination above the
-    /// rendered note, with Commit / Discard / Regenerate.
+    /// rendered note, with Commit / Discard / Regenerate. When multiple backends have
+    /// staged output, a picker lets you flip between them for quality comparison.
     @ViewBuilder private func reviewPane(_ item: TranscriptItem, staged: URL) -> some View {
         let inferred = InferredAffiliationParser.parseInferred(markdown: stagedRawMarkdown ?? "")
+        let reviewURL = reviewStagedURL ?? staged
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: Theme.Spacing.small) {
                 Text("Summary ready — review, set where it's filed, then commit to your vault.")
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                if item.stagedSummaries.count > 1 {
+                    Picker("Compare", selection: Binding(
+                        get: { reviewStagedURL ?? staged },
+                        set: { reviewStagedURL = $0; stagedRawMarkdown = nil }
+                    )) {
+                        ForEach(item.stagedSummaries, id: \.url) { entry in
+                            Text(entry.backend?.displayName ?? "Legacy").tag(entry.url)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
                 HStack(spacing: Theme.Spacing.small) {
                     Text("Will be filed to:")
                         .font(Theme.Typography.caption).foregroundStyle(.secondary)
@@ -511,14 +544,14 @@ struct HistoryView: View {
             .chromeSurface()
             Divider()
             TranscriptPreviewView(
-                url: staged,
+                url: reviewURL,
                 reloadToken: recording.transcriptRevision,
                 rawMarkdown: $stagedRawMarkdown
             )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             if !inferred.isEmpty {
-                inferredAffiliationBanner(inferred, staged: staged)
+                inferredAffiliationBanner(inferred, staged: reviewURL)
                 Divider()
             }
             HStack(spacing: Theme.Spacing.medium) {
@@ -530,11 +563,16 @@ struct HistoryView: View {
                     Label("Regenerate", systemImage: "arrow.clockwise")
                 }
                 .glassButton()
+                .help("Re-runs the active backend in Settings (\(settings.summaryBackend.displayName)); other backends' staging files are kept.")
+                Button { compareItem = item } label: {
+                    Label("Compare models\u{2026}", systemImage: "rectangle.split.3x1")
+                }
+                .glassButton()
                 Spacer()
                 Button {
                     let confirmed = inferred.filter { !deselectedAffiliations.contains($0.name) }
                     recording.confirmInferredAffiliations(confirmed)
-                    summaryService.commit(item, destination: reviewDestination)
+                    summaryService.commit(item, destination: reviewDestination, stagedURL: reviewURL)
                 } label: {
                     Label("Commit & File", systemImage: "tray.and.arrow.down")
                 }
@@ -547,6 +585,7 @@ struct HistoryView: View {
             deselectedAffiliations.removeAll()
             inferredAffiliationStagedURL = staged
             stagedRawMarkdown = nil
+            reviewStagedURL = nil
         }
     }
 
@@ -700,6 +739,12 @@ struct HistoryView: View {
             }
             .glassButton()
             .help("Combine this recording with another leg of the same call")
+
+            Button { compareItem = item } label: {
+                Label("Compare models\u{2026}", systemImage: "rectangle.split.3x1")
+            }
+            .glassButton()
+            .help("Side-by-side summaries from Claude, Cursor, Grok, and local Qwen")
 
             if audioAvailable(item) {
                 if item.hasUnnamedSpeakers {

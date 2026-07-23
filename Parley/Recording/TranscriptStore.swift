@@ -11,15 +11,18 @@ struct TranscriptItem: Identifiable, Equatable {
     /// The transcript still has generic, unnamed speaker labels ("Speaker N" / "Me" /
     /// "Remote") — i.e. speakers haven't been assigned yet. Drives the History badge.
     var hasUnnamedSpeakers: Bool = false
-    /// A background summary has finished and is staged for review (the `.staging` file).
+    /// Preferred staged summary for review (current backend if present, else any).
     /// Non-nil ⇒ show the review pane in History. Cleared on commit/discard.
     var summaryReadyURL: URL? = nil
+    /// All staged summaries for side-by-side Claude vs local eval (`backend` nil = legacy).
+    var stagedSummaries: [(backend: SummaryBackend?, url: URL)] = []
 
     static func == (lhs: TranscriptItem, rhs: TranscriptItem) -> Bool {
         lhs.url == rhs.url
             && lhs.isProcessed == rhs.isProcessed
             && lhs.hasUnnamedSpeakers == rhs.hasUnnamedSpeakers
             && lhs.summaryReadyURL == rhs.summaryReadyURL
+            && lhs.stagedSummaries.map(\.url) == rhs.stagedSummaries.map(\.url)
             && lhs.meta.status == rhs.meta.status
             && lhs.meta.note == rhs.meta.note
             && lhs.meta.title == rhs.meta.title
@@ -223,7 +226,10 @@ final class TranscriptStore: ObservableObject {
         // media by default.
         if trashOriginals {
             for it in ordered {
-                if let staged = links(for: it).staging { MeetingFiles.trash(staged) }
+                for s in it.stagedSummaries { MeetingFiles.trash(s.url) }
+                if it.stagedSummaries.isEmpty, let staged = links(for: it).staging {
+                    MeetingFiles.trash(staged)
+                }
                 MeetingFiles.trash(it.url)
             }
         }
@@ -259,7 +265,8 @@ final class TranscriptStore: ObservableObject {
         let l = links(for: item)
         if alsoAudio, let session = l.audioSession { MeetingFiles.trash(session) }
         if alsoNote, let note = l.note { MeetingFiles.trash(note) }
-        if let staged = l.staging { MeetingFiles.trash(staged) }
+        for s in item.stagedSummaries { MeetingFiles.trash(s.url) }
+        if item.stagedSummaries.isEmpty, let staged = l.staging { MeetingFiles.trash(staged) }
         MeetingFiles.trash(item.url)
     }
 
@@ -371,12 +378,22 @@ final class TranscriptStore: ObservableObject {
                 ?? fallbackMeta(url, processed: processed)
             meta.date = resolvedDate(url, meta.date)
             let unnamed = text.map(Self.hasGenericSpeakerLabels) ?? false
-            // A staged summary (.staging/<base>.md) means "ready for review".
-            let stageURL = staging.appendingPathComponent(
-                url.deletingPathExtension().lastPathComponent + ".md")
-            let summaryReady = fm.fileExists(atPath: stageURL.path) ? stageURL : nil
+            // Dual-staging: `.staging/<base>.<backend>.md` (+ legacy `<base>.md`).
+            let staged = SummaryService.allStagedSummaries(for: url, stagingDir: staging)
+            // Prefer the user's current backend when choosing which file to open first.
+            // `AppSettings.shared` is MainActor-only — use raw UserDefaults here.
+            let preferRaw = UserDefaults.standard.string(forKey: "parley.summaryBackend")
+                ?? SummaryBackend.claude.rawValue
+            let prefer = SummaryBackend(rawValue: preferRaw) ?? .claude
+            let pipelineRaw = UserDefaults.standard.string(forKey: "parley.summaryPipeline")
+                ?? SummaryPipeline.classic.rawValue
+            let pipeline = SummaryPipeline(rawValue: pipelineRaw) ?? .classic
+            let summaryReady = SummaryService.preferredStagingURL(
+                for: url, prefer: prefer, stagingDir: staging, pipeline: pipeline)
             result.append(TranscriptItem(url: url, meta: meta, isProcessed: processed,
-                                         hasUnnamedSpeakers: unnamed, summaryReadyURL: summaryReady))
+                                         hasUnnamedSpeakers: unnamed,
+                                         summaryReadyURL: summaryReady,
+                                         stagedSummaries: staged))
         }
         return result
     }

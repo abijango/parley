@@ -124,22 +124,80 @@ enum FluidStreamingTier: Int, CaseIterable, Identifiable {
     }
 }
 
-/// Which CLI generates meeting summaries. Shared prompt; different binary/auth.
+/// Which engine generates meeting summaries. Shared prompt; different runtime.
+/// Cursor Agent variants use CLI model ids as `rawValue` so staging files are
+/// `.staging/<base>.composer-2.5.md` etc. — keeps Claude/Grok/local/Cursor
+/// side-by-side for quality benchmarks.
 enum SummaryBackend: String, CaseIterable, Identifiable {
     case claude
     case grok
+    case local
+    case composer25 = "composer-2.5"
+    case composer25Fast = "composer-2.5-fast"
+    case cursorGrok45 = "cursor-grok-4.5-high"
+    case cursorGrok45Fast = "cursor-grok-4.5-high-fast"
 
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .claude: return "Claude"
-        case .grok: return "Grok"
+        case .grok: return "Grok CLI"
+        case .local: return "Qwen (local)"
+        case .composer25: return "Composer 2.5"
+        case .composer25Fast: return "Composer 2.5 Fast"
+        case .cursorGrok45: return "Cursor Grok 4.5"
+        case .cursorGrok45Fast: return "Cursor Grok 4.5 Fast"
         }
     }
     var blurb: String {
         switch self {
         case .claude: return "Runs `claude -p` with your Claude Code login."
         case .grok: return "Runs `grok -p` with your Grok CLI login."
+        case .local: return "Runs Qwen on-device via MLX (fully offline)."
+        case .composer25:
+            return "Runs `cursor agent -p --mode ask` with model `composer-2.5` (Cursor subscription)."
+        case .composer25Fast:
+            return "Runs `cursor agent -p --mode ask` with model `composer-2.5-fast`."
+        case .cursorGrok45:
+            return "Runs `cursor agent -p --mode ask` with model `cursor-grok-4.5-high`."
+        case .cursorGrok45Fast:
+            return "Runs `cursor agent -p --mode ask` with model `cursor-grok-4.5-high-fast`."
+        }
+    }
+
+    /// True when this backend is invoked via the Cursor Agent CLI.
+    var isCursorAgent: Bool {
+        switch self {
+        case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast: return true
+        default: return false
+        }
+    }
+
+    /// CLI `--model` id (same as `rawValue` for Cursor backends).
+    var cursorModelID: String? { isCursorAgent ? rawValue : nil }
+
+    /// Backends suitable for the Summary v2 writer role.
+    /// Local Qwen is omitted — `SummaryService.runBackend` does not support it in v2 yet.
+    static var writerBackends: [SummaryBackend] {
+        [.composer25, .composer25Fast, .claude, .grok, .cursorGrok45, .cursorGrok45Fast]
+    }
+
+    /// Backends suitable for the Summary v2 checker role.
+    static var checkerBackends: [SummaryBackend] {
+        [.cursorGrok45, .cursorGrok45Fast, .composer25, .composer25Fast, .claude, .grok]
+    }
+}
+
+/// Summary generation pipeline: classic single-backend or v2 writer→checker.
+enum SummaryPipeline: String, CaseIterable, Identifiable {
+    case classic
+    case v2
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .classic: return "Classic (single backend)"
+        case .v2: return "Summary v2 (writer + checker)"
         }
     }
 }
@@ -159,11 +217,17 @@ final class AppSettings: ObservableObject {
         static let captureMode = "parley.captureMode"
         static let autoRunClaude = "parley.autoRunClaude"
         static let summaryBackend = "parley.summaryBackend"
+        static let summaryPipeline = "parley.summaryPipeline"
+        static let summaryWriterBackend = "parley.summaryWriterBackend"
+        static let summaryCheckerBackend = "parley.summaryCheckerBackend"
+        static let contactsUseKnowledgeDB = "parley.contactsUseKnowledgeDB"
         static let claudeBinaryPath = "parley.claudeBinaryPath"
         static let claudePromptTemplate = "parley.claudePromptTemplate"
         static let claudeModel = "parley.claudeModel"
         static let grokBinaryPath = "parley.grokBinaryPath"
         static let grokModel = "parley.grokModel"
+        static let localSummaryModelId = "parley.localSummaryModelId"
+        static let cursorBinaryPath = "parley.cursorBinaryPath"
         static let summaryBulkThreshold = "parley.summaryBulkThreshold"
         static let summaryFailureTripThreshold = "parley.summaryFailureTripThreshold"
         static let summaryAutoResumeAfterLimit = "parley.summaryAutoResumeAfterLimit"
@@ -285,17 +349,42 @@ final class AppSettings: ObservableObject {
     /// summary automatically (result is staged for review in History). Default on.
     /// Key name is historical (`autoRunClaude`); applies to whichever `summaryBackend` is set.
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = true
-    /// Which CLI generates summaries: Claude Code or Grok.
+    /// Which engine generates summaries: Claude Code, Grok, or local MLX/Qwen.
     @AppStorage(Key.summaryBackend) var summaryBackendRaw: String = SummaryBackend.claude.rawValue
+    /// Classic single-backend vs v2 writer→checker pipeline.
+    @AppStorage(Key.summaryPipeline) var summaryPipelineRaw: String = SummaryPipeline.classic.rawValue
+    @AppStorage(Key.summaryWriterBackend) var summaryWriterBackendRaw: String = SummaryBackend.composer25.rawValue
+    @AppStorage(Key.summaryCheckerBackend) var summaryCheckerBackendRaw: String = SummaryBackend.cursorGrok45.rawValue
+    /// When on, contacts/rolodex are read from the knowledge SQLite DB (with optional Rolodex.md export).
+    @AppStorage(Key.contactsUseKnowledgeDB) var contactsUseKnowledgeDB: Bool = false
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt
     @AppStorage(Key.claudeModel) var claudeModel: String = "sonnet"
     @AppStorage(Key.grokBinaryPath) var grokBinaryPath: String = "\(NSHomeDirectory())/.grok/bin/grok"
     @AppStorage(Key.grokModel) var grokModel: String = "grok-4.5"
+    /// Hugging Face / MLX model id for `SummaryBackend.local` (files under SummaryModels/).
+    @AppStorage(Key.localSummaryModelId) var localSummaryModelId: String = "mlx-community/Qwen3-4B-4bit"
+    /// Path to the Cursor CLI (`cursor agent …`). Used by Composer / Cursor Grok backends.
+    @AppStorage(Key.cursorBinaryPath) var cursorBinaryPath: String = "/usr/local/bin/cursor"
 
     var summaryBackend: SummaryBackend {
         get { SummaryBackend(rawValue: summaryBackendRaw) ?? .claude }
         set { summaryBackendRaw = newValue.rawValue }
+    }
+
+    var summaryPipeline: SummaryPipeline {
+        get { SummaryPipeline(rawValue: summaryPipelineRaw) ?? .classic }
+        set { summaryPipelineRaw = newValue.rawValue }
+    }
+
+    var summaryWriterBackend: SummaryBackend {
+        get { SummaryBackend(rawValue: summaryWriterBackendRaw) ?? .composer25 }
+        set { summaryWriterBackendRaw = newValue.rawValue }
+    }
+
+    var summaryCheckerBackend: SummaryBackend {
+        get { SummaryBackend(rawValue: summaryCheckerBackendRaw) ?? .cursorGrok45 }
+        set { summaryCheckerBackendRaw = newValue.rawValue }
     }
     /// Ask before auto-summarizing a wave of ≥ this many notes at once (backlog / bulk
     /// speaker-naming) so a burst never silently burns Claude usage.
@@ -448,6 +537,8 @@ final class AppSettings: ObservableObject {
     - Use ONLY information explicitly present in the transcript. Do NOT fabricate decisions, \
     owners, dates, figures, or metrics. If a section has nothing explicit, write "None recorded."
     - Output ONLY the Markdown note — no preamble, no code fences, no commentary.
+    - Do NOT include a Raw Transcript section — Parley appends the raw transcript to the filed \
+    note automatically.
 
     TRANSCRIPT:
     {{transcript}}

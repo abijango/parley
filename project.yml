@@ -30,6 +30,9 @@ packages:
     from: "0.15.5"          # native Parakeet ASR + diarization + speaker embeddings (Apache-2.0).
                             # 0.15.5: unified Parakeet ASR, Sortformer v3 diar fixes, resumable
                             # ModelHub downloads, custom vocabulary hooks, streaming seam fixes.
+  MLXExamples:
+    url: https://github.com/ml-explore/mlx-swift-examples.git
+    from: "2.29.1"          # MLXLLM + MLXLMCommon: local LLM summaries on the GPU (offline)
 
 targets:
   Parley:                 # TODO(app-name)
@@ -52,6 +55,10 @@ targets:
         product: SpeakerKit
       - package: MarkdownUI
       - package: FluidAudio
+      - package: MLXExamples
+        product: MLXLLM
+      - package: MLXExamples
+        product: MLXLMCommon
     info:
       path: Parley/App/Info.plist
       properties:

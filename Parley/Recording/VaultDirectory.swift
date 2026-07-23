@@ -35,7 +35,7 @@ struct CustomerReconciliation {
 }
 
 /// Which side of a meeting a person is on.
-enum Side: String, Equatable, CaseIterable {
+enum Side: String, Equatable, CaseIterable, Codable {
     case internalTeam = "internal"
     case customer     = "customer"
     case other        = "other"
@@ -129,7 +129,8 @@ final class VaultDirectory: ObservableObject {
         applySnapshot(Self.buildSnapshot(
             vaultURL: settings.vaultURL,
             contactsURL: settings.contactsURL,
-            scanRoots: settings.scanRoots
+            scanRoots: settings.scanRoots,
+            useKnowledgeDB: settings.contactsUseKnowledgeDB
         ))
     }
 
@@ -138,9 +139,11 @@ final class VaultDirectory: ObservableObject {
         let vaultURL = settings.vaultURL
         let contactsURL = settings.contactsURL
         let scanRoots = settings.scanRoots
+        let useKnowledgeDB = settings.contactsUseKnowledgeDB
         refreshTask = Task { [weak self] in
             let snapshot = await Task.detached {
-                Self.buildSnapshot(vaultURL: vaultURL, contactsURL: contactsURL, scanRoots: scanRoots)
+                Self.buildSnapshot(vaultURL: vaultURL, contactsURL: contactsURL,
+                                   scanRoots: scanRoots, useKnowledgeDB: useKnowledgeDB)
             }.value
             guard !Task.isCancelled, let self else { return }
             applySnapshot(snapshot)
@@ -167,11 +170,16 @@ final class VaultDirectory: ObservableObject {
     }
 
     nonisolated private static func buildSnapshot(
-        vaultURL: URL, contactsURL: URL, scanRoots: [String]
+        vaultURL: URL, contactsURL: URL, scanRoots: [String], useKnowledgeDB: Bool
     ) -> VaultRefreshSnapshot {
         let destinations = loadDestinations(vaultURL: vaultURL, scanRoots: scanRoots)
-        let contactsText = (try? String(contentsOf: contactsURL, encoding: .utf8)) ?? ""
-        let contacts = parseContacts(contactsText)
+        let contacts: [Contact]
+        if useKnowledgeDB {
+            contacts = PeopleStore().contacts()
+        } else {
+            let contactsText = (try? String(contentsOf: contactsURL, encoding: .utf8)) ?? ""
+            contacts = parseContacts(contactsText)
+        }
 
         var seen = Set<String>()
         var names: [String] = []
@@ -1344,15 +1352,57 @@ final class VaultDirectory: ObservableObject {
         refresh()
     }
 
-    // MARK: Contacts (Rolodex.md)
+    // MARK: Contacts (Rolodex.md / knowledge DB)
+
+    /// Import Rolodex.md into the knowledge DB when the people table is empty.
+    func importRolodexIfDBEmpty() {
+        importRolodexToKnowledgeDB(force: false)
+    }
+
+    /// Import contacts from Rolodex.md into SQLite.
+    func importRolodexToKnowledgeDB(force: Bool) {
+        let store = PeopleStore()
+        guard force || store.isEmpty() else { return }
+        let text = (try? String(contentsOf: settings.contactsURL, encoding: .utf8)) ?? ""
+        let parsed = Self.parseContacts(text)
+        guard !parsed.isEmpty else { return }
+        store.replaceAll(contacts: parsed)
+        AppLog.log("Imported \(parsed.count) contacts from Rolodex into knowledge DB", category: "knowledge")
+        refreshAfterMutation()
+    }
+
+    /// Export knowledge DB people to Rolodex.md (Obsidian-compatible).
+    func exportKnowledgeDBToRolodex() {
+        let contacts = PeopleStore().contacts()
+        let rendered = Self.renderCanonical(contacts)
+        writeContacts(rendered, to: settings.contactsURL)
+        AppLog.log("Exported \(contacts.count) contacts to \(settings.contactsFileName)", category: "knowledge")
+        refreshAfterMutation()
+    }
+
+    private func commitContacts(_ parsed: [Contact]) {
+        let url = settings.contactsURL
+        let rendered = Self.renderCanonical(parsed)
+        if settings.contactsUseKnowledgeDB {
+            PeopleStore().replaceAll(contacts: parsed)
+        }
+        writeContacts(rendered, to: url)
+    }
+
+    /// Source of truth for mutations: knowledge DB when enabled, else Rolodex.md.
+    private func loadMutableContacts() -> [Contact] {
+        if settings.contactsUseKnowledgeDB {
+            return PeopleStore().contacts()
+        }
+        let text = (try? String(contentsOf: settings.contactsURL, encoding: .utf8)) ?? ""
+        return Self.parseContacts(text)
+    }
 
     /// Appends not-yet-known people (bare names from the attendee list -- no company
     /// or title) under the "Other" section. Uses parse->mutate->render so the output
     /// is always canonical. Names already known by canonical name OR any alias are skipped.
     func addPeople(_ rawNames: [String]) {
-        let url = settings.contactsURL
-        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        var parsed = Self.parseContacts(text)
+        var parsed = loadMutableContacts()
 
         // Build a set of all known names + aliases for fast skip-check.
         var knownLower = Set<String>()
@@ -1371,9 +1421,8 @@ final class VaultDirectory: ObservableObject {
                                   title: nil, linkedin: nil))
         }
 
-        let rendered = Self.renderCanonical(parsed)
-        writeContacts(rendered, to: url)
-        AppLog.log("Added \(fresh.count) contacts under \(Self.otherSection) in \(url.lastPathComponent)", category: "vault")
+        commitContacts(parsed)
+        AppLog.log("Added \(fresh.count) contacts under \(Self.otherSection)", category: "vault")
         refreshAfterMutation()
     }
 
@@ -1394,15 +1443,13 @@ final class VaultDirectory: ObservableObject {
             .filter { !$0.isEmpty })
         guard !targets.isEmpty else { return 0 }
 
-        let url = settings.contactsURL
-        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let parsed = Self.parseContacts(text)
+        let parsed = loadMutableContacts()
         let kept = parsed.filter { !targets.contains($0.name.lowercased()) }
         let removed = parsed.count - kept.count
         guard removed > 0 else { return 0 }
 
-        writeContacts(Self.renderCanonical(kept), to: url)
-        AppLog.log("Removed \(removed) contact(s) from \(url.lastPathComponent)", category: "vault")
+        commitContacts(kept)
+        AppLog.log("Removed \(removed) contact(s)", category: "vault")
         refreshAfterMutation()
         return removed
     }
@@ -1441,9 +1488,7 @@ final class VaultDirectory: ObservableObject {
         let company: String? = companyTrimmed.isEmpty ? nil : companyTrimmed
         let link: String? = linkTrimmed.isEmpty ? nil : linkTrimmed
 
-        let url = settings.contactsURL
-        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        var parsed = Self.parseContacts(text)
+        var parsed = loadMutableContacts()
 
         // Determine side.
         // - Empty company always -> .other (guards against junk ## Uncategorized sections).
@@ -1506,10 +1551,9 @@ final class VaultDirectory: ObservableObject {
             parsed.append(newContact)
         }
 
-        let rendered = Self.renderCanonical(parsed)
-        writeContacts(rendered, to: url)
+        commitContacts(parsed)
         let section = company ?? Self.otherSection
-        AppLog.log("Upserted contact \(name) under \(section) in \(url.lastPathComponent)", category: "vault")
+        AppLog.log("Upserted contact \(name) under \(section)", category: "vault")
         refreshAfterMutation()
     }
 
@@ -1530,9 +1574,7 @@ final class VaultDirectory: ObservableObject {
         guard !oldTrimmed.isEmpty, !newTrimmed.isEmpty else { return }
         guard oldTrimmed.lowercased() != newTrimmed.lowercased() else { return }
 
-        let url = settings.contactsURL
-        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        var parsed = Self.parseContacts(text)
+        var parsed = loadMutableContacts()
 
         let oldLower = oldTrimmed.lowercased()
         let newLower = newTrimmed.lowercased()
@@ -1569,9 +1611,8 @@ final class VaultDirectory: ObservableObject {
             parsed.append(renamed)
         }
 
-        let rendered = Self.renderCanonical(parsed)
-        writeContacts(rendered, to: url)
-        AppLog.log("renameContact: \"\(oldTrimmed)\" -> \"\(newTrimmed)\" in \(url.lastPathComponent)", category: "vault")
+        commitContacts(parsed)
+        AppLog.log("renameContact: \"\(oldTrimmed)\" -> \"\(newTrimmed)\"", category: "vault")
         refreshAfterMutation()
     }
 
@@ -1628,50 +1669,26 @@ final class VaultDirectory: ObservableObject {
         return .customer  // brand-new company: assume external attendee
     }
 
-    /// Add `alias` to the `(aka ...)` set of the bullet whose canonical name is
+    /// Add `alias` to the `(aka ...)` set of the contact whose canonical name is
     /// `canonicalName` (case-insensitive match). If the alias is already present (ci),
     /// or equals the canonical name itself, the call is a no-op.
-    ///
-    /// The line is rewritten in place (one-line surgery, not a full reparse/render of
-    /// the file) to preserve all other content in the contacts file unchanged.
-    ///
-    /// After writing, `refresh()` is called so the index is up-to-date.
     func addAlias(_ alias: String, toCanonical canonicalName: String) {
         let alias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         let canonicalName = canonicalName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !alias.isEmpty, !canonicalName.isEmpty else { return }
         guard alias.lowercased() != canonicalName.lowercased() else { return }
 
-        let url = settings.contactsURL
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        var lines = text.components(separatedBy: "\n")
-
-        // Find the bullet line for this canonical name.
-        guard let idx = lines.firstIndex(where: { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("-") else { return false }
-            return Self.extractName(from: trimmed)?.lowercased() == canonicalName.lowercased()
+        var parsed = loadMutableContacts()
+        guard let idx = parsed.firstIndex(where: {
+            $0.name.lowercased() == canonicalName.lowercased()
         }) else { return }
 
-        // Parse the current aliases on that line.
-        let (_, existingTitle, existingLinkedin, existingAliases) = Self.extractBulletFields(lines[idx])
-
-        // Idempotency: no-op if alias already present.
-        if existingAliases.contains(where: { $0.lowercased() == alias.lowercased() }) { return }
-
-        // Build updated alias list (sorted).
-        let newAliases = (existingAliases + [alias]).sorted()
-
-        // Rebuild the contact with the updated aliases and rewrite the line in place.
-        // Note: this canonicalizes the name markup (bold or link) for that one bullet.
-        var updated = Contact(name: canonicalName, company: nil, side: .other,
-                              title: existingTitle, linkedin: existingLinkedin)
-        updated.aliases = newAliases
-        let newLine = Self.bulletLine(updated)
-        lines[idx] = newLine
-
-        writeContacts(lines, to: url)
-        AppLog.log("addAlias: added alias \"\(alias)\" to \"\(canonicalName)\" in \(url.lastPathComponent)", category: "vault")
+        var contact = parsed[idx]
+        if contact.aliases.contains(where: { $0.lowercased() == alias.lowercased() }) { return }
+        contact.aliases = (contact.aliases + [alias]).sorted()
+        parsed[idx] = contact
+        commitContacts(parsed)
+        AppLog.log("addAlias: added alias \"\(alias)\" to \"\(canonicalName)\"", category: "vault")
         refreshAfterMutation()
     }
 

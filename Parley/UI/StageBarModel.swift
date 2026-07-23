@@ -27,8 +27,19 @@ struct StageBarModel: Equatable {
         "Transcribing & detecting speakers",
         "Attributing words to speakers",
         "Compacting audio",
-        "Summarizing with Claude",
+        "Summarizing",
     ]
+
+    /// Live label for the summarize stage / status line, reflecting Settings pipeline.
+    @MainActor
+    static func summarizeStatusLabel(settings: AppSettings = .shared) -> String {
+        switch settings.summaryPipeline {
+        case .v2:
+            return "Summarizing with \(settings.summaryWriterBackend.displayName) → \(settings.summaryCheckerBackend.displayName)"
+        case .classic:
+            return "Summarizing with \(settings.summaryBackend.displayName)"
+        }
+    }
 
     // MARK: - Live entry point
 
@@ -60,6 +71,7 @@ struct StageBarModel: Equatable {
         }
 
         let summaryActivity = summary.runningActivity
+        let summarizeLabel = summarizeStatusLabel()
 
         return fuse(
             offlineState:    offlineState,
@@ -68,7 +80,8 @@ struct StageBarModel: Equatable {
             summaryQueued:   summaryQueued,
             summaryFailed:   summaryFailed,
             summaryPaused:   summaryPaused,
-            summaryActivity: summaryActivity
+            summaryActivity: summaryActivity,
+            summarizeLabel:  summarizeLabel
         )
     }
 
@@ -82,13 +95,14 @@ struct StageBarModel: Equatable {
         summaryQueued:   Bool,
         summaryFailed:   String?,
         summaryPaused:   Bool,
-        summaryActivity: String?
+        summaryActivity: String?,
+        summarizeLabel:  String = "Summarizing"
     ) -> StageBarModel? {
 
         // ── 1. Offline queued ──────────────────────────────────────────────────────
         if offlineState == .queued {
             return StageBarModel(
-                segments: makePending(),
+                segments: makePending(summarizeLabel: summarizeLabel),
                 statusLabel: "Queued — runs when idle")
         }
 
@@ -105,9 +119,9 @@ struct StageBarModel: Equatable {
                 if i < currentStageRaw       { state = .done }
                 else if i == currentStageRaw { state = .running(fraction: fraction) }
                 else                         { state = .pending }
-                segs.append(segment(at: i, state: state))
+                segs.append(segment(at: i, state: state, summarizeLabel: summarizeLabel))
             }
-            segs.append(segment(at: 4, state: .pending))
+            segs.append(segment(at: 4, state: .pending, summarizeLabel: summarizeLabel))
 
             let stageName = offlineStageName(currentStageRaw)
             let status: String
@@ -129,9 +143,9 @@ struct StageBarModel: Equatable {
                 if i < failStage       { state = .done }
                 else if i == failStage { state = .failed }
                 else                   { state = .pending }
-                segs.append(segment(at: i, state: state))
+                segs.append(segment(at: i, state: state, summarizeLabel: summarizeLabel))
             }
-            segs.append(segment(at: 4, state: .pending))
+            segs.append(segment(at: 4, state: .pending, summarizeLabel: summarizeLabel))
             return StageBarModel(segments: segs, statusLabel: msg)
         }
 
@@ -139,34 +153,34 @@ struct StageBarModel: Equatable {
 
         // Summary failed.
         if let msg = summaryFailed {
-            var segs = firstFourDone()
-            segs.append(segment(at: 4, state: .failed))
+            var segs = firstFourDone(summarizeLabel: summarizeLabel)
+            segs.append(segment(at: 4, state: .failed, summarizeLabel: summarizeLabel))
             return StageBarModel(segments: segs, statusLabel: msg)
         }
 
         // Summary running (shimmer).
         if summaryRunning {
-            var segs = firstFourDone()
-            segs.append(segment(at: 4, state: .running(fraction: nil)))
+            var segs = firstFourDone(summarizeLabel: summarizeLabel)
+            segs.append(segment(at: 4, state: .running(fraction: nil), summarizeLabel: summarizeLabel))
             return StageBarModel(
                 segments: segs,
-                statusLabel: "Summarizing with Claude",
+                statusLabel: summarizeLabel,
                 sublabel: summaryActivity)
         }
 
         // Summary paused (usage limit).
         if summaryPaused {
-            var segs = firstFourDone()
-            segs.append(segment(at: 4, state: .pending))
+            var segs = firstFourDone(summarizeLabel: summarizeLabel)
+            segs.append(segment(at: 4, state: .pending, summarizeLabel: summarizeLabel))
             return StageBarModel(
                 segments: segs,
-                statusLabel: "Paused — Claude usage limit")
+                statusLabel: "Paused — usage/rate limit")
         }
 
         // Summary queued.
         if summaryQueued {
-            var segs = firstFourDone()
-            segs.append(segment(at: 4, state: .pending))
+            var segs = firstFourDone(summarizeLabel: summarizeLabel)
+            segs.append(segment(at: 4, state: .pending, summarizeLabel: summarizeLabel))
             return StageBarModel(
                 segments: segs,
                 statusLabel: "Queued for summary")
@@ -179,19 +193,21 @@ struct StageBarModel: Equatable {
     // MARK: - Helpers
 
     private static func segment(at index: Int,
-                                 state: SegmentedStageBar.SegmentState) -> SegmentedStageBar.Segment {
-        SegmentedStageBar.Segment(
+                                 state: SegmentedStageBar.SegmentState,
+                                 summarizeLabel: String) -> SegmentedStageBar.Segment {
+        let label = index == 4 ? summarizeLabel : segmentLabels[index]
+        return SegmentedStageBar.Segment(
             id:    segmentIDs[index],
-            label: segmentLabels[index],
+            label: label,
             state: state)
     }
 
-    private static func makePending() -> [SegmentedStageBar.Segment] {
-        segmentIDs.indices.map { segment(at: $0, state: .pending) }
+    private static func makePending(summarizeLabel: String) -> [SegmentedStageBar.Segment] {
+        segmentIDs.indices.map { segment(at: $0, state: .pending, summarizeLabel: summarizeLabel) }
     }
 
-    private static func firstFourDone() -> [SegmentedStageBar.Segment] {
-        (0..<4).map { segment(at: $0, state: .done) }
+    private static func firstFourDone(summarizeLabel: String) -> [SegmentedStageBar.Segment] {
+        (0..<4).map { segment(at: $0, state: .done, summarizeLabel: summarizeLabel) }
     }
 
     /// Display name for an offline stage index (mirrors `JobProgress.Stage` order).

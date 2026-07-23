@@ -250,7 +250,7 @@ private struct IndeterminateFill: View {
         ("transcribeDiarize","Transcribe & detect speakers"),
         ("attribute",        "Attributing words to speakers"),
         ("compact",          "Compacting audio"),
-        ("summarize",        "Summarizing with Claude"),
+        ("summarize",        "Summarizing"),
     ]
 
     func makeSegments(_ runIndex: Int, fraction: Double? = nil,
@@ -303,8 +303,8 @@ private struct IndeterminateFill: View {
             SegmentedStageBar(
                 segments: makeSegments(4, fraction: nil),
                 style: .regular,
-                statusLabel: "Summarizing with Claude",
-                sublabel: "Writing Key Topics…")
+                statusLabel: "Summarizing with Composer 2.5 → Cursor Grok 4.5",
+                sublabel: "Writer is drafting…")
 
             SegmentedStageBar(
                 segments: makeSegments(0, failed: 1),

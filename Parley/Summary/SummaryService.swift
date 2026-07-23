@@ -66,10 +66,91 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     func state(for item: TranscriptItem) -> JobState? { jobs[item.id] }
 
-    /// The staging file where a transcript's pending summary lives (exists ⇒ ready to review).
+    /// Staging filename stem for a transcript (`YYYY-MM-DD-HHMM - Title`).
+    nonisolated static func stagingBase(for transcriptURL: URL) -> String {
+        transcriptURL.deletingPathExtension().lastPathComponent
+    }
+
+    /// Per-backend staging path: `.staging/<base>.<backend>.md`.
+    @MainActor static func stagingURL(for transcriptURL: URL, backend: SummaryBackend) -> URL {
+        stagingURL(for: transcriptURL, backend: backend, stagingDir: AppPaths.stagingURL)
+    }
+
+    nonisolated static func stagingURL(for transcriptURL: URL, backend: SummaryBackend, stagingDir: URL) -> URL {
+        let base = stagingBase(for: transcriptURL)
+        return stagingDir.appendingPathComponent("\(base).\(backend.rawValue).md")
+    }
+
+    /// Legacy single-slot path (pre dual-staging): `.staging/<base>.md`.
+    nonisolated static func legacyStagingURL(for transcriptURL: URL, stagingDir: URL) -> URL {
+        stagingDir.appendingPathComponent("\(stagingBase(for: transcriptURL)).md")
+    }
+
+    /// Summary v2 markup staging: `.staging/<base>.v2.md`.
+    nonisolated static func v2StagingURL(for transcriptURL: URL, stagingDir: URL) -> URL {
+        stagingDir.appendingPathComponent("\(stagingBase(for: transcriptURL)).v2.md")
+    }
+
+    @MainActor static func v2StagingURL(for transcriptURL: URL) -> URL {
+        v2StagingURL(for: transcriptURL, stagingDir: AppPaths.stagingURL)
+    }
+
+    /// Whether a v2 staged file or run history exists for this transcript.
+    nonisolated static func hasV2Artifacts(for transcriptURL: URL, stagingDir: URL) -> Bool {
+        let v2 = v2StagingURL(for: transcriptURL, stagingDir: stagingDir)
+        if FileManager.default.fileExists(atPath: v2.path) { return true }
+        return SummaryRunStore().hasRuns(forTranscriptID: transcriptURL.path)
+    }
+
+    /// Every staged summary for a transcript (dual-backend + v2 + legacy), newest-friendly order.
+    nonisolated static func allStagedSummaries(for transcriptURL: URL, stagingDir: URL) -> [(backend: SummaryBackend?, url: URL)] {
+        let fm = FileManager.default
+        var found: [(SummaryBackend?, URL)] = []
+        let v2 = v2StagingURL(for: transcriptURL, stagingDir: stagingDir)
+        if fm.fileExists(atPath: v2.path) { found.append((nil, v2)) }
+        for backend in SummaryBackend.allCases {
+            let url = stagingURL(for: transcriptURL, backend: backend, stagingDir: stagingDir)
+            if fm.fileExists(atPath: url.path) { found.append((backend, url)) }
+        }
+        let legacy = legacyStagingURL(for: transcriptURL, stagingDir: stagingDir)
+        if fm.fileExists(atPath: legacy.path) { found.append((nil, legacy)) }
+        return found
+    }
+
+    /// Preferred staging file. Prefer an existing `.v2.md` when present (or when the
+    /// active pipeline is v2). Never invent a URL from SQLite run history alone — runs
+    /// persist after Accept & File / Discard and must not keep History stuck in review.
+    nonisolated static func preferredStagingURL(for transcriptURL: URL,
+                                                prefer: SummaryBackend,
+                                                stagingDir: URL,
+                                                pipeline: SummaryPipeline = .classic) -> URL? {
+        let v2 = v2StagingURL(for: transcriptURL, stagingDir: stagingDir)
+        if FileManager.default.fileExists(atPath: v2.path) {
+            return v2
+        }
+        // `pipeline` retained for call-site clarity; preference after this point is
+        // dual-staging / legacy only (v2 file absence means not ready for markup review).
+        switch pipeline { case .classic, .v2: break }
+        let all = allStagedSummaries(for: transcriptURL, stagingDir: stagingDir)
+        if let match = all.first(where: { $0.backend == prefer }) { return match.url }
+        if let dual = all.first(where: { $0.backend != nil }) { return dual.url }
+        return all.first?.url
+    }
+
+    nonisolated static func anyStagingExists(for transcriptURL: URL, stagingDir: URL) -> Bool {
+        !allStagedSummaries(for: transcriptURL, stagingDir: stagingDir).isEmpty
+    }
+
+    @MainActor static func removeAllStaging(for transcriptURL: URL) {
+        let dir = AppPaths.stagingURL
+        for entry in allStagedSummaries(for: transcriptURL, stagingDir: dir) {
+            try? FileManager.default.removeItem(at: entry.url)
+        }
+    }
+
+    /// Convenience: preferred staging for the current settings backend.
     @MainActor static func stagingURL(for transcriptURL: URL) -> URL {
-        let base = transcriptURL.deletingPathExtension().lastPathComponent
-        return AppPaths.stagingURL.appendingPathComponent("\(base).md")
+        stagingURL(for: transcriptURL, backend: AppSettings.shared.summaryBackend)
     }
 
     // MARK: Enqueue
@@ -92,7 +173,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         case .confirmBulk:
             // Debounce into the single slot — never raise a second dialog.
             guard jobs[item.id] == nil,
-                  !FileManager.default.fileExists(atPath: Self.stagingURL(for: item.url).path) else { return }
+                  !Self.anyStagingExists(for: item.url, stagingDir: AppPaths.stagingURL) else { return }
             var slot = pendingBulkConfirm ?? BulkConfirm(items: [])
             guard !slot.items.contains(where: { $0.id == item.id }) else { return }
             slot.items.append(item)
@@ -121,7 +202,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let pending: [TranscriptItem] = SessionStore.pendingSummarySessions().compactMap { (_, m) in
             guard let path = m.transcriptPath else { return nil }
             let url = URL(fileURLWithPath: path)
-            if FileManager.default.fileExists(atPath: Self.stagingURL(for: url).path) { return nil }
+            if Self.anyStagingExists(for: url, stagingDir: AppPaths.stagingURL) { return nil }
             return store.items.first { $0.url == url }
                 ?? store.items.first { $0.url.lastPathComponent == url.lastPathComponent }
         }
@@ -136,28 +217,54 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     // MARK: Run
 
-    /// Queue a background summary for `item` (no-op if already pending or already staged).
+    /// Queue a background summary for `item` (no-op if already pending or this backend is staged).
     func summarize(_ item: TranscriptItem) {
         guard jobs[item.id] == nil else { return }
-        if FileManager.default.fileExists(atPath: Self.stagingURL(for: item.url).path) { return }
+        let settings = AppSettings.shared
+        if settings.summaryPipeline == .v2 {
+            let v2 = Self.v2StagingURL(for: item.url)
+            if FileManager.default.fileExists(atPath: v2.path) { return }
+        } else {
+            let backend = settings.summaryBackend
+            if FileManager.default.fileExists(atPath: Self.stagingURL(for: item.url, backend: backend).path) {
+                return
+            }
+        }
         jobs[item.id] = .pending(since: Date())
         setSummaryStatus(.queued, for: item)
         queue.append(item)
         runNext()
     }
 
+    /// Re-run the *active* backend only — other backends' staging files are kept for comparison.
     func regenerate(_ item: TranscriptItem) {
-        try? FileManager.default.removeItem(at: Self.stagingURL(for: item.url))
+        let settings = AppSettings.shared
+        if settings.summaryPipeline == .v2 {
+            try? FileManager.default.removeItem(at: Self.v2StagingURL(for: item.url))
+        } else {
+            let backend = settings.summaryBackend
+            try? FileManager.default.removeItem(at: Self.stagingURL(for: item.url, backend: backend))
+            try? FileManager.default.removeItem(at: Self.legacyStagingURL(for: item.url, stagingDir: AppPaths.stagingURL))
+        }
         jobs[item.id] = nil
         store.refresh()
         summarize(item)
     }
 
     func discard(_ item: TranscriptItem) {
-        try? FileManager.default.removeItem(at: Self.stagingURL(for: item.url))
+        Self.removeAllStaging(for: item.url)
         jobs[item.id] = nil
         queue.removeAll { $0.id == item.id }
         setSummaryStatus(nil, for: item)
+        store.refresh()
+    }
+
+    /// Discard only one backend's staged summary (keep others for side-by-side eval).
+    func discardStaged(_ item: TranscriptItem, backend: SummaryBackend) {
+        try? FileManager.default.removeItem(at: Self.stagingURL(for: item.url, backend: backend))
+        if Self.allStagedSummaries(for: item.url, stagingDir: AppPaths.stagingURL).isEmpty {
+            setSummaryStatus(nil, for: item)
+        }
         store.refresh()
     }
 
@@ -258,23 +365,52 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         lastSummaryStartedAt = Date()
         let item = queue.removeFirst()
         runningID = item.id
+        if settings.summaryPipeline == .v2 {
+            runV2(item: item, settings: settings)
+            return
+        }
         let backend = settings.summaryBackend
-        runningActivity = backend == .grok ? "Starting Grok…" : "Starting Claude…"
+        runningActivity = {
+            switch backend {
+            case .claude: return "Starting Claude…"
+            case .grok: return "Starting Grok…"
+            case .local: return "Starting local Qwen…"
+            case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                return "Starting \(backend.displayName)…"
+            }
+        }()
         setSummaryStatus(.running, for: item)
         let built = SummaryPromptBuilder.build(
             template: settings.summaryPromptTemplate,
             transcriptURL: item.url,
             attendees: item.meta.attendees.joined(separator: ", "),
             destination: item.meta.filing,
-            contactsURL: settings.contactsURL)
+            contactsURL: settings.contactsURL,
+            contactsFromDB: settings.contactsUseKnowledgeDB ? PeopleStore().contacts() : nil,
+            terminologyBlock: {
+                let scope = TerminologyStore.customerScope(fromFiling: item.meta.filing)
+                let t = SummaryPromptBuilder.terminologyBlock(filingScope: scope)
+                return t.isEmpty ? nil : t
+            }()
+        )
         let claudeBinary = settings.claudeBinaryPath
         let claudeModel = settings.claudeModel
         let grokBinary = settings.grokBinaryPath
         let grokModel = settings.grokModel
-        let staged = Self.stagingURL(for: item.url)
+        let cursorBinary = settings.cursorBinaryPath
+        let staged = Self.stagingURL(for: item.url, backend: backend)
         let failureTrip = settings.summaryFailureTripThreshold
         let backendLabel = backend.displayName
-        AppLog.log("Summary: started for \(item.url.lastPathComponent) (backend=\(backend.rawValue), model=\(backend == .grok ? grokModel : claudeModel))", category: "summary")
+        let modelLabel: String = {
+            switch backend {
+            case .claude: return claudeModel
+            case .grok: return grokModel
+            case .local: return settings.localSummaryModelId
+            case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                return backend.rawValue
+            }
+        }()
+        AppLog.log("Summary: started for \(item.url.lastPathComponent) (backend=\(backend.rawValue), model=\(modelLabel))", category: "summary")
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let result: RunResult
@@ -287,6 +423,13 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             case .grok:
                 Task { @MainActor [weak self] in self?.runningActivity = "Grok is writing…" }
                 result = Self.runGrok(binary: grokBinary, prompt: built.prompt, model: grokModel)
+            case .local:
+                result = await Self.runLocal(prompt: built.prompt) { line in
+                    Task { @MainActor [weak self] in self?.runningActivity = line }
+                }
+            case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                Task { @MainActor [weak self] in self?.runningActivity = "\(backend.displayName) is writing…" }
+                result = Self.runCursorAgent(binary: cursorBinary, prompt: built.prompt, model: backend.rawValue)
             }
             await MainActor.run {
                 guard let self else { return }
@@ -299,11 +442,16 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                         self.setSummaryStatus(.done, for: item)
                         self.consecutiveFailures = 0
                         self.backoffAttempt = 0
-                        if backend == .claude {
-                            ClaudeUsageStore.shared.record(usage)         // tally Claude spend only
+                        switch backend {
+                        case .claude:
+                            ClaudeUsageStore.shared.record(usage)
                             ClaudeConnection.shared.noteRunSucceeded()
-                        } else {
+                        case .grok:
                             GrokConnection.shared.noteRunSucceeded()
+                        case .local:
+                            break
+                        case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                            CursorConnection.shared.noteRunSucceeded()
                         }
                         Self.notifyReady(title: item.meta.title)
                         AppLog.log("Summary: ready for review — \(staged.lastPathComponent) (\(backendLabel))", category: "summary")
@@ -317,10 +465,15 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     self.queue.insert(item, at: 0)
                     self.jobs[item.id] = .pending(since: Date())
                     self.setSummaryStatus(.paused, for: item)
-                    if backend == .claude {
+                    switch backend {
+                    case .claude:
                         ClaudeConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
-                    } else {
+                    case .grok:
                         GrokConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
+                    case .local:
+                        break
+                    case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                        break
                     }
                     AppLog.log("Summary: \(backendLabel) usage/rate limit hit (\(trip.matchedPhrase)) — pausing queue", category: "summary")
                     self.tripThrottle(reason: .usageLimit, resumeAt: trip.resumeAt)
@@ -334,6 +487,12 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     case (.claude, .notLoggedIn):   ClaudeConnection.shared.noteAuthFailure(detail: reason)
                     case (.grok, .notInstalled):    GrokConnection.shared.refresh()
                     case (.grok, .notLoggedIn):     GrokConnection.shared.noteAuthFailure(detail: reason)
+                    case (.composer25, .notInstalled), (.composer25Fast, .notInstalled),
+                         (.cursorGrok45, .notInstalled), (.cursorGrok45Fast, .notInstalled):
+                        CursorConnection.shared.refresh()
+                    case (.composer25, .notLoggedIn), (.composer25Fast, .notLoggedIn),
+                         (.cursorGrok45, .notLoggedIn), (.cursorGrok45Fast, .notLoggedIn):
+                        CursorConnection.shared.noteAuthFailure(detail: reason)
                     default: break
                     }
                     AppLog.log("Summary: failed for \(item.url.lastPathComponent) (\(backendLabel)) — \(reason)", category: "summary")
@@ -348,6 +507,210 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 self.runNext()   // no-ops if paused (throttle guard) or idle gate closed
             }
         }
+    }
+
+    // MARK: Summary v2 pipeline
+
+    private func runV2(item: TranscriptItem, settings: AppSettings) {
+        runningActivity = "Starting writer (\(settings.summaryWriterBackend.displayName))…"
+        setSummaryStatus(.running, for: item)
+        let terminology = SummaryPromptBuilder.terminologyBlock(
+            filingScope: TerminologyStore.customerScope(fromFiling: item.meta.filing))
+        let dbContacts = settings.contactsUseKnowledgeDB ? PeopleStore().contacts() : nil
+        let built = SummaryPromptBuilder.build(
+            template: settings.summaryPromptTemplate,
+            transcriptURL: item.url,
+            attendees: item.meta.attendees.joined(separator: ", "),
+            destination: item.meta.filing,
+            contactsURL: settings.contactsURL,
+            contactsFromDB: dbContacts,
+            terminologyBlock: terminology.isEmpty ? nil : terminology
+        )
+        let writer = settings.summaryWriterBackend
+        let checker = settings.summaryCheckerBackend
+        let staged = Self.v2StagingURL(for: item.url)
+        let failureTrip = settings.summaryFailureTripThreshold
+        let claudeBinary = settings.claudeBinaryPath
+        let claudeModel = settings.claudeModel
+        let grokBinary = settings.grokBinaryPath
+        let grokModel = settings.grokModel
+        let cursorBinary = settings.cursorBinaryPath
+        let transcriptText = SummaryPromptBuilder.readTranscript(item.url)
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await MainActor.run { [weak self] in
+                self?.runningActivity = "Writer is drafting…"
+            }
+            let draftResult = Self.runBackend(
+                writer, prompt: built.prompt,
+                claudeBinary: claudeBinary, claudeModel: claudeModel,
+                grokBinary: grokBinary, grokModel: grokModel,
+                cursorBinary: cursorBinary,
+                onActivity: { line in Task { @MainActor [weak self] in self?.runningActivity = line } }
+            )
+            switch draftResult {
+            case .success:
+                break
+            case .usageLimited(let trip):
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.queue.insert(item, at: 0)
+                    self.jobs[item.id] = .pending(since: Date())
+                    self.setSummaryStatus(.paused, for: item)
+                    self.tripThrottle(reason: .usageLimit, resumeAt: trip.resumeAt)
+                    self.isRunning = false
+                    self.runningID = nil
+                    self.runningActivity = nil
+                }
+                return
+            case .failure(let reason, let setupIssue):
+                await MainActor.run { [weak self] in
+                    self?.finishFailure(item: item, reason: reason, setupIssue: setupIssue,
+                                        backend: writer, failureTrip: failureTrip)
+                }
+                return
+            }
+
+            guard case .success(let draft, _) = draftResult else { return }
+
+            await MainActor.run { [weak self] in
+                self?.runningActivity = "Checker is reviewing…"
+            }
+            let checkerPrompt = SummaryCheckerPromptBuilder.build(
+                transcript: transcriptText,
+                draft: draft,
+                terminologyBlock: terminology
+            )
+            let checkerResult = Self.runBackend(
+                checker, prompt: checkerPrompt,
+                claudeBinary: claudeBinary, claudeModel: claudeModel,
+                grokBinary: grokBinary, grokModel: grokModel,
+                cursorBinary: cursorBinary,
+                onActivity: { _ in }
+            )
+
+            let runID = UUID().uuidString
+            var checkerRaw = ""
+            var hunks: [SummaryHunk] = []
+            var parseOK = false
+
+            if case .success(let raw, _) = checkerResult {
+                checkerRaw = raw
+                let parsed = SummaryEditJSONParser.parse(raw: raw, runID: runID)
+                hunks = parsed.hunks
+                parseOK = parsed.parseOK
+            }
+
+            let run = SummaryRunRecord(
+                id: runID,
+                transcriptID: item.url.path,
+                transcriptPath: item.url.path,
+                createdAt: Date(),
+                writerBackend: writer.rawValue,
+                checkerBackend: checker.rawValue,
+                draftMarkdown: draft,
+                checkerRaw: checkerRaw,
+                checkerParseOK: parseOK
+            )
+            SummaryRunStore().insertRun(run, hunks: hunks)
+            let preview = SummaryHunkEngine.mergedMarkdown(draft: draft, hunks: hunks)
+            let stagedBody = preview.isEmpty ? draft : preview
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                do {
+                    AppPaths.ensureDirectory(staged.deletingLastPathComponent())
+                    try stagedBody.write(to: staged, atomically: true, encoding: .utf8)
+                    self.jobs[item.id] = nil
+                    self.setSummaryStatus(.done, for: item)
+                    self.consecutiveFailures = 0
+                    self.backoffAttempt = 0
+                    Self.noteBackendSuccess(writer)
+                    if case .success = checkerResult { Self.noteBackendSuccess(checker) }
+                    Self.notifyReady(title: item.meta.title)
+                    AppLog.log("Summary v2: ready for review — \(staged.lastPathComponent)", category: "summary")
+                } catch {
+                    self.jobs[item.id] = .failed("Couldn't write the summary: \(error.localizedDescription)")
+                    self.setSummaryStatus(.failed, for: item)
+                }
+                self.store.refresh()
+                self.isRunning = false
+                self.runningID = nil
+                self.runningActivity = nil
+                self.runNext()
+            }
+        }
+    }
+
+    private func finishFailure(item: TranscriptItem, reason: String, setupIssue: SetupIssue?,
+                               backend: SummaryBackend, failureTrip: Int) {
+        jobs[item.id] = .failed(reason)
+        setSummaryStatus(.failed, for: item)
+        consecutiveFailures += 1
+        switch (backend, setupIssue) {
+        case (.claude, .notInstalled): ClaudeConnection.shared.refresh()
+        case (.claude, .notLoggedIn): ClaudeConnection.shared.noteAuthFailure(detail: reason)
+        case (.grok, .notInstalled): GrokConnection.shared.refresh()
+        case (.grok, .notLoggedIn): GrokConnection.shared.noteAuthFailure(detail: reason)
+        case (.composer25, .notInstalled), (.composer25Fast, .notInstalled),
+             (.cursorGrok45, .notInstalled), (.cursorGrok45Fast, .notInstalled):
+            CursorConnection.shared.refresh()
+        case (.composer25, .notLoggedIn), (.composer25Fast, .notLoggedIn),
+             (.cursorGrok45, .notLoggedIn), (.cursorGrok45Fast, .notLoggedIn):
+            CursorConnection.shared.noteAuthFailure(detail: reason)
+        default: break
+        }
+        AppLog.log("Summary: failed for \(item.url.lastPathComponent) (\(backend.displayName)) — \(reason)", category: "summary")
+        if consecutiveFailures >= failureTrip {
+            tripThrottle(reason: .repeatedFailures, resumeAt: nil)
+        }
+        store.refresh()
+        isRunning = false
+        runningID = nil
+        runningActivity = nil
+        runNext()
+    }
+
+    private static func noteBackendSuccess(_ backend: SummaryBackend) {
+        switch backend {
+        case .claude: ClaudeConnection.shared.noteRunSucceeded()
+        case .grok: GrokConnection.shared.noteRunSucceeded()
+        case .local: break
+        case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+            CursorConnection.shared.noteRunSucceeded()
+        }
+    }
+
+    nonisolated private static func runBackend(
+        _ backend: SummaryBackend,
+        prompt: String,
+        claudeBinary: String,
+        claudeModel: String,
+        grokBinary: String,
+        grokModel: String,
+        cursorBinary: String,
+        onActivity: @escaping @Sendable (String) -> Void
+    ) -> RunResult {
+        switch backend {
+        case .claude:
+            return runClaudeStreaming(binary: claudeBinary, prompt: prompt, model: claudeModel, onActivity: onActivity)
+        case .grok:
+            return runGrok(binary: grokBinary, prompt: prompt, model: grokModel)
+        case .local:
+            return .failure(reason: "Local Qwen is not supported in the v2 writer/checker roles yet.", setupIssue: nil)
+        case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+            return runCursorAgent(binary: cursorBinary, prompt: prompt, model: backend.rawValue)
+        }
+    }
+
+    /// Refresh v2 staging file after hunk status changes in the markup UI.
+    func refreshV2Staging(transcriptURL: URL, runID: String) {
+        let store = SummaryRunStore()
+        guard let run = store.run(id: runID) else { return }
+        let hunks = store.hunks(forRunID: runID)
+        let merged = SummaryHunkEngine.mergedMarkdown(draft: run.draftMarkdown, hunks: hunks)
+        let staged = Self.v2StagingURL(for: transcriptURL)
+        try? merged.write(to: staged, atomically: true, encoding: .utf8)
     }
 
     /// The summary for this item is being generated right now.
@@ -617,6 +980,193 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             || lower.contains("login")
     }
 
+    /// Runs `cursor agent -p --mode ask --output-format json` for Composer / Cursor Grok models.
+    private nonisolated static func runCursorAgent(binary: String, prompt: String, model: String) -> RunResult {
+        let built: (process: Process, stdout: Pipe, stderr: Pipe)
+        do {
+            built = try CursorAgentRunner.makeRawSummaryProcess(binaryPath: binary, prompt: prompt, model: model)
+        } catch let e as CursorAgentRunner.RunError {
+            if case .binaryNotFound = e {
+                return .failure(reason: e.localizedDescription, setupIssue: .notInstalled)
+            }
+            return .failure(reason: e.localizedDescription, setupIssue: nil)
+        } catch {
+            return .failure(reason: error.localizedDescription, setupIssue: nil)
+        }
+        do { try built.process.run() }
+        catch { return .failure(reason: "Failed to launch cursor agent: \(error.localizedDescription)", setupIssue: nil) }
+
+        let flag = TimeoutFlag()
+        let watchdog = DispatchWorkItem {
+            guard built.process.isRunning else { return }
+            flag.trip()
+            built.process.terminate()
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + runTimeout, execute: watchdog)
+
+        let outData = built.stdout.fileHandleForReading.readDataToEndOfFile()
+        let errData = built.stderr.fileHandleForReading.readDataToEndOfFile()
+        built.process.waitUntilExit()
+        watchdog.cancel()
+
+        if flag.tripped {
+            return .failure(reason: "Summary timed out after \(Int(runTimeout / 60)) min — retry.", setupIssue: nil)
+        }
+
+        let code = built.process.terminationStatus
+        let out = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let err = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if let trip = ClaudeUsageLimit.detect(stdout: out, stderr: err, exitCode: code) {
+            return .usageLimited(trip)
+        }
+
+        let lower = (out + "\n" + err).lowercased()
+        let looksAuth = lower.contains("not logged in")
+            || lower.contains("please log in")
+            || lower.contains("unauthorized")
+            || lower.contains("authentication")
+            || lower.contains("sign in")
+            || lower.contains("login required")
+            || lower.contains("api key")
+
+        switch CursorAgentRunner.parseJSONResult(stdout: out) {
+        case .text(let note) where code == 0:
+            return .success(CursorAgentRunner.sanitizeNoteText(note), nil)
+        case .error(let msg):
+            if looksAuth || Self.looksLikeAuthMessage(msg) {
+                return .failure(
+                    reason: "Cursor isn't logged in. Run `cursor agent` once in Terminal to sign in, then retry.",
+                    setupIssue: .notLoggedIn)
+            }
+            return .failure(reason: String(msg.prefix(240)), setupIssue: nil)
+        case .text, .unparseable:
+            if code != 0 {
+                if looksAuth {
+                    return .failure(
+                        reason: "Cursor isn't logged in. Run `cursor agent` once in Terminal to sign in, then retry.",
+                        setupIssue: .notLoggedIn)
+                }
+                let detail = err.isEmpty ? (out.isEmpty ? "cursor agent exited with code \(code)" : out) : err
+                return .failure(reason: String(detail.prefix(240)), setupIssue: nil)
+            }
+            let plain = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !plain.isEmpty, plain.first != "{" {
+                return .success(CursorAgentRunner.sanitizeNoteText(plain), nil)
+            }
+            return .failure(reason: "cursor agent produced no usable output.", setupIssue: nil)
+        }
+    }
+
+    /// Runs the on-device MLX/Qwen summarizer. Unloads WhisperKit first when possible to free GPU RAM.
+    private nonisolated static func runLocal(
+        prompt: String,
+        onActivity: @escaping @Sendable (String) -> Void
+    ) async -> RunResult {
+        onActivity("Loading local model…")
+        do {
+            let text = try await Task { @MainActor in
+                await RecordingController.shared.prepareForLocalSummary()
+                onActivity("Qwen is writing…")
+                return try await LocalSummaryRunner.shared.summarize(prompt: prompt)
+            }.value
+            return text.isEmpty
+                ? .failure(reason: "Local model produced no output.", setupIssue: nil)
+                : .success(text, nil)
+        } catch let e as SummaryError {
+            return .failure(reason: e.localizedDescription, setupIssue: nil)
+        } catch {
+            return .failure(reason: error.localizedDescription, setupIssue: nil)
+        }
+    }
+
+    // MARK: Compare harness (shared runners)
+
+    /// Outcome shared with `SummaryComparison` (avoids `Swift.Result` + `Error` boilerplate).
+    enum CompareGenerateResult: Sendable {
+        case ok(String)
+        case failed(String)
+    }
+
+    /// Thin wrappers used by `SummaryComparison` so the compare window and the queue
+    /// share the same CLI invocation + parsing.
+    nonisolated static func runClaudeForCompare(binary: String, prompt: String, model: String) -> CompareGenerateResult {
+        switch runClaudeStreaming(binary: binary, prompt: prompt, model: model, onActivity: { _ in }) {
+        case .success(let text, _): return .ok(text)
+        case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
+        case .failure(let reason, _): return .failed(reason)
+        }
+    }
+
+    nonisolated static func runGrokForCompare(binary: String, prompt: String, model: String) -> CompareGenerateResult {
+        switch runGrok(binary: binary, prompt: prompt, model: model) {
+        case .success(let text, _): return .ok(text)
+        case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
+        case .failure(let reason, _): return .failed(reason)
+        }
+    }
+
+    nonisolated static func runCursorForCompare(binary: String, prompt: String, model: String) -> CompareGenerateResult {
+        switch runCursorAgent(binary: binary, prompt: prompt, model: model) {
+        case .success(let text, _): return .ok(text)
+        case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
+        case .failure(let reason, _): return .failed(reason)
+        }
+    }
+
+    /// Files an already-generated markdown body (from the compare window). Appends the
+    /// raw transcript like a normal commit. `overwriteExisting` replaces `meta.note` when set.
+    @discardableResult
+    func commitGeneratedMarkdown(_ item: TranscriptItem,
+                                 destination: String,
+                                 body: String,
+                                 overwriteExisting: Bool) -> URL? {
+        let vault = AppSettings.shared.vaultURL
+        let dest = destination.trimmingCharacters(in: .whitespaces)
+        let folder = dest.isEmpty ? vault : vault.appendingPathComponent(dest, isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
+        let safeTitle = item.meta.title.replacingOccurrences(of: "/", with: "-")
+        var noteURL = folder.appendingPathComponent("\(df.string(from: item.meta.date)) - \(safeTitle).md")
+
+        if overwriteExisting, let existing = item.meta.note, !existing.isEmpty {
+            noteURL = URL(fileURLWithPath: existing)
+        } else if FileManager.default.fileExists(atPath: noteURL.path), item.meta.note != noteURL.path {
+            var n = 2
+            repeat {
+                noteURL = folder.appendingPathComponent("\(df.string(from: item.meta.date)) - \(safeTitle) (\(n)).md")
+                n += 1
+            } while FileManager.default.fileExists(atPath: noteURL.path)
+        }
+
+        let transcriptText = (try? String(contentsOf: item.url, encoding: .utf8)) ?? ""
+        let content = Self.composeNote(item: item, destination: dest, body: body,
+                                       transcriptSource: transcriptText)
+        do {
+            try content.write(to: noteURL, atomically: true, encoding: .utf8)
+        } catch {
+            AppLog.log("Summary: compare commit write failed — \(error.localizedDescription)", category: "summary")
+            return nil
+        }
+
+        // Move to Processed if still unprocessed; otherwise just update note: path.
+        let moved: URL
+        if item.isProcessed {
+            moved = item.url
+            TranscriptWriter.updateFrontmatter(at: moved) { $0.note = noteURL.path; $0.filing = dest }
+        } else {
+            moved = store.moveToProcessed(item, notePath: noteURL.path)
+        }
+        crossLinkSummaryOntoRaw(summaryURL: noteURL, rawURL: moved)
+        Self.removeAllStaging(for: item.url)
+        jobs[item.id] = nil
+        setSummaryStatus(.done, for: item)
+        AppLog.log("Summary: compare-filed \(noteURL.lastPathComponent) (overwrite=\(overwriteExisting))", category: "summary")
+        store.refresh()
+        return noteURL
+    }
+
     /// Blocking text-output variant — kept for reference while streaming is validated.
     private nonisolated static func runClaude(binary: String, prompt: String, model: String) -> RunResult {
         let built: (process: Process, stdout: Pipe, stderr: Pipe)
@@ -683,11 +1233,18 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     // MARK: Commit
 
     /// Files the staged summary into the vault at `destination`, marks the transcript processed,
-    /// removes the staging file, and opens the note in Obsidian. Returns the written note URL.
+    /// removes staging files, and returns the written note URL. Pass `stagedURL` from the review
+    /// pane when comparing multiple backends; defaults to the preferred staging file.
     @discardableResult
-    func commit(_ item: TranscriptItem, destination: String) -> URL? {
-        let staged = Self.stagingURL(for: item.url)
-        guard let body = try? String(contentsOf: staged, encoding: .utf8) else {
+    func commit(_ item: TranscriptItem, destination: String, stagedURL: URL? = nil) -> URL? {
+        let staged = stagedURL
+            ?? item.summaryReadyURL
+            ?? Self.preferredStagingURL(for: item.url,
+                                        prefer: AppSettings.shared.summaryBackend,
+                                        stagingDir: AppPaths.stagingURL,
+                                        pipeline: AppSettings.shared.summaryPipeline)
+        guard let staged,
+              let body = try? String(contentsOf: staged, encoding: .utf8) else {
             AppLog.log("Summary: commit failed — no staged file for \(item.url.lastPathComponent)", category: "summary")
             return nil
         }
@@ -708,7 +1265,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             } while FileManager.default.fileExists(atPath: noteURL.path)
         }
 
-        let content = Self.composeNote(item: item, destination: dest, body: body)
+        // Read the raw transcript body before moving it to Processed/.
+        let transcriptText = (try? String(contentsOf: item.url, encoding: .utf8)) ?? ""
+        let content = Self.composeNote(item: item, destination: dest, body: body,
+                                       transcriptSource: transcriptText)
         do {
             try content.write(to: noteURL, atomically: true, encoding: .utf8)
         } catch {
@@ -716,8 +1276,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             return nil
         }
         let moved = store.moveToProcessed(item, notePath: noteURL.path)
-        crossLink(summaryURL: noteURL, rawURL: moved)
-        try? FileManager.default.removeItem(at: staged)
+        // Reverse link only: the filed note already embeds the raw transcript inline.
+        crossLinkSummaryOntoRaw(summaryURL: noteURL, rawURL: moved)
+        // Remove every backend's staging file for this transcript (dual-staging + legacy).
+        Self.removeAllStaging(for: item.url)
         jobs[item.id] = nil
         queue.removeAll { $0.id == item.id }
         setSummaryStatus(.done, for: item)   // clear pending-summary intent (before any audio delete)
@@ -742,73 +1304,105 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         return noteURL
     }
 
-    private static func composeNote(item: TranscriptItem, destination: String, body: String) -> String {
-        if body.hasPrefix("---\n") || body.hasPrefix("---\r\n") { return body }
-        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        var lines = ["---", "title: \(item.meta.title)", "date: \(df.string(from: item.meta.date))"]
-        if !item.meta.attendees.isEmpty {
-            lines.append("attendees:")
-            for a in item.meta.attendees { lines.append("  - \(a)") }
+    /// Builds the filed note: YAML frontmatter + summary body + inline raw transcript.
+    /// `transcriptSource` is the full transcript file text (frontmatter allowed); only the
+    /// `## Transcript` / manual-notes sections are appended. Idempotent if `body` already
+    /// contains a `## Raw Transcript` section (stripped first).
+    nonisolated static func composeNote(item: TranscriptItem, destination: String, body: String,
+                            transcriptSource: String) -> String {
+        var summary = strippingRawTranscriptSection(body)
+        // Drop a leftover wiki-link footer from older commits.
+        summary = strippingRawTranscriptWikiLink(summary)
+
+        let headed: String
+        if summary.hasPrefix("---\n") || summary.hasPrefix("---\r\n") {
+            headed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            var lines = ["---", "title: \(item.meta.title)", "date: \(df.string(from: item.meta.date))"]
+            if !item.meta.attendees.isEmpty {
+                lines.append("attendees:")
+                for a in item.meta.attendees { lines.append("  - \(a)") }
+            }
+            if !destination.isEmpty { lines.append("filing: \(destination)") }
+            lines.append("source: parley-summary")
+            lines.append("---")
+            headed = lines.joined(separator: "\n") + "\n\n" + summary.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        if !destination.isEmpty { lines.append("filing: \(destination)") }
-        lines.append("source: parley-summary")
-        lines.append("---")
-        return lines.joined(separator: "\n") + "\n\n" + body
+
+        let sections = TranscriptWriter.extractBodySections(text: transcriptSource)
+        var appendix: [String] = ["", "---", "", "## Raw Transcript", ""]
+        if let notes = sections.manualNotes, !notes.isEmpty {
+            appendix.append("### Notes (manual)")
+            appendix.append("")
+            appendix.append(notes)
+            appendix.append("")
+        }
+        appendix.append(sections.transcript.isEmpty ? "_(no transcript text)_" : sections.transcript)
+        appendix.append("")
+        return headed.trimmingCharacters(in: CharacterSet.newlines) + "\n" + appendix.joined(separator: "\n")
+    }
+
+    /// Removes a trailing `## Raw Transcript` section (and the `---` rule above it, if any).
+    nonisolated static func strippingRawTranscriptSection(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        guard let idx = lines.lastIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == "## Raw Transcript"
+        }) else { return text }
+        var end = idx
+        if end > 0, lines[end - 1].trimmingCharacters(in: .whitespaces).isEmpty { end -= 1 }
+        if end > 0, lines[end - 1].trimmingCharacters(in: .whitespaces) == "---" { end -= 1 }
+        if end > 0, lines[end - 1].trimmingCharacters(in: .whitespaces).isEmpty { end -= 1 }
+        return lines[..<end].joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func strippingRawTranscriptWikiLink(_ text: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        guard let idx = lines.firstIndex(where: { $0.hasPrefix("**Raw transcript:**") }) else {
+            return text
+        }
+        lines.remove(at: idx)
+        // Drop a bare `---` separator left immediately above the removed link.
+        if idx > 0, lines[idx - 1].trimmingCharacters(in: .whitespaces) == "---" {
+            lines.remove(at: idx - 1)
+            if idx > 1, lines[idx - 2].trimmingCharacters(in: .whitespaces).isEmpty {
+                lines.remove(at: idx - 2)
+            }
+        }
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: Cross-linking
 
-    /// Inserts/updates bidirectional Obsidian wiki-links between the summary note and the raw
-    /// transcript. Both operations are idempotent — re-committing won't duplicate lines.
-    private func crossLink(summaryURL: URL, rawURL: URL) {
-        let rawName = rawURL.deletingPathExtension().lastPathComponent
+    /// Inserts/updates an Obsidian wiki-link on the raw transcript pointing at the filed note.
+    /// The filed note embeds the transcript inline, so we no longer add a reverse wiki-link footer.
+    private func crossLinkSummaryOntoRaw(summaryURL: URL, rawURL: URL) {
         let summaryName = summaryURL.deletingPathExtension().lastPathComponent
-
-        // a) Summary note → raw transcript
-        if var text = try? String(contentsOf: summaryURL, encoding: .utf8) {
-            let linkLine = "**Raw transcript:** [[\(rawName)]]"
-            var lines = text.components(separatedBy: "\n")
-            if let idx = lines.firstIndex(where: { $0.hasPrefix("**Raw transcript:**") }) {
-                if lines[idx] != linkLine {
-                    lines[idx] = linkLine
-                    text = lines.joined(separator: "\n")
-                    try? text.write(to: summaryURL, atomically: true, encoding: .utf8)
-                }
-            } else {
-                // Append footer block
-                var footer = text
-                if footer.hasSuffix("\n") { footer += "\n---\n\n\(linkLine)\n" }
-                else { footer += "\n\n---\n\n\(linkLine)\n" }
-                try? footer.write(to: summaryURL, atomically: true, encoding: .utf8)
-            }
-        }
-
-        // b) Raw transcript → summary note
-        if var text = try? String(contentsOf: rawURL, encoding: .utf8) {
-            let linkLine = "**Summary note:** [[\(summaryName)]]"
-            var lines = text.components(separatedBy: "\n")
-            if let idx = lines.firstIndex(where: { $0.hasPrefix("**Summary note:**") }) {
-                if lines[idx] != linkLine {
-                    lines[idx] = linkLine
-                    text = lines.joined(separator: "\n")
-                    try? text.write(to: rawURL, atomically: true, encoding: .utf8)
-                }
-            } else {
-                // Insert after **Attendees:**, then **Date:**, then first # heading, else top.
-                let insertIdx: Int
-                if let idx = lines.firstIndex(where: { $0.hasPrefix("**Attendees:**") }) {
-                    insertIdx = idx + 1
-                } else if let idx = lines.firstIndex(where: { $0.hasPrefix("**Date:**") }) {
-                    insertIdx = idx + 1
-                } else if let idx = lines.firstIndex(where: { $0.hasPrefix("# ") && !$0.hasPrefix("## ") }) {
-                    insertIdx = idx + 1
-                } else {
-                    insertIdx = 0
-                }
-                lines.insert(linkLine, at: insertIdx)
+        guard var text = try? String(contentsOf: rawURL, encoding: .utf8) else { return }
+        let linkLine = "**Summary note:** [[\(summaryName)]]"
+        var lines = text.components(separatedBy: "\n")
+        if let idx = lines.firstIndex(where: { $0.hasPrefix("**Summary note:**") }) {
+            if lines[idx] != linkLine {
+                lines[idx] = linkLine
                 text = lines.joined(separator: "\n")
                 try? text.write(to: rawURL, atomically: true, encoding: .utf8)
             }
+            return
         }
+        // Insert after **Attendees:**, then **Date:**, then first # heading, else top.
+        let insertIdx: Int
+        if let idx = lines.firstIndex(where: { $0.hasPrefix("**Attendees:**") }) {
+            insertIdx = idx + 1
+        } else if let idx = lines.firstIndex(where: { $0.hasPrefix("**Date:**") }) {
+            insertIdx = idx + 1
+        } else if let idx = lines.firstIndex(where: { $0.hasPrefix("# ") && !$0.hasPrefix("## ") }) {
+            insertIdx = idx + 1
+        } else {
+            insertIdx = 0
+        }
+        lines.insert(linkLine, at: insertIdx)
+        text = lines.joined(separator: "\n")
+        try? text.write(to: rawURL, atomically: true, encoding: .utf8)
     }
 }

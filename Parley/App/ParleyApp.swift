@@ -43,6 +43,11 @@ struct ParleyApp: App {
                 .environmentObject(recording.vault)
                 .environmentObject(recording.callDetector)
         }
+        // Settings defaults to contentSize (non-free resize). contentMinSize lets the
+        // user grow the window past the content minimum — System Settings-style.
+        .defaultSize(width: 780, height: 560)
+        .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified)
     }
 
     static let mainWindowID = "main"

@@ -54,40 +54,56 @@ struct SettingsView: View {
 
     @State private var selection: SettingsTab? = .general
 
+    /// Cap the settings window to the visible screen (never larger than display).
+    private var screenMaxSize: CGSize {
+        let frame = NSScreen.main?.visibleFrame
+            ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        return CGSize(
+            width: max(680, frame.width - 80),
+            height: max(420, frame.height - 80))
+    }
+
     var body: some View {
         NavigationSplitView {
             List(SettingsTab.allCases, selection: $selection) { tab in
-                Label(tab.title, systemImage: tab.icon).tag(tab)
+                Label(tab.title, systemImage: tab.icon)
+                    .tag(tab)
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 196, ideal: 212, max: 240)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 260)
         } detail: {
-            detailContent
-                // Big inline title pinned at the top of the pane (Cursor places the
-                // section name here, not in the title bar). The opaque header
-                // background + divider mean content scrolls cleanly *under* it instead
-                // of bleeding through the title text.
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    HStack {
-                        Text((selection ?? .general).title)
-                            .font(Theme.Typography.screenTitle)
-                        Spacer()
-                    }
-                    .padding(.horizontal, Theme.Spacing.xLarge)
-                    .padding(.top, Theme.Spacing.large)
-                    .padding(.bottom, Theme.Spacing.small)
-                    .frame(maxWidth: .infinity)
-                    .background(.bar)
-                    .overlay(alignment: .bottom) { Divider() }
+            Group {
+                detailContent
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // Section name pinned like System Settings / Cursor preferences.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack {
+                    Text((selection ?? .general).title)
+                        .font(Theme.Typography.screenTitle)
+                    Spacer(minLength: 0)
                 }
-                // macOS Form toggles default to a checkbox — force the switch (Cursor's
-                // look). An explicit .toggleStyle(.checkbox) elsewhere still overrides.
-                .toggleStyle(.switch)
-                .tint(Theme.Palette.accent)
+                .padding(.horizontal, Theme.Spacing.xLarge)
+                .padding(.top, Theme.Spacing.medium)
+                .padding(.bottom, Theme.Spacing.small)
+                .frame(maxWidth: .infinity)
+                .background(.bar)
+                .overlay(alignment: .bottom) { Divider() }
+            }
+            // macOS Form toggles default to a checkbox — force the switch.
+            .toggleStyle(.switch)
+            .tint(Theme.Palette.accent)
         }
         .navigationSplitViewStyle(.balanced)
-        .frame(minWidth: 720, idealWidth: 820, maxWidth: .infinity,
-               minHeight: 520, idealHeight: 640, maxHeight: .infinity)
+        .navigationTitle("Settings")
+        .frame(
+            minWidth: 680,
+            idealWidth: 780,
+            maxWidth: screenMaxSize.width,
+            minHeight: 420,
+            idealHeight: 560,
+            maxHeight: screenMaxSize.height)
+        .background(SettingsWindowConfigurator(maxSize: screenMaxSize))
     }
 
     @ViewBuilder
@@ -178,13 +194,24 @@ struct SettingsView: View {
     private var summaryTab: some View {
         Form {
             Section("Meeting summaries") {
-                helpText("After a recording's speakers are assigned, a summary is written in the background (Claude or Grok — your choice below). When it's ready, review it in History → \"Review\", set where it's filed, then commit it to your vault.")
+                helpText("After a recording's speakers are assigned, a summary is written in the background. When it's ready, review it in History → \"Review\", set where it's filed, then commit it to your vault. The filed note includes the raw transcript at the bottom.")
+                SettingRow("Pipeline",
+                           description: "Classic runs one backend. Summary v2 runs a writer then a checker that proposes structured edits for markup review.") {
+                    Picker("", selection: $settings.summaryPipelineRaw) {
+                        ForEach(SummaryPipeline.allCases) { p in
+                            Text(p.label).tag(p.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(maxWidth: 280)
+                }
                 SettingRow("Auto-summarize after speakers are assigned",
                            description: "When off, summaries only run when you press Summarize on a transcript in History.") {
                     Toggle("", isOn: $settings.autoRunClaude).labelsHidden()
                 }
                 SettingRow("Delete audio after committing its summary",
-                           description: "Once a summary is filed you have the raw transcript + the note, so the audio is redundant. Frees significant disk.") {
+                           description: "Once a summary is filed the note includes the raw transcript inline, so the audio is redundant. Frees significant disk.") {
                     Toggle("", isOn: $settings.deleteAudioAfterFiling).labelsHidden()
                 }
                 SettingRow("Ask before summarizing a batch",
@@ -201,16 +228,53 @@ struct SettingsView: View {
             }
 
             Section("Provider") {
-                Picker("Summarize with", selection: $settings.summaryBackendRaw) {
-                    ForEach(SummaryBackend.allCases) { backend in
-                        Text(backend.displayName).tag(backend.rawValue)
+                if settings.summaryPipeline == .v2 {
+                    Picker("Writer", selection: $settings.summaryWriterBackendRaw) {
+                        ForEach(SummaryBackend.writerBackends) { backend in
+                            Text(backend.displayName).tag(backend.rawValue)
+                        }
                     }
+                    .pickerStyle(.menu)
+                    helpText(settings.summaryWriterBackend.blurb)
+                    Picker("Checker", selection: $settings.summaryCheckerBackendRaw) {
+                        ForEach(SummaryBackend.checkerBackends) { backend in
+                            Text(backend.displayName).tag(backend.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    helpText(settings.summaryCheckerBackend.blurb)
+                } else {
+                    Picker("Summarize with", selection: $settings.summaryBackendRaw) {
+                        ForEach(SummaryBackend.allCases) { backend in
+                            Text(backend.displayName).tag(backend.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    helpText(settings.summaryBackend.blurb)
                 }
-                .pickerStyle(.segmented)
-                helpText(settings.summaryBackend.blurb)
             }
 
-            if settings.summaryBackend == .claude {
+            if settings.summaryPipeline == .v2
+                || (settings.summaryPipeline == .classic && settings.summaryBackend.isCursorAgent) {
+                Section("Cursor Agent") {
+                    CursorConnectionView()
+                    if settings.summaryPipeline == .classic {
+                        LabeledContent("Model id") {
+                            Text(settings.summaryBackend.rawValue)
+                                .font(Theme.Typography.mono)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    LabeledContent("CLI") {
+                        TextField("/usr/local/bin/cursor", text: $settings.cursorBinaryPath)
+                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                    }
+                    helpText("Runs `cursor agent -p --mode ask --output-format json` with your Cursor subscription. Ask mode is read-only (no vault edits). Sign in once via Terminal if prompted.")
+                }
+            }
+
+            if settings.summaryPipeline == .classic && settings.summaryBackend == .claude {
                 Section("Claude") {
                     ClaudeConnectionView()
                     LabeledContent("Model") {
@@ -224,7 +288,7 @@ struct SettingsView: View {
                     }
                     helpText("Runs `claude -p` (raw prompt, no skill/tools). The status above shows whether the CLI is installed and logged in.")
                 }
-            } else {
+            } else if settings.summaryPipeline == .classic && settings.summaryBackend == .grok {
                 Section("Grok") {
                     GrokConnectionView()
                     LabeledContent("Model") {
@@ -238,10 +302,19 @@ struct SettingsView: View {
                     }
                     helpText("Runs `grok -p` (raw prompt, no vault tools; JSON on stdout). The status above shows whether the CLI is installed and logged in.")
                 }
+            } else if settings.summaryPipeline == .classic && settings.summaryBackend == .local {
+                Section("Local Qwen (MLX)") {
+                    LocalSummarizerStatusView()
+                    LabeledContent("Model id") {
+                        TextField("mlx-community/Qwen3-4B-4bit", text: $settings.localSummaryModelId)
+                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                    }
+                    helpText("Downloads into Application Support/Parley/SummaryModels on first use (Metal Toolchain required: `xcodebuild -downloadComponent MetalToolchain`). Fully offline once loaded.")
+                }
             }
 
             Section("Prompt") {
-                helpText("The instructions the summarizer follows (same for Claude and Grok). Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
+                helpText("The instructions the summarizer follows (same for every backend). Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
                 editorStyle(TextEditor(text: $settings.summaryPromptTemplate), height: 220)
                 HStack {
                     Spacer()
@@ -798,6 +871,8 @@ struct SettingsView: View {
 
     // MARK: Vault reconciliation
 
+    @State private var knowledgeStatus: String?
+
     private var vaultTab: some View {
         let rec = vault.reconcileCustomers()
         return Form {
@@ -807,6 +882,26 @@ struct SettingsView: View {
                 LabeledContent("Contacts file") {
                     TextField("Rolodex.md", text: $settings.contactsFileName)
                         .textFieldStyle(.roundedBorder)
+                }
+                SettingRow("Use knowledge database for contacts",
+                           description: "Store people in Parley.sqlite instead of (or alongside) Rolodex.md. Import from Rolodex when the DB is empty.") {
+                    Toggle("", isOn: $settings.contactsUseKnowledgeDB)
+                        .labelsHidden()
+                        .onChange(of: settings.contactsUseKnowledgeDB) { vault.refresh(waitForCompletion: true) }
+                }
+            }
+
+            Section("Knowledge export / import") {
+                if let knowledgeStatus {
+                    Text(knowledgeStatus)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("Export JSON…") { exportKnowledgeJSON() }
+                    Button("Import JSON…") { importKnowledgeJSON() }
+                    Button("Import from Rolodex") { importRolodexToDB() }
+                    Button("Export Rolodex.md") { exportDBToRolodex() }
                 }
             }
 
@@ -869,7 +964,49 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { vault.refresh() }
+        .onAppear {
+            vault.refresh()
+            vault.importRolodexIfDBEmpty()
+        }
+    }
+
+    private func exportKnowledgeJSON() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "parley-knowledge.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try KnowledgeExportImport.exportJSON()
+            try data.write(to: url)
+            knowledgeStatus = "Exported knowledge to \(url.lastPathComponent)."
+        } catch {
+            knowledgeStatus = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importKnowledgeJSON() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try KnowledgeExportImport.importJSON(Data(contentsOf: url))
+            vault.refresh(waitForCompletion: true)
+            knowledgeStatus = "Imported knowledge from \(url.lastPathComponent)."
+        } catch {
+            knowledgeStatus = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importRolodexToDB() {
+        vault.importRolodexToKnowledgeDB(force: true)
+        knowledgeStatus = "Imported Rolodex into knowledge database."
+    }
+
+    private func exportDBToRolodex() {
+        vault.exportKnowledgeDBToRolodex()
+        knowledgeStatus = "Wrote contacts to \(settings.contactsFileName)."
     }
 
     @ViewBuilder
@@ -909,6 +1046,70 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Status + load/unload controls for the on-device MLX summarizer.
+private struct LocalSummarizerStatusView: View {
+    @ObservedObject private var runner = LocalSummaryRunner.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+            switch runner.manager.status {
+            case .idle:
+                Text("Model idle (loads on first summary).")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+            case .downloading(let fraction):
+                ProgressView(value: fraction) { Text("Downloading…") }
+            case .loading:
+                HStack(spacing: Theme.Spacing.small) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading weights…").font(Theme.Typography.caption)
+                }
+            case .ready(let id):
+                Text("Ready — \(id)")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                Button("Unload") { runner.unload() }
+            case .failed(let reason):
+                Text(reason)
+                    .font(Theme.Typography.caption).foregroundStyle(.red)
+            }
+        }
+    }
+}
+
+/// Status for the Cursor CLI used by Composer / Cursor Grok summary backends.
+private struct CursorConnectionView: View {
+    @ObservedObject private var connection = CursorConnection.shared
+
+    var body: some View {
+        HStack(spacing: Theme.Spacing.small) {
+            Image(systemName: badge.symbol)
+                .foregroundStyle(badge.color)
+                .font(.system(size: 13, weight: .semibold))
+            Text(badge.title).font(Theme.Typography.controlLabel)
+            if connection.isChecking {
+                ProgressView().controlSize(.small)
+            }
+            Spacer()
+            Button("Recheck") { connection.refresh() }
+                .disabled(connection.isChecking)
+        }
+        .onAppear { connection.refresh() }
+    }
+
+    private var badge: (symbol: String, color: Color, title: String) {
+        switch connection.status {
+        case .unknown:
+            return ("questionmark.circle", .secondary, "Checking Cursor CLI…")
+        case .notInstalled:
+            return ("xmark.circle.fill", .red, "Cursor CLI not found")
+        case .ready:
+            let path = connection.resolvedBinaryPath.map { " — \($0)" } ?? ""
+            return ("checkmark.circle.fill", .green, "Cursor ready\(path)")
+        case .failed(let detail):
+            return ("exclamationmark.triangle.fill", .orange, detail)
+        }
     }
 }
 
@@ -972,5 +1173,28 @@ private struct FluidModelSection: View {
                     .foregroundStyle(Theme.Severity.danger.color).lineLimit(2)
             }
         }
+    }
+}
+
+/// Makes the Settings window freely resizable and clamps max size to the screen.
+private struct SettingsWindowConfigurator: NSViewRepresentable {
+    var maxSize: CGSize
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { configure(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { configure(nsView.window) }
+    }
+
+    private func configure(_ window: NSWindow?) {
+        guard let window else { return }
+        window.styleMask.insert(.resizable)
+        window.title = "Settings"
+        window.minSize = NSSize(width: 680, height: 420)
+        window.maxSize = NSSize(width: maxSize.width, height: maxSize.height)
     }
 }
