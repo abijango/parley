@@ -321,6 +321,19 @@ struct SettingsView: View {
                     Button("Reset to default") { settings.summaryPromptTemplate = AppSettings.defaultSummaryPrompt }
                 }
             }
+
+            if settings.summaryPipeline == .v2 {
+                Section("Checker instructions") {
+                    helpText("Rules the checker follows when reviewing the writer's draft. The transcript, contacts, attendees, and draft are appended automatically — no {{tokens}} here.")
+                    editorStyle(TextEditor(text: $settings.summaryCheckerPromptTemplate), height: 220)
+                    HStack {
+                        Spacer()
+                        Button("Reset to default") {
+                            settings.summaryCheckerPromptTemplate = SummaryCheckerPromptBuilder.defaultInstructions
+                        }
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
     }

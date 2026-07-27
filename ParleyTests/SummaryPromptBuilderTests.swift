@@ -206,4 +206,19 @@ final class SummaryPromptBuilderTests: XCTestCase {
         XCTAssertEqual(result, "Alice Smith (Vanguard)",
                        "Legacy bare-header company is internalTeam -> no customer label")
     }
+
+    /// Pins the exact annotated form now fed to the Summary v2 checker prompt
+    /// (SummaryCheckerPromptBuilder's SUPPLIED ATTENDEES block).
+    func testAnnotateMatchesCheckerInput() {
+        let rolodex = """
+        ## Customers
+
+        ### Man Group
+
+        - **Radoslav Stefanov** - Analyst
+        """
+        let result = SummaryPromptBuilder.annotate(attendees: "Radoslav Stefanov",
+                                                   contactsText: rolodex)
+        XCTAssertEqual(result, "Radoslav Stefanov (Man Group, customer)")
+    }
 }

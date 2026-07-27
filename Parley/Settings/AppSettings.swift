@@ -254,6 +254,7 @@ final class AppSettings: ObservableObject {
         static let minSpeechToIdentify = "parley.minSpeechToIdentify"
         static let liveTranscriptEnabled = "parley.liveTranscriptEnabled"
         static let summaryPromptTemplate = "parley.summaryPromptTemplate"
+        static let summaryCheckerPromptTemplate = "parley.summaryCheckerPromptTemplate"
         static let deleteAudioAfterFiling = "parley.deleteAudioAfterFiling"
     }
 
@@ -468,6 +469,12 @@ final class AppSettings: ObservableObject {
     /// `{{attendees}}`, `{{destination}}`. Editable in Settings → Summary.
     @AppStorage(Key.summaryPromptTemplate) var summaryPromptTemplate: String = AppSettings.defaultSummaryPrompt
 
+    /// Instruction block for the Summary v2 checker. Unlike the writer template this
+    /// takes no `{{…}}` tokens — the transcript, contacts, attendees, and draft are
+    /// appended by `SummaryCheckerPromptBuilder`. Editable in Settings → Summary.
+    @AppStorage(Key.summaryCheckerPromptTemplate) var summaryCheckerPromptTemplate: String
+        = SummaryCheckerPromptBuilder.defaultInstructions
+
     /// After a summary is committed to the vault, delete the session audio (the raw
     /// transcript + summary make it redundant). Default on; frees significant disk.
     @AppStorage(Key.deleteAudioAfterFiling) var deleteAudioAfterFiling: Bool = true
@@ -507,7 +514,12 @@ final class AppSettings: ObservableObject {
     (e.g. "I'm Dana from Acme" or "...here at Acme"), put that company in the Company column \
     and append the literal tag " (inferred)" -- for example "Acme (inferred)". If no affiliation \
     is evident, leave Company blank. NEVER append "(inferred)" to a company that was supplied \
-    in the attendee annotation or matched from contacts.)
+    in the attendee annotation or matched from contacts. The Role column is a job title only. \
+    If no title is known from contacts and none is stated in the transcript, leave Role blank — \
+    never a company name, team name, or the word "Attendee". The `, customer` suffix in the \
+    supplied attendee list is context for you only; never print `, customer`, `(customer)`, or \
+    any similar external-party marker in the note — the Company column holds the company name \
+    alone, with " (inferred)" as the only permitted addition.)
 
     ## Executive Summary
     (2–3 paragraphs: who met, why, the core need/opportunity, and the outcome / immediate next step.)

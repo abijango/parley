@@ -536,6 +536,12 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let grokModel = settings.grokModel
         let cursorBinary = settings.cursorBinaryPath
         let transcriptText = SummaryPromptBuilder.readTranscript(item.url)
+        let contactsText = SummaryPromptBuilder.readContacts(settings.contactsURL,
+                                                             dbContacts: dbContacts)
+        let attendeesText = SummaryPromptBuilder.annotate(
+            attendees: item.meta.attendees.joined(separator: ", "),
+            contacts: SummaryPromptBuilder.parseContactsList(contactsText))
+        let checkerInstructions = settings.summaryCheckerPromptTemplate
 
         Task.detached(priority: .userInitiated) { [weak self] in
             await MainActor.run { [weak self] in
@@ -579,7 +585,11 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             let checkerPrompt = SummaryCheckerPromptBuilder.build(
                 transcript: transcriptText,
                 draft: draft,
-                terminologyBlock: terminology
+                contacts: contactsText,
+                attendees: attendeesText,
+                destination: item.meta.filing,
+                terminologyBlock: terminology,
+                instructions: checkerInstructions
             )
             let checkerResult = Self.runBackend(
                 checker, prompt: checkerPrompt,

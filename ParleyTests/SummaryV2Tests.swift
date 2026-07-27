@@ -99,6 +99,61 @@ final class SummaryV2Tests: XCTestCase {
             "MAN Group")
     }
 
+    func testCheckerPromptIncludesContactsAndAttendees() {
+        let contacts = "- **Naufal Mir** (aka naufal) - Director of AI, FSI"
+        let attendees = "Naufal Mir (Intellias)"
+        let prompt = SummaryCheckerPromptBuilder.build(transcript: "transcript body",
+                                                        draft: "draft body",
+                                                        contacts: contacts,
+                                                        attendees: attendees)
+        XCTAssertTrue(prompt.contains("CONTACTS ROLODEX"))
+        XCTAssertTrue(prompt.contains("Director of AI, FSI"))
+        XCTAssertTrue(prompt.contains("SUPPLIED ATTENDEES"))
+        XCTAssertTrue(prompt.contains("Naufal Mir (Intellias)"))
+    }
+
+    func testCheckerPromptSectionOrder() {
+        let prompt = SummaryCheckerPromptBuilder.build(transcript: "transcript body",
+                                                        draft: "draft body",
+                                                        contacts: "contacts body",
+                                                        attendees: "attendees body")
+        let instructionsIndex = prompt.range(of: "Authoritative sources")!.lowerBound
+        let contactsIndex = prompt.range(of: "CONTACTS ROLODEX:")!.lowerBound
+        let attendeesIndex = prompt.range(of: "SUPPLIED ATTENDEES:")!.lowerBound
+        let transcriptIndex = prompt.range(of: "TRANSCRIPT:")!.lowerBound
+        let draftIndex = prompt.range(of: "DRAFT SUMMARY:")!.lowerBound
+        XCTAssertTrue(instructionsIndex < contactsIndex)
+        XCTAssertTrue(contactsIndex < attendeesIndex)
+        XCTAssertTrue(attendeesIndex < transcriptIndex)
+        XCTAssertTrue(transcriptIndex < draftIndex)
+    }
+
+    func testCheckerPromptEmptyContextPlaceholders() {
+        let prompt = SummaryCheckerPromptBuilder.build(transcript: "transcript body",
+                                                        draft: "draft body")
+        XCTAssertTrue(prompt.contains("(no contacts file found)"))
+        XCTAssertTrue(prompt.contains("(none provided)"))
+        XCTAssertFalse(prompt.contains("Filing location"))
+    }
+
+    /// A user who clears the Settings editor must not silently lose the JSON output
+    /// contract — without it the checker answers in prose and the run yields zero hunks.
+    func testCheckerPromptFallsBackWhenInstructionsCleared() {
+        let prompt = SummaryCheckerPromptBuilder.build(transcript: "t", draft: "d",
+                                                       instructions: "   \n  ")
+        XCTAssertTrue(prompt.contains(#"Output ONLY valid JSON"#))
+        XCTAssertTrue(prompt.contains("CONTACTS ROLODEX"))
+    }
+
+    /// Deliberate tripwire — not a behavioural test. If this fails, do not "fix" it by
+    /// reverting the prompt: re-read docs/plans/summary-v2-checker-grounding.md section 2
+    /// decision 2 and update the assertion instead. Its only job is to catch a future
+    /// reword that silently reinstates transcript-only framing.
+    func testCheckerInstructionsPermitRolodexFacts() {
+        XCTAssertTrue(SummaryCheckerPromptBuilder.defaultInstructions.contains("CONTACTS ROLODEX"))
+        XCTAssertFalse(SummaryCheckerPromptBuilder.defaultInstructions.contains("not supported by the transcript"))
+    }
+
     func testKnowledgeExportImportRoundtrip() throws {
         let db = KnowledgeDatabase.openTemporary()
         let terms = TerminologyStore(database: db)

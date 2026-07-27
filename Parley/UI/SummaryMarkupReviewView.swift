@@ -25,6 +25,7 @@ struct SummaryMarkupReviewView: View {
     @State private var statusMessage: String?
     /// Editable buffer while in Edit mode (flattened note).
     @State private var editBuffer: String = ""
+    @State private var showPendingConfirm = false
 
     private let runStore = SummaryRunStore()
     private let terminologyStore = TerminologyStore()
@@ -36,6 +37,8 @@ struct SummaryMarkupReviewView: View {
     private var customerScope: String {
         TerminologyStore.customerScope(fromFiling: reviewDestination.isEmpty ? item.meta.filing : reviewDestination)
     }
+
+    private var pendingCount: Int { hunks.filter { $0.status == .pending }.count }
 
     /// Body shown in preview/edit — draft with pending+accepted hunks applied.
     private var workingBody: String {
@@ -353,13 +356,27 @@ struct SummaryMarkupReviewView: View {
             }
             .glassButton()
             Spacer()
-            Button { acceptAndFile() } label: {
-                Label("Accept & File", systemImage: "tray.and.arrow.down")
+            Button {
+                if pendingCount > 0 { showPendingConfirm = true } else { acceptAndFile() }
+            } label: {
+                Label(pendingCount > 0 ? "Accept & File (\(pendingCount) unreviewed)"
+                                       : "Accept & File",
+                      systemImage: "tray.and.arrow.down")
             }
             .glassProminentButton()
         }
         .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
         .chromeSurface()
+        .confirmationDialog(
+            "\(pendingCount) checker edit\(pendingCount == 1 ? "" : "s") not reviewed",
+            isPresented: $showPendingConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Apply and file") { acceptAndFile() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Filing now applies them to the note. Reject the ones you don't want first.")
+        }
     }
 
     // MARK: Load / persist
