@@ -32,6 +32,19 @@ enum WhisperModel: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Compact friendly name for the transport bar and other inline UI.
+    var displayName: String {
+        switch self {
+        case .small: return "Small"
+        case .medium: return "Medium"
+        case .large: return "Large"
+        case .turbo: return "Turbo"
+        }
+    }
+
+    /// Engine family shown beside `displayName` in compact UI.
+    static let engineName = "Whisper"
+
     /// On-disk download size (actual, from the WhisperKit repo), for Settings.
     var approxSize: String {
         switch self {
@@ -100,6 +113,9 @@ enum FluidParakeetVersion: String, CaseIterable, Identifiable {
         case .v2: return "v2 (English)"
         }
     }
+
+    /// Compact friendly name for the transport bar (version detail lives in Settings).
+    var displayName: String { "Parakeet" }
 }
 
 /// Chunk-size tier (ms per chunk) for the FluidAudio multilingual *streaming*

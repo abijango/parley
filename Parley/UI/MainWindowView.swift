@@ -403,15 +403,12 @@ struct RecordDetailView: View {
 
                 Spacer(minLength: Theme.Spacing.medium)
 
-                Text(audioModelLabel)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                micModePicker
+
+                audioModelBadge
             }
 
             levelMeters
-            micModePicker
         }
         .padding(.horizontal, Theme.Spacing.large)
         .padding(.vertical, Theme.Spacing.small)
@@ -542,12 +539,41 @@ struct RecordDetailView: View {
         }
     }
 
-    /// The model label shown beside the "Audio" disclosure. For WhisperKit, the live
-    /// transcript is produced by the *live* model when it's enabled; only the final
-    /// (at-stop) model runs in offline-only mode. FluidAudio uses a single model.
-    private var audioModelLabel: String {
-        if settings.transcriptionEngine == .fluidAudio { return "FluidAudio · Parakeet v3" }
-        return settings.liveTranscriptEnabled ? settings.liveModel.label : settings.model.label
+    /// Compact two-part model badge for the transport bar. For WhisperKit, the live
+    /// transcript uses the *live* model when enabled; only the final (at-stop) model
+    /// runs in offline-only mode. FluidAudio uses a single Parakeet model.
+    private var audioModelBadge: some View {
+        let info = audioModelBadgeInfo
+        return HStack(spacing: Theme.Spacing.xxSmall) {
+            if let engine = info.engine {
+                Text(engine)
+                    .font(Theme.Typography.captionSecondary)
+                    .foregroundStyle(.tertiary)
+            }
+            Text(info.model)
+                .font(Theme.Typography.controlLabel)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, Theme.Spacing.small)
+        .padding(.vertical, Theme.Spacing.xxSmall + 1)
+        .background(Capsule().fill(.quaternary.opacity(Theme.Opacity.surface)))
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .fixedSize(horizontal: true, vertical: false)
+        .layoutPriority(-1)
+    }
+
+    private struct AudioModelBadgeInfo {
+        let engine: String?
+        let model: String
+    }
+
+    private var audioModelBadgeInfo: AudioModelBadgeInfo {
+        if settings.transcriptionEngine == .fluidAudio {
+            return AudioModelBadgeInfo(engine: nil, model: settings.parakeetVersion.displayName)
+        }
+        let model = settings.liveTranscriptEnabled ? settings.liveModel : settings.model
+        return AudioModelBadgeInfo(engine: WhisperModel.engineName, model: model.displayName)
     }
 
     /// Audio capture controls, always visible directly under the record button:
@@ -626,20 +652,14 @@ struct RecordDetailView: View {
     }
 
     private var micModePicker: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
-            Picker("Mic", selection: Binding(
-                get: { live.micInputMode },
-                set: { recording.setMicInputMode($0) }
-            )) {
-                ForEach(MicInputMode.allCases) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: .infinity)
-            Text("Room boosts your mic for soft speakers; may pick up more room noise.")
-                .font(Theme.Typography.caption)
-                .foregroundStyle(.secondary)
+        Picker("Mic", selection: Binding(
+            get: { live.micInputMode },
+            set: { recording.setMicInputMode($0) }
+        )) {
+            ForEach(MicInputMode.allCases) { Text($0.label).tag($0) }
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
     }
 
     private var appPicker: some View {
