@@ -11,6 +11,8 @@ final class RecordingLiveState: ObservableObject {
     @Published var micLevel: Float = 0
     @Published var remoteLevel: Float = 0
     @Published var micSeemsSilent = false
+    /// Session-scoped mic gain mode (Regular default; reset on each `start()`).
+    @Published var micInputMode: MicInputMode = .regular
     @Published var recordingStarted: Date?
 
     var segments: [Segment] { segmentStore.segments }

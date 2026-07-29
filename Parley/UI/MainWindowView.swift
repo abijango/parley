@@ -411,6 +411,7 @@ struct RecordDetailView: View {
             }
 
             levelMeters
+            micModePicker
         }
         .padding(.horizontal, Theme.Spacing.large)
         .padding(.vertical, Theme.Spacing.small)
@@ -622,6 +623,23 @@ struct RecordDetailView: View {
         .labelsHidden()
         .frame(maxWidth: .infinity)
         .disabled(recording.isRecording)
+    }
+
+    private var micModePicker: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+            Picker("Mic", selection: Binding(
+                get: { live.micInputMode },
+                set: { recording.setMicInputMode($0) }
+            )) {
+                ForEach(MicInputMode.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            Text("Room boosts your mic for soft speakers; may pick up more room noise.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var appPicker: some View {

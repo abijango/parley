@@ -59,6 +59,25 @@ final class MicCapture {
     private var watchdogTimer: DispatchSourceTimer?
     private var configObserver: NSObjectProtocol?
 
+    // MARK: - Mic input mode (readable from the real-time tap thread)
+
+    private var _micInputMode: MicInputMode = .regular
+    private var modeLock = os_unfair_lock()
+
+    var micInputMode: MicInputMode {
+        get {
+            os_unfair_lock_lock(&modeLock)
+            let mode = _micInputMode
+            os_unfair_lock_unlock(&modeLock)
+            return mode
+        }
+        set {
+            os_unfair_lock_lock(&modeLock)
+            _micInputMode = newValue
+            os_unfair_lock_unlock(&modeLock)
+        }
+    }
+
     // MARK: - Public
 
     let meter = LevelMeter()
@@ -94,7 +113,10 @@ final class MicCapture {
         startWatchdog()
         startObserver()
 
-        AppLog.log("mic capture started — \(format.sampleRate)Hz/\(format.channelCount)ch", category: "audio")
+        AppLog.log(
+            "mic capture started — \(format.sampleRate)Hz/\(format.channelCount)ch, mode=\(micInputMode.rawValue)",
+            category: "audio"
+        )
     }
 
     func stop() {
@@ -128,6 +150,9 @@ final class MicCapture {
             let currentArchiver = self.archiver
             self.lastBufferDate = Date()
             os_unfair_lock_unlock(&self.tapLock)
+
+            let mode = self.micInputMode
+            MicInputGain.apply(to: buffer, mode: mode)
 
             currentArchiver?.append(buffer)
             if let floats = currentResampler?.resample(buffer), !floats.isEmpty {

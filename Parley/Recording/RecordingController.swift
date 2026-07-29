@@ -646,6 +646,13 @@ final class RecordingController: ObservableObject {
 
     // MARK: Start / stop
 
+    /// Updates the session mic gain mode and forwards to live capture when recording.
+    func setMicInputMode(_ mode: MicInputMode) {
+        live.micInputMode = mode
+        micCapture?.micInputMode = mode
+        AppLog.log("mic input mode → \(mode.rawValue)", category: "audio")
+    }
+
     func start(detectionInitiated: Bool = false) async {
         guard live.state == .idle || isErrorState else { return }
         cancelIdleUnload()
@@ -654,6 +661,7 @@ final class RecordingController: ObservableObject {
             meeting.meetingTitle = "Recorded call"   // fallback for the notification-Start path
         }
         live.state = .preparing
+        live.micInputMode = .regular
         cancelPendingClear(); clearArmable = false   // a new recording supersedes any pending auto-clear
         resetSegmentPublishState()
         lastResult = nil
@@ -709,6 +717,7 @@ final class RecordingController: ObservableObject {
         // Recovery-sheet resume of an auto-started meeting both land here).
         startedByDetection = m.startedByDetection
         live.state = .preparing
+        live.micInputMode = .regular
         cancelPendingClear(); clearArmable = false   // a resumed recording supersedes any pending auto-clear
         meeting.meetingTitle = m.title
         meeting.attendees = m.attendees
@@ -759,6 +768,7 @@ final class RecordingController: ObservableObject {
     private func launchCapture(sessionDir: URL, micArchive: URL, systemArchive: URL,
                                startOffset: TimeInterval, reactivate: Bool) {
         let mic = MicCapture(ringBuffer: micRing, archiveURL: micArchive)
+        mic.micInputMode = live.micInputMode
         let system = SystemAudioCapture(ringBuffer: systemRing, archiveURL: systemArchive)
         let clock = RecordingClock()
         self.clock = clock
@@ -770,7 +780,10 @@ final class RecordingController: ObservableObject {
             try system.start(target: captureTarget())
             micCapture = mic
             systemCapture = system
-            AppLog.log("Capture started (model loads in parallel) — mode=\(settings.captureMode.rawValue), model=\(settings.model.rawValue), offset=\(Int(startOffset))s", category: "record")
+            AppLog.log(
+                "Capture started (model loads in parallel) — capture=\(settings.captureMode.rawValue), mic=\(live.micInputMode.rawValue), model=\(settings.model.rawValue), offset=\(Int(startOffset))s",
+                category: "record"
+            )
         } catch {
             mic.stop()
             system.stop()
