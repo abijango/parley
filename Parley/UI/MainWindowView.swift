@@ -393,19 +393,21 @@ struct RecordDetailView: View {
     /// Persistent transport bar: Start/Stop always sits here, above the transcript.
     private var recordControlStrip: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.small) {
-            HStack(alignment: .center, spacing: Theme.Spacing.medium) {
-                recordButton
-                    .frame(width: 120)
+            ZStack {
+                HStack(alignment: .center, spacing: Theme.Spacing.medium) {
+                    recordButton
+                        .frame(width: 120)
 
-                statusBadge
+                    statusBadge
 
-                timerView
+                    timerView
 
-                Spacer(minLength: Theme.Spacing.medium)
+                    Spacer(minLength: Theme.Spacing.medium)
+
+                    audioModelBadge
+                }
 
                 micModePicker
-
-                audioModelBadge
             }
 
             levelMeters
