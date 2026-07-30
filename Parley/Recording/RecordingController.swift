@@ -130,6 +130,7 @@ final class RecordingController: ObservableObject {
 
     let models = ModelManager()
     let fluidModels = FluidModelManager()
+    let speechAssets = SpeechAssetManager()
     let voiceprints = VoiceprintStore()
     let vault = VaultDirectory()
     let notes = NotesGenerator()
@@ -209,6 +210,11 @@ final class RecordingController: ObservableObject {
             // Auto-add a recognized person to the attendees list (above threshold).
             fluid.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
             engine = fluid
+        case .speechAnalyzer:
+            let speech = SpeechAnalyzerEngine(settings: settings, voiceprints: voiceprints,
+                                              identificationThreshold: settings.identificationThreshold)
+            speech.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
+            engine = speech
         }
         wireSegmentPublishing(to: engine)
         return engine
@@ -505,9 +511,11 @@ final class RecordingController: ObservableObject {
     func launchWarmup() {
         guard !didWarmup else { return }
         didWarmup = true
-        let engineDesc = settings.transcriptionEngine == .fluidAudio
-            ? "FluidAudio (Parakeet \(settings.parakeetVersion.rawValue))"
-            : "WhisperKit (\(settings.model.rawValue))"
+        let engineDesc: String = switch settings.transcriptionEngine {
+        case .fluidAudio: "FluidAudio (Parakeet \(settings.parakeetVersion.rawValue))"
+        case .speechAnalyzer: "SpeechAnalyzer + FluidAudio (\(settings.speechLocale))"
+        case .whisperKit: "WhisperKit (\(settings.model.rawValue))"
+        }
         AppLog.log("Launch warmup — engine=\(engineDesc), \(MemoryGuard.snapshot()), logs at \(AppLog.fileURL.path)", category: "app")
         VaultMigration.runIfNeeded(vault: settings.vaultURL)
         SystemAudioCapture.cleanupLeakedAggregates()    // destroy any aggregate device a crash left behind
@@ -641,6 +649,9 @@ final class RecordingController: ObservableObject {
             Task { _ = await models.prepare(settings.model) }
         case .fluidAudio:
             fluidModels.refreshPresence()
+        case .speechAnalyzer:
+            speechAssets.refreshPresence(for: settings.speechLocale)
+            fluidModels.refreshPresence()   // diarization models
         }
     }
 
@@ -667,6 +678,7 @@ final class RecordingController: ObservableObject {
         lastResult = nil
         lastTranscriptURL = nil
         meeting.manualNotes = ""
+        meeting.attachments = []
         // Discovery context: a detected call already reset + started the
         // resolver in onCallStart, and its pre-record findings (title, early
         // roster) belong to this session — keep them. Only a pure manual start
@@ -723,6 +735,7 @@ final class RecordingController: ObservableObject {
         meeting.attendees = m.attendees
         meeting.destinationPath = m.filing
         meeting.manualNotes = m.manualNotes
+        meeting.attachments = m.attachments ?? []
         lastResult = nil
         lastTranscriptURL = nil
         engine = makeEngine()
@@ -968,6 +981,8 @@ final class RecordingController: ObservableObject {
         let destination = meeting.destinationPath
         let attendees = meeting.attendees
         let manual = meeting.manualNotes
+        let attachments = meeting.attachments
+        let vaultURL = settings.vaultURL
         // Snapshot session identity into LOCALS before the async Task, so a new recording
         // starting immediately (which reassigns `sessionDirectory`/`engine`) can never
         // redirect this session's offline job — the root cause of the data-loss bug.
@@ -989,8 +1004,10 @@ final class RecordingController: ObservableObject {
                     title: title, date: date, attendees: attendees, destination: destination,
                     segments: segments,
                     manualNotes: manual.isEmpty ? nil : manual,
+                    attachments: attachments,
                     audioPath: audioPath,
-                    folderURL: folder
+                    folderURL: folder,
+                    vaultURL: vaultURL
                 )
                 AppLog.log("Transcript written: \(result.url.path)\(segments.isEmpty ? " (no speech — saved for the record + audio link)" : "")", category: "record")
                 if let p = partialURL() { try? FileManager.default.removeItem(at: p) }   // clean recovery files
@@ -1240,6 +1257,134 @@ final class RecordingController: ObservableObject {
         AppLog.log("Set attendees on \(url.lastPathComponent): \(clean.count)", category: "history")
     }
 
+    // MARK: Attachments
+
+    /// Seconds elapsed in the current live recording (for attachment timestamps).
+    func currentRecordingOffset() -> Double? {
+        guard live.isRecording, let started = live.recordingStarted else { return nil }
+        return Date().timeIntervalSince(started)
+    }
+
+    /// Paste an image into the live session's attachment list.
+    @discardableResult
+    func pasteLiveAttachment(caption: String = "") -> String? {
+        guard let folderID = sessionDirectory?.lastPathComponent else { return "Start recording first." }
+        return addAttachment(caption: caption, folderID: folderID, toLive: true)
+    }
+
+    /// Add image files to the live session.
+    @discardableResult
+    func addLiveAttachments(from urls: [URL], caption: String = "") -> String? {
+        guard let folderID = sessionDirectory?.lastPathComponent else { return "Start recording first." }
+        for url in urls {
+            if let err = addAttachmentFile(url, caption: caption, folderID: folderID, toLive: true) { return err }
+        }
+        return nil
+    }
+
+    /// Paste an image onto a saved transcript (History detail).
+    @discardableResult
+    func pasteAttachment(on transcriptURL: URL, caption: String = "") -> String? {
+        let folderID = MeetingAttachmentStore.folderID(forTranscript: transcriptURL)
+        return addAttachment(caption: caption, folderID: folderID, transcriptURL: transcriptURL)
+    }
+
+    /// Add image files to a saved transcript.
+    @discardableResult
+    func addAttachments(from urls: [URL], on transcriptURL: URL, caption: String = "") -> String? {
+        let folderID = MeetingAttachmentStore.folderID(forTranscript: transcriptURL)
+        for url in urls {
+            if let err = addAttachmentFile(url, caption: caption, folderID: folderID,
+                                           transcriptURL: transcriptURL) { return err }
+        }
+        return nil
+    }
+
+    func removeLiveAttachment(id: UUID) {
+        meeting.attachments.removeAll { $0.id == id }
+        persistManifest(status: .active)
+    }
+
+    func removeAttachment(id: UUID, on transcriptURL: URL) {
+        var list = MeetingAttachmentStore.loadAttachments(from: transcriptURL)
+        list.removeAll { $0.id == id }
+        MeetingAttachmentStore.syncTranscript(transcriptURL, vault: settings.vaultURL, attachments: list)
+        store.refresh()
+        transcriptRevision += 1
+    }
+
+    func updateLiveAttachmentCaption(id: UUID, caption: String) {
+        guard let idx = meeting.attachments.firstIndex(where: { $0.id == id }) else { return }
+        meeting.attachments[idx].caption = caption
+        persistManifest(status: .active)
+    }
+
+    func updateAttachmentCaption(id: UUID, caption: String, on transcriptURL: URL) {
+        var list = MeetingAttachmentStore.loadAttachments(from: transcriptURL)
+        guard let idx = list.firstIndex(where: { $0.id == id }) else { return }
+        list[idx].caption = caption
+        MeetingAttachmentStore.syncTranscript(transcriptURL, vault: settings.vaultURL, attachments: list)
+        store.refresh()
+    }
+
+    func pickAndAddLiveAttachments() {
+        let urls = MeetingAttachmentStore.openImagePicker()
+        guard !urls.isEmpty else { return }
+        _ = addLiveAttachments(from: urls)
+    }
+
+    func pickAndAddAttachments(on transcriptURL: URL) {
+        let urls = MeetingAttachmentStore.openImagePicker()
+        guard !urls.isEmpty else { return }
+        _ = addAttachments(from: urls, on: transcriptURL)
+    }
+
+    @discardableResult
+    private func addAttachment(caption: String, folderID: String,
+                               toLive: Bool = false, transcriptURL: URL? = nil) -> String? {
+        do {
+            let att = try MeetingAttachmentStore.addPasteboardImage(
+                vault: settings.vaultURL, folderID: folderID, caption: caption,
+                capturedAtOffset: toLive ? currentRecordingOffset() : nil)
+            if toLive {
+                meeting.attachments.append(att)
+                persistManifest(status: .active)
+            } else if let transcriptURL {
+                var list = MeetingAttachmentStore.loadAttachments(from: transcriptURL)
+                list.append(att)
+                MeetingAttachmentStore.syncTranscript(transcriptURL, vault: settings.vaultURL, attachments: list)
+                store.refresh()
+                transcriptRevision += 1
+            }
+            return nil
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    private func addAttachmentFile(_ url: URL, caption: String, folderID: String,
+                                   toLive: Bool = false, transcriptURL: URL? = nil) -> String? {
+        do {
+            let att = try MeetingAttachmentStore.addFile(
+                from: url, vault: settings.vaultURL, folderID: folderID, caption: caption,
+                capturedAtOffset: toLive ? currentRecordingOffset() : nil)
+            if toLive {
+                meeting.attachments.append(att)
+                persistManifest(status: .active)
+            } else if let transcriptURL {
+                var list = MeetingAttachmentStore.loadAttachments(from: transcriptURL)
+                list.append(att)
+                MeetingAttachmentStore.syncTranscript(transcriptURL, vault: settings.vaultURL, attachments: list)
+                store.refresh()
+                transcriptRevision += 1
+            }
+            return nil
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
     /// Replace (or insert after the Date line) the body "**Attendees:**" header so it
     /// matches the frontmatter list. An empty list removes the header line entirely.
     private static func replaceAttendeeHeader(in text: String, with names: [String]) -> String {
@@ -1469,6 +1614,7 @@ final class RecordingController: ObservableObject {
         meeting.attendees = ""
         meeting.destinationPath = ""
         meeting.manualNotes = ""
+        meeting.attachments = []
         lastResult = nil
         lastTranscriptURL = nil
         autoPresentSpeakerReview = false
@@ -1649,7 +1795,8 @@ final class RecordingController: ObservableObject {
             startedAt: recordingStartDate ?? Date(), lastHeartbeat: Date(),
             status: .active, startedByDetection: startedByDetection,
             callBundleID: call?.bundleID, callDisplayName: call?.displayName,
-            manualNotes: meeting.manualNotes, audioTracks: ["mic.caf", "system.caf"])
+            manualNotes: meeting.manualNotes, attachments: meeting.attachments.isEmpty ? nil : meeting.attachments,
+            audioTracks: ["mic.caf", "system.caf"])
         manifest = m
         SessionStore.write(m, to: dir)
         AppLog.log("Session manifest written (active) — \(dir.lastPathComponent)", category: "record")
@@ -1693,6 +1840,7 @@ final class RecordingController: ObservableObject {
         m.attendees = meeting.attendees
         m.filing = meeting.destinationPath
         m.manualNotes = meeting.manualNotes
+        m.attachments = meeting.attachments.isEmpty ? nil : meeting.attachments
         m.titleSource = meeting.titleSource
         m.suggestedAttendees = meeting.suggestedAttendees.isEmpty ? nil : meeting.suggestedAttendees
         m.lastHeartbeat = Date()

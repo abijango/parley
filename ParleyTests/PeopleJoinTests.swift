@@ -53,7 +53,7 @@ final class PeopleJoinTests: XCTestCase {
         XCTAssertEqual(p.displayName, "Alice Foo")
         XCTAssertNotNil(p.contact)
         XCTAssertEqual(p.voiceprints.count, 1)
-        XCTAssertEqual(p.enrolledEngines, ["FluidAudio"])
+        XCTAssertEqual(p.enrolledEngines, ["FluidAudio / SpeechAnalyzer"])
         XCTAssertEqual(p.anchorID, vp.id)
     }
 
@@ -137,7 +137,7 @@ final class PeopleJoinTests: XCTestCase {
         XCTAssertEqual(people.count, 1)
         let p = people[0]
         XCTAssertEqual(p.voiceprints.count, 2)
-        XCTAssertEqual(p.enrolledEngines, ["FluidAudio", "WhisperKit"])
+        XCTAssertEqual(p.enrolledEngines, ["FluidAudio / SpeechAnalyzer", "WhisperKit"])
         // anchorID = first by createdAt = id1
         XCTAssertEqual(p.anchorID, id1)
     }
@@ -158,14 +158,14 @@ final class PeopleJoinTests: XCTestCase {
         XCTAssertEqual(p.displayName, "Frank")
         XCTAssertNil(p.contact)
         XCTAssertEqual(p.voiceprints.count, 2)
-        XCTAssertEqual(p.enrolledEngines, ["FluidAudio", "WhisperKit"])
+        XCTAssertEqual(p.enrolledEngines, ["FluidAudio / SpeechAnalyzer", "WhisperKit"])
         XCTAssertEqual(p.anchorID, id1)  // earliest by createdAt
     }
 
     // MARK: - engineLabel helper
 
     func testEngineLabelFluidAudio() {
-        XCTAssertEqual(engineLabel(for: "wespeaker_v2"), "FluidAudio")
+        XCTAssertEqual(engineLabel(for: "wespeaker_v2"), "FluidAudio / SpeechAnalyzer")
     }
 
     func testEngineLabelWhisperKit() {

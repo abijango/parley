@@ -15,54 +15,23 @@ enum CaptureMode: String, CaseIterable, Identifiable {
     }
 }
 
-/// Whisper model variants we expose. Raw values are WhisperKit model repo names.
+/// WhisperKit model — Turbo (large-v3) only. Raw value is the WhisperKit repo name.
 enum WhisperModel: String, CaseIterable, Identifiable {
-    case small  = "openai_whisper-small"
-    case medium = "openai_whisper-medium"
-    case large  = "openai_whisper-large-v3"                            // full float16 — max accuracy (~3 GB)
-    case turbo  = "openai_whisper-large-v3-v20240930_turbo_632MB"      // optimized turbo — near-large accuracy, ~0.6 GB
+    case turbo = "openai_whisper-large-v3-v20240930_turbo_632MB"
 
     var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .small: return "Small (default)"
-        case .medium: return "Medium"
-        case .large: return "Large v3"
-        case .turbo: return "Turbo (large-v3)"
-        }
-    }
-
-    /// Compact friendly name for the transport bar and other inline UI.
-    var displayName: String {
-        switch self {
-        case .small: return "Small"
-        case .medium: return "Medium"
-        case .large: return "Large"
-        case .turbo: return "Turbo"
-        }
-    }
-
-    /// Engine family shown beside `displayName` in compact UI.
+    var label: String { "Turbo (large-v3)" }
+    var displayName: String { "Turbo" }
     static let engineName = "Whisper"
-
-    /// On-disk download size (actual, from the WhisperKit repo), for Settings.
-    var approxSize: String {
-        switch self {
-        case .small: return "~490 MB"
-        case .medium: return "~1.5 GB"
-        case .large: return "~3.0 GB"
-        case .turbo: return "~0.6 GB"
-        }
+    var approxSize: String { "~0.6 GB" }
+    var blurb: String {
+        "Near-large-v3 accuracy, small & fast. Used for both live and final transcription."
     }
 
-    /// Accuracy/speed guidance shown under each option.
-    var blurb: String {
-        switch self {
-        case .small: return "Fastest, lowest accuracy. Best for live latency."
-        case .medium: return "Better accuracy; may lag real-time on older Macs."
-        case .large: return "Best accuracy (full v3). Heaviest — slow to download & load."
-        case .turbo: return "Near-large accuracy, small & fast. Best all-round for live."
-        }
+    /// Maps legacy stored model ids (small/medium/large) to turbo.
+    static func resolved(from raw: String) -> WhisperModel {
+        if let m = WhisperModel(rawValue: raw) { return m }
+        return .turbo
     }
 }
 
@@ -83,20 +52,26 @@ enum ComputeMode: String, CaseIterable, Identifiable {
 /// Which transcription engine a recording uses. Chosen in Settings; applies to
 /// the NEXT recording session (no mid-session switch).
 enum TranscriptionEngineKind: String, CaseIterable, Identifiable {
-    case whisperKit   // WhisperKit ASR + SpeakerKit diarization + speaker ID
-    case fluidAudio   // native FluidAudio stack — Parakeet ASR + diarization + speaker ID
+    case whisperKit      // WhisperKit ASR + SpeakerKit diarization + speaker ID
+    case fluidAudio      // native FluidAudio stack — Parakeet ASR + diarization + speaker ID
+    case speechAnalyzer  // Apple SpeechAnalyzer ASR + FluidAudio diarization + speaker ID
 
     var id: String { rawValue }
     var label: String {
         switch self {
         case .whisperKit: return "WhisperKit + SpeakerKit"
         case .fluidAudio: return "FluidAudio"
+        case .speechAnalyzer: return "SpeechAnalyzer + FluidAudio"
         }
     }
     var blurb: String {
         switch self {
-        case .whisperKit: return "WhisperKit ASR for fast live text + SpeakerKit diarization & speaker ID applied at stop. Labels who spoke."
-        case .fluidAudio: return "Native Parakeet ASR + on-device diarization & speaker identification. Labels who spoke."
+        case .whisperKit:
+            return "WhisperKit ASR for fast live text + SpeakerKit diarization & speaker ID applied at stop. Labels who spoke."
+        case .fluidAudio:
+            return "Native Parakeet ASR + on-device diarization & speaker identification. Labels who spoke."
+        case .speechAnalyzer:
+            return "Apple SpeechAnalyzer ASR + FluidAudio diarization & speaker ID. Best English accuracy on macOS 26; labels who spoke."
         }
     }
 }
@@ -218,6 +193,29 @@ enum SummaryPipeline: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// How meeting image attachments are fed into summarization.
+enum AttachmentUnderstanding: String, CaseIterable, Identifiable {
+    case off
+    case captionsOnly
+    case vision
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .captionsOnly: return "Captions only"
+        case .vision: return "Vision (describe images)"
+        }
+    }
+    var blurb: String {
+        switch self {
+        case .off: return "Attachments are stored in the note but not mentioned in the summary prompt."
+        case .captionsOnly: return "Filenames and captions are injected as text (no pixels sent)."
+        case .vision: return "A Cursor agent vision pass describes images and may draft mermaid diagrams before summarizing."
+        }
+    }
+}
+
 /// App-wide settings persisted via UserDefaults (`@AppStorage`).
 /// TODO(app-name): the AppStorage keys are namespaced with a literal prefix below.
 @MainActor
@@ -229,6 +227,7 @@ final class AppSettings: ObservableObject {
         static let vaultPath = "parley.vaultPath"
         static let model = "parley.model"
         static let liveModel = "parley.liveModel"
+        static let speechLocale = "parley.speechLocale"
         static let computeMode = "parley.computeMode"
         static let captureMode = "parley.captureMode"
         static let autoRunClaude = "parley.autoRunClaude"
@@ -271,6 +270,8 @@ final class AppSettings: ObservableObject {
         static let liveTranscriptEnabled = "parley.liveTranscriptEnabled"
         static let summaryPromptTemplate = "parley.summaryPromptTemplate"
         static let summaryCheckerPromptTemplate = "parley.summaryCheckerPromptTemplate"
+        static let attachmentUnderstanding = "parley.attachmentUnderstanding"
+        static let attachmentVisionBackend = "parley.attachmentVisionBackend"
         static let deleteAudioAfterFiling = "parley.deleteAudioAfterFiling"
     }
 
@@ -327,11 +328,9 @@ final class AppSettings: ObservableObject {
 
     @AppStorage(Key.vaultPath) var vaultPath: String = "\(NSHomeDirectory())/ObsidianVault"
     @AppStorage(Key.captureMode) var captureModeRaw: String = CaptureMode.systemWide.rawValue
-    @AppStorage(Key.model) var modelRaw: String = WhisperModel.small.rawValue
-    /// WhisperKit + SpeakerKit only: the model used for the fast LIVE transcript
-    /// (the `model` above is the offline/final transcript at stop). Defaults to a
-    /// small/fast model so live decoding keeps up with real-time.
-    @AppStorage(Key.liveModel) var liveModelRaw: String = WhisperModel.small.rawValue
+    @AppStorage(Key.model) var modelRaw: String = WhisperModel.turbo.rawValue
+    /// Legacy key — always resolves to turbo (same as `model`).
+    @AppStorage(Key.liveModel) var liveModelRaw: String = WhisperModel.turbo.rawValue
     @AppStorage(Key.computeMode) var computeModeRaw: String = ComputeMode.gpu.rawValue
     // Default engine: WhisperKit + SpeakerKit (kept after the A/B). FluidAudio remains
     // selectable as a secondary option. Only affects fresh installs / unset stores.
@@ -362,6 +361,9 @@ final class AppSettings: ObservableObject {
     /// speaker-attributed transcript in one pass at stop. The offline pass is fast and
     /// accurate, so live text is opt-in; turning it off removes all live-decode load.
     @AppStorage(Key.liveTranscriptEnabled) var liveTranscriptEnabled: Bool = false
+    /// BCP-47 locale for SpeechAnalyzer (e.g. en-US). Validated against
+    /// `SpeechTranscriber.supportedLocales` at record time.
+    @AppStorage(Key.speechLocale) var speechLocale: String = Locale.current.identifier(.bcp47)
     /// Auto-summarize: after a recording's speakers are assigned, fire the background
     /// summary automatically (result is staged for review in History). Default on.
     /// Key name is historical (`autoRunClaude`); applies to whichever `summaryBackend` is set.
@@ -420,15 +422,15 @@ final class AppSettings: ObservableObject {
         set { captureModeRaw = newValue.rawValue }
     }
 
-    /// Offline / final transcript model (also used by recovery + FluidAudio-era preload).
+    /// Whisper Turbo model (live and final).
     var model: WhisperModel {
-        get { WhisperModel(rawValue: modelRaw) ?? .small }
+        get { WhisperModel.resolved(from: modelRaw) }
         set { modelRaw = newValue.rawValue }
     }
 
-    /// Live-display model for the WhisperKit + SpeakerKit engine (fast).
+    /// Same as `model` — kept for call-site compatibility.
     var liveModel: WhisperModel {
-        get { WhisperModel(rawValue: liveModelRaw) ?? .small }
+        get { WhisperModel.resolved(from: liveModelRaw) }
         set { liveModelRaw = newValue.rawValue }
     }
 
@@ -490,6 +492,24 @@ final class AppSettings: ObservableObject {
     /// appended by `SummaryCheckerPromptBuilder`. Editable in Settings → Summary.
     @AppStorage(Key.summaryCheckerPromptTemplate) var summaryCheckerPromptTemplate: String
         = SummaryCheckerPromptBuilder.defaultInstructions
+
+    /// How image attachments are included in summary prompts.
+    @AppStorage(Key.attachmentUnderstanding) var attachmentUnderstandingRaw: String
+        = AttachmentUnderstanding.captionsOnly.rawValue
+
+    /// Cursor backend for the attachment vision pre-pass (plan mode, read-only).
+    @AppStorage(Key.attachmentVisionBackend) var attachmentVisionBackendRaw: String
+        = SummaryBackend.composer25.rawValue
+
+    var attachmentUnderstanding: AttachmentUnderstanding {
+        get { AttachmentUnderstanding(rawValue: attachmentUnderstandingRaw) ?? .captionsOnly }
+        set { attachmentUnderstandingRaw = newValue.rawValue }
+    }
+
+    var attachmentVisionBackend: SummaryBackend {
+        get { SummaryBackend(rawValue: attachmentVisionBackendRaw) ?? .composer25 }
+        set { attachmentVisionBackendRaw = newValue.rawValue }
+    }
 
     /// After a summary is committed to the vault, delete the session audio (the raw
     /// transcript + summary make it redundant). Default on; frees significant disk.
@@ -560,6 +580,17 @@ final class AppSettings: ObservableObject {
 
     ## Next Steps
     (Numbered.)
+
+    ## Attachments
+    (When ATTACHMENTS are listed below, include this section with markdown image links \
+    using the filenames and captions provided. Reference whiteboards/diagrams in Key Topics \
+    when relevant. Do NOT invent visual details you cannot see — rely on captions only.)
+
+    ## Diagrams
+    (Include ONLY when ATTACHMENT VISION is provided below. For each diagram/whiteboard, add a \
+    `###` subheading, integrate the description into the note, and include any mermaid blocks \
+    from the vision pass. Always keep the raw image embeds in ## Attachments — mermaid is a \
+    supplement, not a replacement.)
 
     Strict rules:
     - Use ONLY information explicitly present in the transcript. Do NOT fabricate decisions, \

@@ -27,14 +27,8 @@ enum MemoryGuard {
     /// set + compile scratch). Deliberately conservative — better to warn a touch
     /// early than to crash the model compiler.
     static func estimatedFootprint(_ model: WhisperModel) -> UInt64 {
-        let mb: UInt64
-        switch model {
-        case .small:  mb = 1_200   // ~0.5 GB weights + overhead
-        case .turbo:  mb = 1_600
-        case .medium: mb = 3_000
-        case .large:  mb = 6_000   // ~3 GB weights, ~6 GB resident at peak compile
-        }
-        return mb * 1_024 * 1_024
+        _ = model
+        return 1_600 * 1_024 * 1_024   // turbo ~1.6 GB resident at peak
     }
 
     /// Swap level (bytes) at/above which we consider the system too pressured to

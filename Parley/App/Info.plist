@@ -32,5 +32,7 @@
 	<string></string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Records your microphone so meetings can be transcribed locally.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Transcribes meeting audio on device using Apple's Speech framework.</string>
 </dict>
 </plist>

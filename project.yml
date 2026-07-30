@@ -67,6 +67,7 @@ targets:
         LSMinimumSystemVersion: "26.0"
         NSMicrophoneUsageDescription: "Records your microphone so meetings can be transcribed locally."
         NSAudioCaptureUsageDescription: "Captures system and app audio so the other side of meetings can be transcribed locally."
+        NSSpeechRecognitionUsageDescription: "Transcribes meeting audio on device using Apple's Speech framework."
         NSHumanReadableCopyright: ""
         ATSApplicationFontsPath: "Fonts"   # registers bundled Geist faces at launch (Resources/Fonts)
     entitlements:

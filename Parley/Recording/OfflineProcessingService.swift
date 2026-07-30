@@ -397,6 +397,9 @@ final class OfflineProcessingService: ObservableObject {
         case .fluidAudio:
             eng = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
                                    identificationThreshold: settings.identificationThreshold)
+        case .speechAnalyzer:
+            eng = SpeechAnalyzerEngine(settings: settings, voiceprints: voiceprints,
+                                       identificationThreshold: settings.identificationThreshold)
         }
         eng.onSpeakerIdentified = onIdentified
         eng.mixedAudioURL = archives.mixed

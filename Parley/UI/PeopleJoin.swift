@@ -17,7 +17,7 @@ struct Person: Identifiable {
 /// Returns nil for unknown/legacy models.
 func engineLabel(for embeddingModel: String) -> String? {
     switch embeddingModel {
-    case "wespeaker_v2": return "FluidAudio"
+    case "wespeaker_v2": return "FluidAudio / SpeechAnalyzer"
     case "pyannote_v3":  return "WhisperKit"
     default:             return nil
     }

@@ -210,13 +210,7 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
         publish()
         progressCB?(.attributeDone)
 
-        // The offline transcribe loaded the heavier `model`; if live transcription is on,
-        // swap the fast live model back in (background, non-blocking) so the NEXT recording
-        // starts instantly. In offline-only mode there's no live model to warm — leave the
-        // heavy model loaded so the next offline pass reuses it.
-        if settings.liveTranscriptEnabled, settings.liveModel != settings.model {
-            Task { [models, settings] in _ = await models.prepare(settings.liveModel) }
-        }
+        // Turbo is used for both live and offline — no model swap needed after stop.
 
         let elapsed = Date().timeIntervalSince(started)
         let n = callSpeakerIds().count

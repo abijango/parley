@@ -313,6 +313,28 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Attachments") {
+                SettingRow("Include in summaries",
+                           description: settings.attachmentUnderstanding.blurb) {
+                    Picker("", selection: $settings.attachmentUnderstandingRaw) {
+                        ForEach(AttachmentUnderstanding.allCases) { mode in
+                            Text(mode.label).tag(mode.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 280)
+                }
+                if settings.attachmentUnderstanding == .vision {
+                    Picker("Vision backend", selection: $settings.attachmentVisionBackendRaw) {
+                        ForEach(SummaryBackend.allCases.filter(\.isCursorAgent)) { backend in
+                            Text(backend.displayName).tag(backend.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    helpText("Runs a read-only Cursor agent pass in plan mode to describe images before summarizing.")
+                }
+            }
+
             Section("Prompt") {
                 helpText("The instructions the summarizer follows (same for every backend). Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
                 editorStyle(TextEditor(text: $settings.summaryPromptTemplate), height: 220)
@@ -682,35 +704,22 @@ struct SettingsView: View {
             if settings.transcriptionEngine == .whisperKit {
                 Section("Live transcript") {
                     SettingRow("Show a live transcript while recording",
-                               description: "Off = offline-only: capture audio silently and generate the full, speaker-attributed transcript in one fast pass when you stop. On also streams text during the call (uses the live model) — at the cost of continuous live decoding.") {
+                               description: "Off = offline-only: capture audio silently and generate the full, speaker-attributed transcript in one fast pass when you stop. On also streams text during the call — at the cost of continuous live decoding.") {
                         Toggle("", isOn: $settings.liveTranscriptEnabled).labelsHidden()
                             .disabled(recording.isRecording)
                     }
                 }
 
-                // Live + final models share one dropdown idiom (with an inline
-                // download / progress / delete control next to each), so the two
-                // read as one coherent group rather than two unrelated controls.
-                Section("Models") {
-                    modelPickerRow(
-                        title: "Live model",
-                        description: settings.liveTranscriptEnabled
-                            ? "The fast LIVE transcript during a call. Pick a small/fast model so it keeps real-time — if the logs show \"OVERLOADED — skipped audio\", choose a smaller one. (Speakers are labelled at stop regardless.)"
-                            : "Only used when Live transcript is on.",
-                        selection: $settings.liveModel,
-                        enabled: !recording.isRecording && settings.liveTranscriptEnabled)
-
-                    modelPickerRow(
-                        title: "Final model (at stop)",
-                        description: "Re-transcribes the whole recording when you stop — the SAVED transcript. Use the most accurate model you can; it runs once and isn't real-time. Can match the live model.",
-                        selection: finalModelBinding,
-                        enabled: !recording.isRecording)
-
+                Section("Model") {
+                    SettingRow("Whisper Turbo (large-v3)",
+                               description: WhisperModel.turbo.blurb) {
+                        modelStateControl(for: .turbo)
+                    }
                     Text("Stored in \(AppPaths.modelsDirectory.path)")
                         .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
                         .lineLimit(1).truncationMode(.middle)
                     if recording.isRecording {
-                        Text("Models can't be changed while recording.")
+                        Text("Model can't be changed while recording.")
                             .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
                     }
                 }
@@ -756,7 +765,7 @@ struct SettingsView: View {
                 }
 
                 speakerRecognitionSection
-            } else {
+            } else if settings.transcriptionEngine == .fluidAudio {
                 FluidModelSection(models: recording.fluidModels, isRecording: recording.isRecording)
 
                 Section("Speaker separation") {
@@ -799,6 +808,13 @@ struct SettingsView: View {
                     Toggle("Re-transcribe the whole recording after stopping", isOn: $settings.offlineAsrRepass)
                     helpText("A full-context batch pass over the recorded audio — more accurate than the live streaming chunks. Runs once at stop (adds a few seconds) and rewrites the saved transcript. Turn off to keep the live transcript as-is.")
                 }
+            } else {
+                SpeechAnalyzerSettingsSection(
+                    speechAssets: recording.speechAssets,
+                    fluidModels: recording.fluidModels,
+                    settings: settings,
+                    isRecording: recording.isRecording)
+                speakerRecognitionSection
             }
         }
         .formStyle(.grouped)
@@ -810,57 +826,21 @@ struct SettingsView: View {
             Task { await models.prepare(settings.model) }
         }
         .confirmationDialog(
-            "Delete the \(pendingModelDelete?.label ?? "") model?",
+            "Delete Whisper Turbo?",
             isPresented: Binding(get: { pendingModelDelete != nil },
                                  set: { if !$0 { pendingModelDelete = nil } }),
             presenting: pendingModelDelete
-        ) { model in
-            Button("Delete \(model.approxSize)", role: .destructive) {
-                models.delete(model); pendingModelDelete = nil
+        ) { _ in
+            Button("Delete \(WhisperModel.turbo.approxSize)", role: .destructive) {
+                models.delete(.turbo); pendingModelDelete = nil
             }
             Button("Cancel", role: .cancel) { pendingModelDelete = nil }
-        } message: { model in
-            Text("Frees \(model.approxSize) from disk. \(model.label) re-downloads automatically the next time it's used.")
+        } message: { _ in
+            Text("Frees \(WhisperModel.turbo.approxSize) from disk. Turbo re-downloads automatically the next time it's used.")
         }
     }
 
-    /// Final-model selection: set it, and warm it in the background only if it's
-    /// already downloaded (so picking an undownloaded model surfaces the inline
-    /// Download button rather than silently kicking off a load).
-    private var finalModelBinding: Binding<WhisperModel> {
-        Binding(
-            get: { settings.model },
-            set: { newModel in
-                settings.model = newModel
-                if models.downloadedModels.contains(newModel.rawValue) {
-                    Task { await models.prepare(newModel) }
-                }
-            }
-        )
-    }
-
-    /// A model dropdown row in the shared idiom: a labelled `Picker` with an inline
-    /// state control (download progress / Download button / delete icon) right beside
-    /// the dropdown. Used for both the live and final models so they read as a set.
-    @ViewBuilder
-    private func modelPickerRow(title: String, description: String,
-                                selection: Binding<WhisperModel>, enabled: Bool) -> some View {
-        SettingRow(title, description: description) {
-            HStack(spacing: Theme.Spacing.small) {
-                modelStateControl(for: selection.wrappedValue)
-                Picker("", selection: selection) {
-                    ForEach(WhisperModel.allCases) { m in
-                        Text("\(m.label) · \(m.approxSize)").tag(m)
-                    }
-                }
-                .labelsHidden().fixedSize()
-            }
-        }
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.5)
-    }
-
-    /// The affordance shown next to a model dropdown, by state:
+    /// The affordance shown next to the Whisper Turbo row, by state.
     /// downloading → progress + %, not downloaded → Download, downloaded → delete icon.
     @ViewBuilder
     private func modelStateControl(for model: WhisperModel) -> some View {
@@ -1127,6 +1107,96 @@ private struct CursorConnectionView: View {
 }
 
 /// The Active-model section shown when the FluidAudio engine is selected: the
+/// SpeechAnalyzer engine settings: locale assets + FluidAudio diarization models.
+private struct SpeechAnalyzerSettingsSection: View {
+    @ObservedObject var speechAssets: SpeechAssetManager
+    @ObservedObject var fluidModels: FluidModelManager
+    @ObservedObject var settings: AppSettings
+    let isRecording: Bool
+
+    private static let localeOptions: [(id: String, label: String)] = [
+        ("en-US", "English (US)"), ("en-GB", "English (UK)"),
+        ("de-DE", "German"), ("fr-FR", "French"), ("es-ES", "Spanish"),
+        ("it-IT", "Italian"), ("pt-BR", "Portuguese (Brazil)"),
+        ("ja-JP", "Japanese"), ("zh-CN", "Chinese (Simplified)"),
+        ("ko-KR", "Korean"), ("nl-NL", "Dutch"), ("sv-SE", "Swedish"),
+    ]
+
+    var body: some View {
+        FluidModelSection(models: fluidModels, isRecording: isRecording)
+
+        Section("Speech language") {
+            Picker("Locale", selection: $settings.speechLocale) {
+                ForEach(Self.localeOptions, id: \.id) { opt in
+                    Text(opt.label).tag(opt.id)
+                }
+            }
+            .disabled(isRecording)
+            .onAppear { speechAssets.refreshPresence(for: settings.speechLocale) }
+            .onChange(of: settings.speechLocale) { speechAssets.refreshPresence(for: settings.speechLocale) }
+
+            HStack(alignment: .top, spacing: Theme.Spacing.medium) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+                    Text("SpeechAnalyzer (\(settings.speechLocale))")
+                        .font(Theme.Typography.controlLabel)
+                    Text("Apple on-device ASR. Language assets download from the system on first use.")
+                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                }
+                Spacer()
+                speechStatusControl
+            }
+        }
+
+        Section("Live transcript") {
+            SettingRow("Show a live transcript while recording",
+                       description: "Off = offline-only: capture audio silently and generate the full, speaker-attributed transcript when you stop. On streams text during the call using SpeechAnalyzer.") {
+                Toggle("", isOn: $settings.liveTranscriptEnabled).labelsHidden()
+                    .disabled(isRecording)
+            }
+        }
+
+        Section("Speaker separation") {
+            HStack(spacing: Theme.Spacing.medium) {
+                Slider(value: $settings.diarizationThreshold, in: 0.40...0.80, step: 0.05)
+                    .frame(maxWidth: 260)
+                    .disabled(isRecording)
+                Text(String(format: "%.2f", settings.diarizationThreshold))
+                    .font(Theme.Typography.mono).foregroundStyle(.secondary)
+            }
+            Text("FluidAudio diarization labels who spoke. ~0.6–0.7 suits most calls.")
+                .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder private var speechStatusControl: some View {
+        switch speechAssets.status {
+        case .unknown, .notInstalled:
+            Button("Download") {
+                speechAssets.download(localeIdentifier: settings.speechLocale)
+            }.disabled(isRecording)
+        case .downloading:
+            HStack(spacing: Theme.Spacing.small) {
+                ProgressView().controlSize(.small)
+                Text("Downloading…").font(Theme.Typography.caption).foregroundStyle(.secondary)
+            }
+        case .installed:
+            Label("Ready", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(Theme.Severity.success.color)
+                .font(Theme.Typography.secondary)
+        case .unsupported:
+            Text("Unsupported").font(Theme.Typography.caption).foregroundStyle(Theme.Severity.danger.color)
+        case .failed(let msg):
+            VStack(alignment: .trailing, spacing: Theme.Spacing.xxSmall) {
+                Button("Retry") { speechAssets.download(localeIdentifier: settings.speechLocale) }
+                    .disabled(isRecording)
+                Text(msg).font(Theme.Typography.captionSecondary)
+                    .foregroundStyle(Theme.Severity.danger.color).lineLimit(2)
+            }
+        }
+    }
+}
+
 /// Parakeet speech model with its download / ready state (replaces the Whisper
 /// model list, which doesn't apply to this engine).
 private struct FluidModelSection: View {

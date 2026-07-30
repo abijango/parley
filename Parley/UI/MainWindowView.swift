@@ -321,9 +321,12 @@ struct RecordDetailView: View {
                         isRecording: recording.isRecording,
                         people: vault.people,
                         attendees: TranscriptWriter.splitAttendees(meeting.attendees),
-                        onNameSpeaker: settings.transcriptionEngine == .fluidAudio
+                        onNameSpeaker: (settings.transcriptionEngine == .fluidAudio
+                                        || settings.transcriptionEngine == .speechAnalyzer)
                             ? { id, name in recording.nameSpeaker(id, as: name) } : nil,
-                        liveDisabled: settings.transcriptionEngine == .whisperKit && !settings.liveTranscriptEnabled,
+                        liveDisabled: (settings.transcriptionEngine == .whisperKit
+                                       || settings.transcriptionEngine == .speechAnalyzer)
+                            && !settings.liveTranscriptEnabled,
                         hidesEmptyState: isPreRecordIdle
                     )
                     .equatable()
@@ -373,6 +376,7 @@ struct RecordDetailView: View {
                 audioControls
                 Divider().padding(.vertical, Theme.Spacing.xSmall)
                 metadataFields   // editable during recording too (e.g. a mid-call joiner)
+                liveAttachmentsField
                 notesField       // fills the rest of the rail
             }
 
@@ -571,11 +575,20 @@ struct RecordDetailView: View {
     }
 
     private var audioModelBadgeInfo: AudioModelBadgeInfo {
-        if settings.transcriptionEngine == .fluidAudio {
+        switch settings.transcriptionEngine {
+        case .fluidAudio:
             return AudioModelBadgeInfo(engine: nil, model: settings.parakeetVersion.displayName)
+        case .speechAnalyzer:
+            return AudioModelBadgeInfo(engine: "Speech", model: speechLocaleLabel)
+        case .whisperKit:
+            return AudioModelBadgeInfo(engine: WhisperModel.engineName, model: WhisperModel.turbo.displayName)
         }
-        let model = settings.liveTranscriptEnabled ? settings.liveModel : settings.model
-        return AudioModelBadgeInfo(engine: WhisperModel.engineName, model: model.displayName)
+    }
+
+    private var speechLocaleLabel: String {
+        let id = settings.speechLocale
+        if let name = Locale.current.localizedString(forIdentifier: id) { return name }
+        return id
     }
 
     /// Audio capture controls, always visible directly under the record button:
@@ -739,6 +752,32 @@ struct RecordDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @State private var attachmentError: String?
+
+    /// Screenshots / whiteboard photos during a live recording.
+    private var liveAttachmentsField: some View {
+        MeetingAttachmentsView(
+            attachments: meeting.attachments,
+            vaultURL: settings.vaultURL,
+            onPaste: {
+                if let err = recording.pasteLiveAttachment() { attachmentError = err }
+            },
+            onPickFiles: { recording.pickAndAddLiveAttachments() },
+            onRemove: { recording.removeLiveAttachment(id: $0) },
+            onCaptionChange: { id, caption in
+                recording.updateLiveAttachmentCaption(id: id, caption: caption)
+            }
+        )
+        .alert("Attachment", isPresented: Binding(
+            get: { attachmentError != nil },
+            set: { if !$0 { attachmentError = nil } }
+        )) {
+            Button("OK", role: .cancel) { attachmentError = nil }
+        } message: {
+            Text(attachmentError ?? "")
+        }
     }
 
     /// The Notes editor — the flexible last element of the inspector, so it grows to
