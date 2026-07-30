@@ -205,14 +205,14 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
 }
 
 /// Summary generation pipeline: classic single-backend or v2 writer→checker.
-enum SummaryPipeline: String, CaseIterable, Identifiable {
+enum SummaryPipeline: String, CaseIterable, Identifiable, Codable {
     case classic
     case v2
 
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .classic: return "Classic (single backend)"
+        case .classic: return "Summary v1 (single backend)"
         case .v2: return "Summary v2 (writer + checker)"
         }
     }

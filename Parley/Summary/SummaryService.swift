@@ -95,13 +95,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         v2StagingURL(for: transcriptURL, stagingDir: AppPaths.stagingURL)
     }
 
-    /// Whether a v2 staged file or run history exists for this transcript.
-    nonisolated static func hasV2Artifacts(for transcriptURL: URL, stagingDir: URL) -> Bool {
-        let v2 = v2StagingURL(for: transcriptURL, stagingDir: stagingDir)
-        if FileManager.default.fileExists(atPath: v2.path) { return true }
-        return SummaryRunStore().hasRuns(forTranscriptID: transcriptURL.path)
-    }
-
     /// Every staged summary for a transcript (dual-backend + v2 + legacy), newest-friendly order.
     nonisolated static func allStagedSummaries(for transcriptURL: URL, stagingDir: URL) -> [(backend: SummaryBackend?, url: URL)] {
         let fm = FileManager.default
@@ -413,6 +406,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         AppLog.log("Summary: started for \(item.url.lastPathComponent) (backend=\(backend.rawValue), model=\(modelLabel))", category: "summary")
 
         Task.detached(priority: .userInitiated) { [weak self] in
+            let runStart = DispatchTime.now().uptimeNanoseconds
             let result: RunResult
             switch backend {
             case .claude:
@@ -424,17 +418,18 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 Task { @MainActor [weak self] in self?.runningActivity = "Grok is writing…" }
                 result = Self.runGrok(binary: grokBinary, prompt: built.prompt, model: grokModel)
             case .local:
-                result = await Self.runLocal(prompt: built.prompt) { line in
+                result = await Self.runLocal(prompt: built.prompt, model: modelLabel) { line in
                     Task { @MainActor [weak self] in self?.runningActivity = line }
                 }
             case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
                 Task { @MainActor [weak self] in self?.runningActivity = "\(backend.displayName) is writing…" }
                 result = Self.runCursorAgent(binary: cursorBinary, prompt: built.prompt, model: backend.rawValue)
             }
+            let timed = Self.withWallClock(runStart, result, model: modelLabel)
             await MainActor.run {
                 guard let self else { return }
-                switch result {
-                case .success(let text, let usage):
+                switch timed {
+                case .success(let text, let metrics):
                     do {
                         AppPaths.ensureDirectory(staged.deletingLastPathComponent())
                         try text.write(to: staged, atomically: true, encoding: .utf8)
@@ -444,7 +439,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                         self.backoffAttempt = 0
                         switch backend {
                         case .claude:
-                            ClaudeUsageStore.shared.record(usage)
+                            if let usage = metrics.flatMap({ Self.claudeUsage(from: $0) }) {
+                                ClaudeUsageStore.shared.record(usage)
+                            }
                             ClaudeConnection.shared.noteRunSucceeded()
                         case .grok:
                             GrokConnection.shared.noteRunSucceeded()
@@ -453,6 +450,18 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                         case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
                             CursorConnection.shared.noteRunSucceeded()
                         }
+                        let run = SummaryRunRecord(
+                            id: UUID().uuidString,
+                            transcriptID: item.url.path,
+                            transcriptPath: item.url.path,
+                            createdAt: Date(),
+                            pipeline: .classic,
+                            writerBackend: backend.rawValue,
+                            checkerBackend: "",
+                            draftMarkdown: text,
+                            writerMetrics: metrics
+                        )
+                        SummaryRunStore().insertRun(run, hunks: [])
                         Self.notifyReady(title: item.meta.title)
                         AppLog.log("Summary: ready for review — \(staged.lastPathComponent) (\(backendLabel))", category: "summary")
                     } catch {
@@ -547,12 +556,17 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             await MainActor.run { [weak self] in
                 self?.runningActivity = "Writer is drafting…"
             }
-            let draftResult = Self.runBackend(
-                writer, prompt: built.prompt,
-                claudeBinary: claudeBinary, claudeModel: claudeModel,
-                grokBinary: grokBinary, grokModel: grokModel,
-                cursorBinary: cursorBinary,
-                onActivity: { line in Task { @MainActor [weak self] in self?.runningActivity = line } }
+            let writerStart = DispatchTime.now().uptimeNanoseconds
+            let draftResult = Self.withWallClock(
+                writerStart,
+                Self.runBackend(
+                    writer, prompt: built.prompt,
+                    claudeBinary: claudeBinary, claudeModel: claudeModel,
+                    grokBinary: grokBinary, grokModel: grokModel,
+                    cursorBinary: cursorBinary,
+                    onActivity: { line in Task { @MainActor [weak self] in self?.runningActivity = line } }
+                ),
+                model: writer.rawValue
             )
             switch draftResult {
             case .success:
@@ -577,7 +591,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 return
             }
 
-            guard case .success(let draft, _) = draftResult else { return }
+            guard case .success(let draft, let writerMetrics) = draftResult else { return }
 
             await MainActor.run { [weak self] in
                 self?.runningActivity = "Checker is reviewing…"
@@ -591,21 +605,28 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 terminologyBlock: terminology,
                 instructions: checkerInstructions
             )
-            let checkerResult = Self.runBackend(
-                checker, prompt: checkerPrompt,
-                claudeBinary: claudeBinary, claudeModel: claudeModel,
-                grokBinary: grokBinary, grokModel: grokModel,
-                cursorBinary: cursorBinary,
-                onActivity: { _ in }
+            let checkerStart = DispatchTime.now().uptimeNanoseconds
+            let checkerResult = Self.withWallClock(
+                checkerStart,
+                Self.runBackend(
+                    checker, prompt: checkerPrompt,
+                    claudeBinary: claudeBinary, claudeModel: claudeModel,
+                    grokBinary: grokBinary, grokModel: grokModel,
+                    cursorBinary: cursorBinary,
+                    onActivity: { _ in }
+                ),
+                model: checker.rawValue
             )
 
             let runID = UUID().uuidString
             var checkerRaw = ""
             var hunks: [SummaryHunk] = []
             var parseOK = false
+            var checkerMetrics: SummaryRunMetrics?
 
-            if case .success(let raw, _) = checkerResult {
+            if case .success(let raw, let metrics) = checkerResult {
                 checkerRaw = raw
+                checkerMetrics = metrics
                 let parsed = SummaryEditJSONParser.parse(raw: raw, runID: runID)
                 hunks = parsed.hunks
                 parseOK = parsed.parseOK
@@ -616,11 +637,14 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 transcriptID: item.url.path,
                 transcriptPath: item.url.path,
                 createdAt: Date(),
+                pipeline: .v2,
                 writerBackend: writer.rawValue,
                 checkerBackend: checker.rawValue,
                 draftMarkdown: draft,
                 checkerRaw: checkerRaw,
-                checkerParseOK: parseOK
+                checkerParseOK: parseOK,
+                writerMetrics: writerMetrics,
+                checkerMetrics: checkerMetrics
             )
             SummaryRunStore().insertRun(run, hunks: hunks)
             let preview = SummaryHunkEngine.mergedMarkdown(draft: draft, hunks: hunks)
@@ -900,7 +924,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         // Staged note text: prefer the result envelope; fall back to accumulated deltas.
         let noteText = (resultText ?? accumulatedText).trimmingCharacters(in: .whitespacesAndNewlines)
         return noteText.isEmpty ? .failure(reason: "claude produced no output.", setupIssue: nil)
-                                : .success(noteText, usage)
+                                : .success(noteText, SummaryRunMetrics.from(claude: usage, wallClock: 0, model: model))
     }
 
     /// Runs `grok -p` with `--output-format json`, parsing the final `.text` field as
@@ -955,7 +979,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
         switch GrokRunner.parseJSONResult(stdout: out) {
         case .text(let note) where code == 0:
-            return .success(GrokRunner.sanitizeNoteText(note), nil)
+            let parsed = GrokRunner.parseUsage(stdout: out)
+            let metrics = SummaryRunMetrics.merging(parsed: parsed, wallClock: 0, model: model)
+            return .success(GrokRunner.sanitizeNoteText(note), metrics)
         case .error(let msg):
             if looksAuth || Self.looksLikeAuthMessage(msg) {
                 return .failure(
@@ -976,7 +1002,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             // Exit 0 but non-JSON: treat raw stdout as the note if it looks like markdown.
             let plain = out.trimmingCharacters(in: .whitespacesAndNewlines)
             if !plain.isEmpty, plain.first != "{" {
-                return .success(GrokRunner.sanitizeNoteText(plain), nil)
+                let parsed = GrokRunner.parseUsage(stdout: out)
+                let metrics = SummaryRunMetrics.merging(parsed: parsed, wallClock: 0, model: model)
+                return .success(GrokRunner.sanitizeNoteText(plain), metrics)
             }
             return .failure(reason: "grok produced no usable output.", setupIssue: nil)
         }
@@ -1042,7 +1070,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
         switch CursorAgentRunner.parseJSONResult(stdout: out) {
         case .text(let note) where code == 0:
-            return .success(CursorAgentRunner.sanitizeNoteText(note), nil)
+            let parsed = CursorAgentRunner.parseUsage(stdout: out)
+            let metrics = SummaryRunMetrics.merging(parsed: parsed, wallClock: 0, model: model)
+            return .success(CursorAgentRunner.sanitizeNoteText(note), metrics)
         case .error(let msg):
             if looksAuth || Self.looksLikeAuthMessage(msg) {
                 return .failure(
@@ -1062,7 +1092,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             }
             let plain = out.trimmingCharacters(in: .whitespacesAndNewlines)
             if !plain.isEmpty, plain.first != "{" {
-                return .success(CursorAgentRunner.sanitizeNoteText(plain), nil)
+                let parsed = CursorAgentRunner.parseUsage(stdout: out)
+                let metrics = SummaryRunMetrics.merging(parsed: parsed, wallClock: 0, model: model)
+                return .success(CursorAgentRunner.sanitizeNoteText(plain), metrics)
             }
             return .failure(reason: "cursor agent produced no usable output.", setupIssue: nil)
         }
@@ -1071,6 +1103,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     /// Runs the on-device MLX/Qwen summarizer. Unloads WhisperKit first when possible to free GPU RAM.
     private nonisolated static func runLocal(
         prompt: String,
+        model: String,
         onActivity: @escaping @Sendable (String) -> Void
     ) async -> RunResult {
         onActivity("Loading local model…")
@@ -1082,7 +1115,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             }.value
             return text.isEmpty
                 ? .failure(reason: "Local model produced no output.", setupIssue: nil)
-                : .success(text, nil)
+                : .success(text, SummaryRunMetrics(wallClock: 0, model: model))
         } catch let e as SummaryError {
             return .failure(reason: e.localizedDescription, setupIssue: nil)
         } catch {
@@ -1160,21 +1193,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             return nil
         }
 
-        // Move to Processed if still unprocessed; otherwise just update note: path.
-        let moved: URL
-        if item.isProcessed {
-            moved = item.url
-            TranscriptWriter.updateFrontmatter(at: moved) { $0.note = noteURL.path; $0.filing = dest }
-        } else {
-            moved = store.moveToProcessed(item, notePath: noteURL.path)
-        }
-        crossLinkSummaryOntoRaw(summaryURL: noteURL, rawURL: moved)
-        Self.removeAllStaging(for: item.url)
-        jobs[item.id] = nil
-        setSummaryStatus(.done, for: item)
-        AppLog.log("Summary: compare-filed \(noteURL.lastPathComponent) (overwrite=\(overwriteExisting))", category: "summary")
-        store.refresh()
-        return noteURL
+        return finishFiling(item: item, noteURL: noteURL, destination: dest,
+                            alreadyProcessed: item.isProcessed,
+                            logMessage: "compare-filed \(noteURL.lastPathComponent) (overwrite=\(overwriteExisting))")
     }
 
     /// Blocking text-output variant — kept for reference while streaming is validated.
@@ -1220,9 +1241,40 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     }
 
     private enum RunResult {
-        case success(String, ClaudeStreamParser.Usage?)
+        case success(String, SummaryRunMetrics?)
         case usageLimited(ClaudeUsageLimit.Trip)
         case failure(reason: String, setupIssue: SetupIssue?)
+    }
+
+    private nonisolated static func withWallClock(_ start: UInt64,
+                                                  _ result: RunResult,
+                                                  model: String) -> RunResult {
+        let wall = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
+        switch result {
+        case .success(let text, var metrics):
+            if var m = metrics {
+                m.wallClock = wall
+                if m.model.isEmpty { m.model = model }
+                return .success(text, m)
+            }
+            return .success(text, SummaryRunMetrics(wallClock: wall, model: model))
+        default:
+            return result
+        }
+    }
+
+    /// Reconstruct Claude usage for `ClaudeUsageStore` from neutral metrics.
+    private nonisolated static func claudeUsage(from metrics: SummaryRunMetrics) -> ClaudeStreamParser.Usage? {
+        guard metrics.inputTokens > 0 || metrics.outputTokens > 0 || metrics.reportedCostUSD != nil else {
+            return nil
+        }
+        return ClaudeStreamParser.Usage(
+            inputTokens: metrics.inputTokens,
+            outputTokens: metrics.outputTokens,
+            cacheCreationTokens: metrics.cacheWriteTokens,
+            cacheReadTokens: metrics.cacheReadTokens,
+            costUSD: metrics.reportedCostUSD
+        )
     }
 
     /// A failure that maps to a CLI connection problem the user can fix, so the
@@ -1285,7 +1337,26 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             AppLog.log("Summary: commit write failed — \(error.localizedDescription)", category: "summary")
             return nil
         }
-        let moved = store.moveToProcessed(item, notePath: noteURL.path)
+        return finishFiling(item: item, noteURL: noteURL, destination: dest,
+                            alreadyProcessed: item.isProcessed)
+    }
+
+    /// Everything that happens once the note content is written: move/relink,
+    /// clear staging + queue state, reclaim audio. Shared by both commit paths.
+    @discardableResult
+    private func finishFiling(item: TranscriptItem,
+                              noteURL: URL,
+                              destination: String,
+                              alreadyProcessed: Bool,
+                              logMessage: String? = nil) -> URL {
+        let dest = destination.trimmingCharacters(in: .whitespaces)
+        let moved: URL
+        if alreadyProcessed {
+            moved = item.url
+            TranscriptWriter.updateFrontmatter(at: moved) { $0.note = noteURL.path; $0.filing = dest }
+        } else {
+            moved = store.moveToProcessed(item, notePath: noteURL.path)
+        }
         // Reverse link only: the filed note already embeds the raw transcript inline.
         crossLinkSummaryOntoRaw(summaryURL: noteURL, rawURL: moved)
         // Remove every backend's staging file for this transcript (dual-staging + legacy).
@@ -1309,7 +1380,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             AppLog.log("Summary: deleted session audio after filing", category: "summary")
         }
 
-        AppLog.log("Summary: committed \(noteURL.lastPathComponent) → \(dest.isEmpty ? "(vault root)" : dest)", category: "summary")
+        let msg = logMessage ?? "committed \(noteURL.lastPathComponent) → \(dest.isEmpty ? "(vault root)" : dest)"
+        AppLog.log("Summary: \(msg)", category: "summary")
         store.refresh()
         return noteURL
     }

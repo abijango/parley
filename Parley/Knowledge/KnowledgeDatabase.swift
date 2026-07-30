@@ -117,7 +117,10 @@ final class KnowledgeDatabase: @unchecked Sendable {
         }
         // Existing installs created terminology without `scope` — add it if missing.
         _ = sqlite3_exec(db, "ALTER TABLE terminology ADD COLUMN scope TEXT NOT NULL DEFAULT '';", nil, nil, nil)
-        setMeta(key: "schema_version", value: "2")
+        _ = sqlite3_exec(db, "ALTER TABLE summary_runs ADD COLUMN pipeline TEXT NOT NULL DEFAULT 'v2';", nil, nil, nil)
+        _ = sqlite3_exec(db, "ALTER TABLE summary_runs ADD COLUMN writer_metrics_json TEXT NOT NULL DEFAULT '';", nil, nil, nil)
+        _ = sqlite3_exec(db, "ALTER TABLE summary_runs ADD COLUMN checker_metrics_json TEXT NOT NULL DEFAULT '';", nil, nil, nil)
+        setMeta(key: "schema_version", value: "3")
     }
 
     func setMeta(key: String, value: String) {

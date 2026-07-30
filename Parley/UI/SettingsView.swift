@@ -196,7 +196,7 @@ struct SettingsView: View {
             Section("Meeting summaries") {
                 helpText("After a recording's speakers are assigned, a summary is written in the background. When it's ready, review it in History → \"Review\", set where it's filed, then commit it to your vault. The filed note includes the raw transcript at the bottom.")
                 SettingRow("Pipeline",
-                           description: "Classic runs one backend. Summary v2 runs a writer then a checker that proposes structured edits for markup review.") {
+                           description: "Summary v1 runs one backend. Summary v2 runs a writer then a checker that proposes structured edits for markup review.") {
                     Picker("", selection: $settings.summaryPipelineRaw) {
                         ForEach(SummaryPipeline.allCases) { p in
                             Text(p.label).tag(p.rawValue)

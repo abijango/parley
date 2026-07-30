@@ -183,6 +183,12 @@ struct HistoryView: View {
         staged.lastPathComponent.hasSuffix(".v2.md")
     }
 
+    private func classicMetricsLine(for item: TranscriptItem) -> (text: String, help: String)? {
+        guard let run = SummaryRunStore().runs(forTranscriptID: item.url.path)
+            .first(where: { $0.pipeline == .classic }) else { return nil }
+        return SummaryMetricsFormat.compactLine(metrics: run.writerMetrics)
+    }
+
     private func updateContentSearch() {
         rowIndex.updateContentSearch(
             query: searchQuery,
@@ -520,6 +526,12 @@ struct HistoryView: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.small) {
                 Text("Summary ready — review, set where it's filed, then commit to your vault.")
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                if let metrics = classicMetricsLine(for: item) {
+                    Text(metrics.text)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(.secondary)
+                        .help(metrics.help)
+                }
                 if item.stagedSummaries.count > 1 {
                     Picker("Compare", selection: Binding(
                         get: { reviewStagedURL ?? staged },

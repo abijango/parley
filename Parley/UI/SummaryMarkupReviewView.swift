@@ -31,11 +31,27 @@ struct SummaryMarkupReviewView: View {
     private let terminologyStore = TerminologyStore()
 
     private var runs: [SummaryRunRecord] {
-        runStore.runs(forTranscriptID: item.url.path)
+        runStore.runs(forTranscriptID: item.url.path).filter { $0.pipeline == .v2 }
     }
 
     private var customerScope: String {
         TerminologyStore.customerScope(fromFiling: reviewDestination.isEmpty ? item.meta.filing : reviewDestination)
+    }
+
+    private var v2MetricsLine: (text: String, help: String)? {
+        guard let run = selectedRun ?? runs.first else { return nil }
+        let line = SummaryMetricsFormat.compactLine(writer: run.writerMetrics, checker: run.checkerMetrics)
+        guard let line else { return nil }
+        if let breakdown = SummaryMetricsFormat.legBreakdown(writer: run.writerMetrics,
+                                                            checker: run.checkerMetrics) {
+            return (line.text, "\(breakdown)\n\n\(line.help)")
+        }
+        return line
+    }
+
+    private var selectedRun: SummaryRunRecord? {
+        guard let id = selectedRunID ?? runs.first?.id else { return nil }
+        return runs.first(where: { $0.id == id })
     }
 
     private var pendingCount: Int { hunks.filter { $0.status == .pending }.count }
@@ -100,6 +116,12 @@ struct SummaryMarkupReviewView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 200)
+            }
+            if let metrics = v2MetricsLine {
+                Text(metrics.text)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(.secondary)
+                    .help(metrics.help)
             }
             if runs.count > 1 {
                 Picker("Run history", selection: Binding(
@@ -385,7 +407,11 @@ struct SummaryMarkupReviewView: View {
         let df = DateFormatter()
         df.dateStyle = .short
         df.timeStyle = .short
-        return "\(df.string(from: run.createdAt)) — \(run.writerBackend) → \(run.checkerBackend)"
+        var label = "\(df.string(from: run.createdAt)) — \(run.writerBackend) → \(run.checkerBackend)"
+        if let suffix = SummaryMetricsFormat.durationSuffix(for: run) {
+            label += suffix
+        }
+        return label
     }
 
     private func loadLatestRun() {

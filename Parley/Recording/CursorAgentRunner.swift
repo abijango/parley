@@ -75,6 +75,10 @@ enum CursorAgentRunner {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .unparseable
         }
+        return parseJSONResult(obj)
+    }
+
+    private static func parseJSONResult(_ obj: [String: Any]) -> JSONResult {
         if let isError = obj["is_error"] as? Bool, isError {
             let msg = (obj["result"] as? String)
                 ?? (obj["message"] as? String)
@@ -97,16 +101,42 @@ enum CursorAgentRunner {
         return .unparseable
     }
 
+    /// Extracts the last `{…}` JSON object from agent stdout (log lines may precede it).
+    static func lastJSONObjectData(stdout: String) -> Data? {
+        let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = trimmed.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data)) != nil {
+            return data
+        }
+        guard let start = trimmed.lastIndex(of: "{") else { return nil }
+        return String(trimmed[start...]).data(using: .utf8)
+    }
+
+    /// Per-leg usage from a Cursor agent JSON payload. Nil when no `usage` object is present.
+    static func parseUsage(_ data: Data) -> SummaryRunMetrics? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let usage = obj["usage"] as? [String: Any] else { return nil }
+        var m = SummaryRunMetrics()
+        m.inputTokens = usage["inputTokens"] as? Int ?? 0
+        m.outputTokens = usage["outputTokens"] as? Int ?? 0
+        m.cacheReadTokens = usage["cacheReadTokens"] as? Int ?? 0
+        m.cacheWriteTokens = usage["cacheWriteTokens"] as? Int ?? 0
+        if let apiMS = obj["duration_api_ms"] as? Int { m.apiDurationMS = apiMS }
+        if let model = obj["model"] as? String { m.model = model }
+        return m
+    }
+
+    static func parseUsage(stdout: String) -> SummaryRunMetrics? {
+        guard let data = lastJSONObjectData(stdout: stdout) else { return nil }
+        return parseUsage(data)
+    }
+
     static func parseJSONResult(stdout: String) -> JSONResult {
-        // Agent may print a log line before JSON — take the last `{…}` object.
         let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         if let data = trimmed.data(using: .utf8), case let r = parseJSONResult(data), r != .unparseable {
             return r
         }
-        if let start = trimmed.lastIndex(of: "{"),
-           let data = String(trimmed[start...]).data(using: .utf8) {
-            return parseJSONResult(data)
-        }
-        return .unparseable
+        guard let data = lastJSONObjectData(stdout: stdout) else { return .unparseable }
+        return parseJSONResult(data)
     }
 }

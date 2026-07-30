@@ -47,17 +47,46 @@ struct SummaryHunk: Identifiable, Equatable, Codable, Sendable {
     }
 }
 
-/// Persisted Summary v2 pipeline run (writer draft + checker output).
+/// Persisted summary pipeline run (classic single-backend or v2 writer + checker).
 struct SummaryRunRecord: Identifiable, Equatable, Codable, Sendable {
     let id: String
     let transcriptID: String
     let transcriptPath: String
     let createdAt: Date
+    let pipeline: SummaryPipeline
     let writerBackend: String
     let checkerBackend: String
     let draftMarkdown: String
     let checkerRaw: String
     let checkerParseOK: Bool
+    var writerMetrics: SummaryRunMetrics?
+    var checkerMetrics: SummaryRunMetrics?
+
+    init(id: String,
+         transcriptID: String,
+         transcriptPath: String,
+         createdAt: Date,
+         pipeline: SummaryPipeline = .v2,
+         writerBackend: String,
+         checkerBackend: String,
+         draftMarkdown: String,
+         checkerRaw: String = "",
+         checkerParseOK: Bool = false,
+         writerMetrics: SummaryRunMetrics? = nil,
+         checkerMetrics: SummaryRunMetrics? = nil) {
+        self.id = id
+        self.transcriptID = transcriptID
+        self.transcriptPath = transcriptPath
+        self.createdAt = createdAt
+        self.pipeline = pipeline
+        self.writerBackend = writerBackend
+        self.checkerBackend = checkerBackend
+        self.draftMarkdown = draftMarkdown
+        self.checkerRaw = checkerRaw
+        self.checkerParseOK = checkerParseOK
+        self.writerMetrics = writerMetrics
+        self.checkerMetrics = checkerMetrics
+    }
 }
 
 /// Segment for markup decoration in the review pane.

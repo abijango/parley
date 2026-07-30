@@ -119,4 +119,38 @@ enum GrokRunner {
         // Grok may print a trailing newline; trim is fine for JSONSerialization.
         return parseJSONResult(data)
     }
+
+    /// Per-leg usage from a Grok JSON payload. Nil when no `usage` object is present.
+    static func parseUsage(_ data: Data) -> SummaryRunMetrics? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let modelUsage = obj["modelUsage"] as? [String: Any],
+           let entry = modelUsage.first,
+           let usage = entry.value as? [String: Any] {
+            var m = metricsFromGrokUsage(usage)
+            m.model = entry.key
+            if let flat = obj["usage"] as? [String: Any] {
+                m.reasoningTokens = flat["reasoning_tokens"] as? Int ?? m.reasoningTokens
+            }
+            return m
+        }
+        guard let usage = obj["usage"] as? [String: Any] else { return nil }
+        return metricsFromGrokUsage(usage)
+    }
+
+    static func parseUsage(stdout: String) -> SummaryRunMetrics? {
+        guard let data = stdout.data(using: .utf8) else { return nil }
+        return parseUsage(data)
+    }
+
+    private static func metricsFromGrokUsage(_ usage: [String: Any]) -> SummaryRunMetrics {
+        var m = SummaryRunMetrics()
+        m.inputTokens = usage["input_tokens"] as? Int ?? usage["inputTokens"] as? Int ?? 0
+        m.outputTokens = usage["output_tokens"] as? Int ?? usage["outputTokens"] as? Int ?? 0
+        m.cacheReadTokens = usage["cache_read_input_tokens"] as? Int
+            ?? usage["cacheReadInputTokens"] as? Int ?? 0
+        m.reasoningTokens = usage["reasoning_tokens"] as? Int ?? 0
+        return m
+    }
 }
