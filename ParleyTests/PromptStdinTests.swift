@@ -32,7 +32,7 @@ final class PromptStdinTests: XCTestCase {
         let built = try CursorAgentRunner.makeRawSummaryProcess(
             binaryPath: bin.path, prompt: secret, model: "composer-2.5")
         let args = built.process.arguments ?? []
-        XCTAssertTrue(args.contains(secret), "cursor agent -p takes the prompt as a positional argument, not stdin")
+        XCTAssertTrue(args.contains(secret))
         XCTAssertFalse(args.contains(PromptStdin.argvPlaceholder))
     }
 
@@ -43,7 +43,7 @@ final class PromptStdinTests: XCTestCase {
         let built = try CursorAgentRunner.makeVisionProcess(
             binaryPath: bin.path, prompt: secret, model: "composer-2.5", vaultPath: "/tmp")
         let args = built.process.arguments ?? []
-        XCTAssertTrue(args.contains(secret), "cursor agent -p takes the prompt as a positional argument, not stdin")
+        XCTAssertTrue(args.contains(secret))
         XCTAssertFalse(args.contains(PromptStdin.argvPlaceholder))
     }
 
