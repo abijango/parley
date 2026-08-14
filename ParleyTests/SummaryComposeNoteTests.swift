@@ -54,7 +54,9 @@ final class SummaryComposeNoteTests: XCTestCase {
         """
         let note = SummaryService.composeNote(
             item: sampleItem(), destination: "Engineering",
-            body: body, transcriptSource: transcriptSource)
+            body: body, transcriptSource: transcriptSource,
+            noteURL: URL(fileURLWithPath: "/tmp/2026-04-01 - Stand-up.md"),
+            vault: URL(fileURLWithPath: "/tmp/vault"))
 
         XCTAssertTrue(note.contains("source: parley-summary"))
         XCTAssertTrue(note.contains("## Executive Summary"))
@@ -78,7 +80,9 @@ final class SummaryComposeNoteTests: XCTestCase {
         """
         let note = SummaryService.composeNote(
             item: sampleItem(), destination: "",
-            body: body, transcriptSource: transcriptSource)
+            body: body, transcriptSource: transcriptSource,
+            noteURL: URL(fileURLWithPath: "/tmp/2026-04-01 - Stand-up.md"),
+            vault: URL(fileURLWithPath: "/tmp/vault"))
 
         let count = note.components(separatedBy: "## Raw Transcript").count - 1
         XCTAssertEqual(count, 1)

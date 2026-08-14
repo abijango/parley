@@ -35,4 +35,15 @@ final class SegmentPublishRelayTests: XCTestCase {
 
         XCTAssertTrue(published)
     }
+
+    func testVolatileSubmitDoesNotBypassThrottle() {
+        var publishCount = 0
+        let relay = SegmentPublishRelay { _ in publishCount += 1 }
+        let seg = Segment(track: .remote, start: 0, end: 1, text: "hi", confirmed: false)
+
+        relay.submit([seg], immediate: false)
+        relay.submit([seg], immediate: false)
+
+        XCTAssertEqual(publishCount, 1, "volatile ticks must coalesce; only confirms use immediate")
+    }
 }

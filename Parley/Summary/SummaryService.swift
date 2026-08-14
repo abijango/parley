@@ -49,6 +49,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     private var backoffAttempt = 0
     private var lastSummaryStartedAt: Date?
     private var resumeTask: Task<Void, Never>?
+    private var runningProcessHandle = ProcessHandle()
+    private var preemptRequested = false
 
     /// Injected: only run a summary while the app is idle (no live recording), so a
     /// background Claude subprocess never competes with an active call. Pending jobs
@@ -261,6 +263,34 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         store.refresh()
     }
 
+    /// Vision-only pass over a transcript's image attachments. Caches digest on disk.
+    enum DescribeAttachmentsResult {
+        case success(String)
+        case failure(String)
+    }
+
+    func describeAttachments(for item: TranscriptItem, forceRefresh: Bool = true) -> DescribeAttachmentsResult {
+        let settings = AppSettings.shared
+        let attachments = item.meta.attachments
+        guard !attachments.isEmpty else { return .failure("No attachments on this meeting.") }
+        guard settings.attachmentUnderstanding == .vision else {
+            return .failure("Enable Vision in Settings → Summary → Attachments.")
+        }
+        guard settings.attachmentVisionBackend.isCursorAgent else {
+            return .failure("Set a Cursor agent backend for attachment vision in Settings.")
+        }
+        guard let digest = AttachmentVisionService.digest(
+            transcriptURL: item.url,
+            vault: settings.vaultURL,
+            understanding: settings.attachmentUnderstanding,
+            visionBackend: settings.attachmentVisionBackend,
+            cursorBinary: settings.cursorBinaryPath,
+            forceRefresh: forceRefresh) else {
+            return .failure("Vision pass failed or returned no output. Check Settings → Summary and try again.")
+        }
+        return .success(digest)
+    }
+
     // MARK: Queue control (ProcessingQueue)
 
     /// Queued (not-yet-running) summaries, in run order.
@@ -336,6 +366,32 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     /// review finished). No-op while recording — the gate inside `runNext` holds.
     func runNextIfIdle() { runNext() }
 
+    /// Live capture is about to take the machine. Kill the CLI and park the job.
+    func yieldToLiveRecording() {
+        guard isRunning else { return }
+        preemptRequested = true
+        runningProcessHandle.terminate()
+    }
+
+    /// True when this completion should requeue instead of committing success or failure.
+    @discardableResult
+    private func parkIfPreempted(_ item: TranscriptItem) -> Bool {
+        guard preemptRequested || !isIdle() else { return false }
+        if !queue.contains(where: { $0.id == item.id }) {
+            queue.insert(item, at: 0)
+        }
+        jobs[item.id] = .pending(since: Date())
+        setSummaryStatus(.queued, for: item)
+        isRunning = false
+        runningID = nil
+        runningActivity = nil
+        preemptRequested = false
+        runningProcessHandle = ProcessHandle()
+        AppLog.log("Summary: parked for live recording — \(item.url.lastPathComponent)", category: "summary")
+        store.refresh()
+        return true
+    }
+
     /// Pump the queue after a min-interval pacing delay.
     private func schedulePump(after delay: TimeInterval) {
         Task { [weak self] in
@@ -373,24 +429,19 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             }
         }()
         setSummaryStatus(.running, for: item)
-        let built = SummaryPromptBuilder.build(
-            template: settings.summaryPromptTemplate,
-            transcriptURL: item.url,
-            attendees: item.meta.attendees.joined(separator: ", "),
-            destination: item.meta.filing,
-            contactsURL: settings.contactsURL,
-            contactsFromDB: settings.contactsUseKnowledgeDB ? PeopleStore().contacts() : nil,
-            terminologyBlock: {
-                let scope = TerminologyStore.customerScope(fromFiling: item.meta.filing)
-                let t = SummaryPromptBuilder.terminologyBlock(filingScope: scope)
-                return t.isEmpty ? nil : t
-            }()
-        )
+        let vault = settings.vaultURL
+        let attachmentUnderstanding = settings.attachmentUnderstanding
+        let visionBackend = settings.attachmentVisionBackend
+        let cursorBinary = settings.cursorBinaryPath
+        let summaryPromptTemplate = settings.summaryPromptTemplate
+        let contactsURL = settings.contactsURL
+        let terminologyScope = TerminologyStore.customerScope(fromFiling: item.meta.filing)
+        let terminology = SummaryPromptBuilder.terminologyBlock(filingScope: terminologyScope)
+        let dbContacts = settings.contactsUseKnowledgeDB ? PeopleStore().contacts() : nil
         let claudeBinary = settings.claudeBinaryPath
         let claudeModel = settings.claudeModel
         let grokBinary = settings.grokBinaryPath
         let grokModel = settings.grokModel
-        let cursorBinary = settings.cursorBinaryPath
         let staged = Self.stagingURL(for: item.url, backend: backend)
         let failureTrip = settings.summaryFailureTripThreshold
         let backendLabel = backend.displayName
@@ -405,7 +456,30 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }()
         AppLog.log("Summary: started for \(item.url.lastPathComponent) (backend=\(backend.rawValue), model=\(modelLabel))", category: "summary")
 
+        let handle = ProcessHandle()
+        runningProcessHandle = handle
+        preemptRequested = false
         Task.detached(priority: .userInitiated) { [weak self] in
+            await MainActor.run { [weak self] in
+                if attachmentUnderstanding == .vision, !item.meta.attachments.isEmpty {
+                    self?.runningActivity = "Analyzing attachments…"
+                }
+            }
+            let vision = AttachmentVisionService.digest(
+                transcriptURL: item.url, vault: vault,
+                understanding: attachmentUnderstanding,
+                visionBackend: visionBackend,
+                cursorBinary: cursorBinary)
+            let built = SummaryPromptBuilder.build(
+                template: summaryPromptTemplate,
+                transcriptURL: item.url,
+                attendees: item.meta.attendees.joined(separator: ", "),
+                destination: item.meta.filing,
+                contactsURL: contactsURL,
+                contactsFromDB: dbContacts,
+                terminologyBlock: terminology.isEmpty ? nil : terminology,
+                visionDigest: vision,
+                attachmentUnderstanding: attachmentUnderstanding)
             let runStart = DispatchTime.now().uptimeNanoseconds
             let result: RunResult
             switch backend {
@@ -413,26 +487,31 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 result = Self.runClaudeStreaming(binary: claudeBinary, prompt: built.prompt, model: claudeModel,
                     onActivity: { line in
                         Task { @MainActor [weak self] in self?.runningActivity = line }
-                    })
+                    }, processHandle: handle)
             case .grok:
                 Task { @MainActor [weak self] in self?.runningActivity = "Grok is writing…" }
-                result = Self.runGrok(binary: grokBinary, prompt: built.prompt, model: grokModel)
+                result = Self.runGrok(binary: grokBinary, prompt: built.prompt, model: grokModel, processHandle: handle)
             case .local:
                 result = await Self.runLocal(prompt: built.prompt, model: modelLabel) { line in
                     Task { @MainActor [weak self] in self?.runningActivity = line }
                 }
             case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
                 Task { @MainActor [weak self] in self?.runningActivity = "\(backend.displayName) is writing…" }
-                result = Self.runCursorAgent(binary: cursorBinary, prompt: built.prompt, model: backend.rawValue)
+                result = Self.runCursorAgent(binary: cursorBinary, prompt: built.prompt, model: backend.rawValue, processHandle: handle)
             }
             let timed = Self.withWallClock(runStart, result, model: modelLabel)
+            let attachments = item.meta.attachments
             await MainActor.run {
                 guard let self else { return }
+                if self.parkIfPreempted(item) { return }
                 switch timed {
                 case .success(let text, let metrics):
                     do {
+                        let body = Self.mergeVisionDiagrams(
+                            into: text, visionDigest: vision, attachments: attachments,
+                            item: item, vault: vault)
                         AppPaths.ensureDirectory(staged.deletingLastPathComponent())
-                        try text.write(to: staged, atomically: true, encoding: .utf8)
+                        try body.write(to: staged, atomically: true, encoding: .utf8)
                         self.jobs[item.id] = nil
                         self.setSummaryStatus(.done, for: item)
                         self.consecutiveFailures = 0
@@ -523,18 +602,12 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     private func runV2(item: TranscriptItem, settings: AppSettings) {
         runningActivity = "Starting writer (\(settings.summaryWriterBackend.displayName))…"
         setSummaryStatus(.running, for: item)
+        let vault = settings.vaultURL
+        let attachmentUnderstanding = settings.attachmentUnderstanding
+        let visionBackend = settings.attachmentVisionBackend
         let terminology = SummaryPromptBuilder.terminologyBlock(
             filingScope: TerminologyStore.customerScope(fromFiling: item.meta.filing))
         let dbContacts = settings.contactsUseKnowledgeDB ? PeopleStore().contacts() : nil
-        let built = SummaryPromptBuilder.build(
-            template: settings.summaryPromptTemplate,
-            transcriptURL: item.url,
-            attendees: item.meta.attendees.joined(separator: ", "),
-            destination: item.meta.filing,
-            contactsURL: settings.contactsURL,
-            contactsFromDB: dbContacts,
-            terminologyBlock: terminology.isEmpty ? nil : terminology
-        )
         let writer = settings.summaryWriterBackend
         let checker = settings.summaryCheckerBackend
         let staged = Self.v2StagingURL(for: item.url)
@@ -544,15 +617,42 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let grokBinary = settings.grokBinaryPath
         let grokModel = settings.grokModel
         let cursorBinary = settings.cursorBinaryPath
+        let summaryPromptTemplate = settings.summaryPromptTemplate
+        let contactsURL = settings.contactsURL
         let transcriptText = SummaryPromptBuilder.readTranscript(item.url)
-        let contactsText = SummaryPromptBuilder.readContacts(settings.contactsURL,
+        let contactsText = SummaryPromptBuilder.readContacts(contactsURL,
                                                              dbContacts: dbContacts)
         let attendeesText = SummaryPromptBuilder.annotate(
             attendees: item.meta.attendees.joined(separator: ", "),
             contacts: SummaryPromptBuilder.parseContactsList(contactsText))
         let checkerInstructions = settings.summaryCheckerPromptTemplate
+        let attachmentCaptions = MeetingAttachmentStore.promptBlock(attachments: item.meta.attachments)
 
+        let handle = ProcessHandle()
+        runningProcessHandle = handle
+        preemptRequested = false
         Task.detached(priority: .userInitiated) { [weak self] in
+            await MainActor.run { [weak self] in
+                if attachmentUnderstanding == .vision, !item.meta.attachments.isEmpty {
+                    self?.runningActivity = "Analyzing attachments…"
+                }
+            }
+            let vision = AttachmentVisionService.digest(
+                transcriptURL: item.url, vault: vault,
+                understanding: attachmentUnderstanding,
+                visionBackend: visionBackend,
+                cursorBinary: cursorBinary)
+            let built = SummaryPromptBuilder.build(
+                template: summaryPromptTemplate,
+                transcriptURL: item.url,
+                attendees: item.meta.attendees.joined(separator: ", "),
+                destination: item.meta.filing,
+                contactsURL: contactsURL,
+                contactsFromDB: dbContacts,
+                terminologyBlock: terminology.isEmpty ? nil : terminology,
+                visionDigest: vision,
+                attachmentUnderstanding: attachmentUnderstanding)
+
             await MainActor.run { [weak self] in
                 self?.runningActivity = "Writer is drafting…"
             }
@@ -564,6 +664,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     claudeBinary: claudeBinary, claudeModel: claudeModel,
                     grokBinary: grokBinary, grokModel: grokModel,
                     cursorBinary: cursorBinary,
+                    processHandle: handle,
                     onActivity: { line in Task { @MainActor [weak self] in self?.runningActivity = line } }
                 ),
                 model: writer.rawValue
@@ -574,6 +675,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             case .usageLimited(let trip):
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    if self.parkIfPreempted(item) { return }
                     self.queue.insert(item, at: 0)
                     self.jobs[item.id] = .pending(since: Date())
                     self.setSummaryStatus(.paused, for: item)
@@ -603,6 +705,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 attendees: attendeesText,
                 destination: item.meta.filing,
                 terminologyBlock: terminology,
+                visionDigest: vision,
+                attachmentCaptions: attachmentCaptions,
                 instructions: checkerInstructions
             )
             let checkerStart = DispatchTime.now().uptimeNanoseconds
@@ -613,6 +717,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     claudeBinary: claudeBinary, claudeModel: claudeModel,
                     grokBinary: grokBinary, grokModel: grokModel,
                     cursorBinary: cursorBinary,
+                    processHandle: handle,
                     onActivity: { _ in }
                 ),
                 model: checker.rawValue
@@ -648,10 +753,16 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             )
             SummaryRunStore().insertRun(run, hunks: hunks)
             let preview = SummaryHunkEngine.mergedMarkdown(draft: draft, hunks: hunks)
-            let stagedBody = preview.isEmpty ? draft : preview
+            let stagedBody = Self.mergeVisionDiagrams(
+                into: preview.isEmpty ? draft : preview,
+                visionDigest: vision,
+                attachments: item.meta.attachments,
+                item: item,
+                vault: vault)
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                if self.parkIfPreempted(item) { return }
                 do {
                     AppPaths.ensureDirectory(staged.deletingLastPathComponent())
                     try stagedBody.write(to: staged, atomically: true, encoding: .utf8)
@@ -678,6 +789,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     private func finishFailure(item: TranscriptItem, reason: String, setupIssue: SetupIssue?,
                                backend: SummaryBackend, failureTrip: Int) {
+        if parkIfPreempted(item) { return }
         jobs[item.id] = .failed(reason)
         setSummaryStatus(.failed, for: item)
         consecutiveFailures += 1
@@ -723,17 +835,18 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         grokBinary: String,
         grokModel: String,
         cursorBinary: String,
+        processHandle: ProcessHandle? = nil,
         onActivity: @escaping @Sendable (String) -> Void
     ) -> RunResult {
         switch backend {
         case .claude:
-            return runClaudeStreaming(binary: claudeBinary, prompt: prompt, model: claudeModel, onActivity: onActivity)
+            return runClaudeStreaming(binary: claudeBinary, prompt: prompt, model: claudeModel, onActivity: onActivity, processHandle: processHandle)
         case .grok:
-            return runGrok(binary: grokBinary, prompt: prompt, model: grokModel)
+            return runGrok(binary: grokBinary, prompt: prompt, model: grokModel, processHandle: processHandle)
         case .local:
             return .failure(reason: "Local Qwen is not supported in the v2 writer/checker roles yet.", setupIssue: nil)
         case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
-            return runCursorAgent(binary: cursorBinary, prompt: prompt, model: backend.rawValue)
+            return runCursorAgent(binary: cursorBinary, prompt: prompt, model: backend.rawValue, processHandle: processHandle)
         }
     }
 
@@ -795,7 +908,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         binary: String,
         prompt: String,
         model: String,
-        onActivity: @escaping @Sendable (String) -> Void
+        onActivity: @escaping @Sendable (String) -> Void,
+        processHandle: ProcessHandle? = nil
     ) -> RunResult {
         let built: (process: Process, stdout: Pipe, stderr: Pipe)
         do {
@@ -810,6 +924,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }
         do { try built.process.run() }
         catch { return .failure(reason: "Failed to launch claude: \(error.localizedDescription)", setupIssue: nil) }
+        processHandle?.set(built.process)
 
         // Watchdog: terminate the process if it overruns the cap. Terminating closes the
         // write-end of the pipe, so availableData returns empty and the read loop exits
@@ -929,7 +1044,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     /// Runs `grok -p` with `--output-format json`, parsing the final `.text` field as
     /// the staged note body. Same timeout / usage-limit / auth classification as Claude.
-    private nonisolated static func runGrok(binary: String, prompt: String, model: String) -> RunResult {
+    private nonisolated static func runGrok(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> RunResult {
         let built: (process: Process, stdout: Pipe, stderr: Pipe)
         do {
             built = try GrokRunner.makeRawSummaryProcess(binaryPath: binary, prompt: prompt, model: model)
@@ -943,6 +1058,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }
         do { try built.process.run() }
         catch { return .failure(reason: "Failed to launch grok: \(error.localizedDescription)", setupIssue: nil) }
+        processHandle?.set(built.process)
 
         let flag = TimeoutFlag()
         let watchdog = DispatchWorkItem {
@@ -1019,7 +1135,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     }
 
     /// Runs `cursor agent -p --mode ask --output-format json` for Composer / Cursor Grok models.
-    private nonisolated static func runCursorAgent(binary: String, prompt: String, model: String) -> RunResult {
+    private nonisolated static func runCursorAgent(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> RunResult {
         let built: (process: Process, stdout: Pipe, stderr: Pipe)
         do {
             built = try CursorAgentRunner.makeRawSummaryProcess(binaryPath: binary, prompt: prompt, model: model)
@@ -1033,6 +1149,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }
         do { try built.process.run() }
         catch { return .failure(reason: "Failed to launch cursor agent: \(error.localizedDescription)", setupIssue: nil) }
+        processHandle?.set(built.process)
 
         let flag = TimeoutFlag()
         let watchdog = DispatchWorkItem {
@@ -1133,24 +1250,24 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     /// Thin wrappers used by `SummaryComparison` so the compare window and the queue
     /// share the same CLI invocation + parsing.
-    nonisolated static func runClaudeForCompare(binary: String, prompt: String, model: String) -> CompareGenerateResult {
-        switch runClaudeStreaming(binary: binary, prompt: prompt, model: model, onActivity: { _ in }) {
+    nonisolated static func runClaudeForCompare(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> CompareGenerateResult {
+        switch runClaudeStreaming(binary: binary, prompt: prompt, model: model, onActivity: { _ in }, processHandle: processHandle) {
         case .success(let text, _): return .ok(text)
         case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
         case .failure(let reason, _): return .failed(reason)
         }
     }
 
-    nonisolated static func runGrokForCompare(binary: String, prompt: String, model: String) -> CompareGenerateResult {
-        switch runGrok(binary: binary, prompt: prompt, model: model) {
+    nonisolated static func runGrokForCompare(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> CompareGenerateResult {
+        switch runGrok(binary: binary, prompt: prompt, model: model, processHandle: processHandle) {
         case .success(let text, _): return .ok(text)
         case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
         case .failure(let reason, _): return .failed(reason)
         }
     }
 
-    nonisolated static func runCursorForCompare(binary: String, prompt: String, model: String) -> CompareGenerateResult {
-        switch runCursorAgent(binary: binary, prompt: prompt, model: model) {
+    nonisolated static func runCursorForCompare(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> CompareGenerateResult {
+        switch runCursorAgent(binary: binary, prompt: prompt, model: model, processHandle: processHandle) {
         case .success(let text, _): return .ok(text)
         case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
         case .failure(let reason, _): return .failed(reason)
@@ -1185,7 +1302,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
         let transcriptText = (try? String(contentsOf: item.url, encoding: .utf8)) ?? ""
         let content = Self.composeNote(item: item, destination: dest, body: body,
-                                       transcriptSource: transcriptText)
+                                       transcriptSource: transcriptText, noteURL: noteURL, vault: vault)
         do {
             try content.write(to: noteURL, atomically: true, encoding: .utf8)
         } catch {
@@ -1330,7 +1447,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         // Read the raw transcript body before moving it to Processed/.
         let transcriptText = (try? String(contentsOf: item.url, encoding: .utf8)) ?? ""
         let content = Self.composeNote(item: item, destination: dest, body: body,
-                                       transcriptSource: transcriptText)
+                                       transcriptSource: transcriptText, noteURL: noteURL, vault: vault)
         do {
             try content.write(to: noteURL, atomically: true, encoding: .utf8)
         } catch {
@@ -1386,15 +1503,40 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         return noteURL
     }
 
+    /// Best-effort note path for relative attachment embeds before filing.
+    nonisolated static func prospectiveNoteURL(item: TranscriptItem, destination: String, vault: URL) -> URL {
+        if let existing = item.meta.note, !existing.isEmpty {
+            return URL(fileURLWithPath: existing)
+        }
+        let dest = destination.trimmingCharacters(in: .whitespaces)
+        let folder = dest.isEmpty ? vault : vault.appendingPathComponent(dest, isDirectory: true)
+        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
+        let safeTitle = item.meta.title.replacingOccurrences(of: "/", with: "-")
+        return folder.appendingPathComponent("\(df.string(from: item.meta.date)) - \(safeTitle).md")
+    }
+
+    /// Merges an enriched `## Diagrams` section when vision output is available.
+    nonisolated static func mergeVisionDiagrams(into draft: String,
+                                                visionDigest: String?,
+                                                attachments: [MeetingAttachment],
+                                                item: TranscriptItem,
+                                                vault: URL) -> String {
+        guard let visionDigest else { return draft }
+        let documentURL = prospectiveNoteURL(item: item, destination: item.meta.filing, vault: vault)
+        return AttachmentVisionService.mergeDiagrams(
+            into: draft, visionDigest: visionDigest, attachments: attachments,
+            documentURL: documentURL, vault: vault)
+    }
+
     /// Builds the filed note: YAML frontmatter + summary body + inline raw transcript.
     /// `transcriptSource` is the full transcript file text (frontmatter allowed); only the
     /// `## Transcript` / manual-notes sections are appended. Idempotent if `body` already
     /// contains a `## Raw Transcript` section (stripped first).
     nonisolated static func composeNote(item: TranscriptItem, destination: String, body: String,
-                            transcriptSource: String) -> String {
+                            transcriptSource: String, noteURL: URL, vault: URL) -> String {
         var summary = strippingRawTranscriptSection(body)
-        // Drop a leftover wiki-link footer from older commits.
         summary = strippingRawTranscriptWikiLink(summary)
+        summary = strippingAttachmentsSection(summary)
 
         let headed: String
         if summary.hasPrefix("---\n") || summary.hasPrefix("---\r\n") {
@@ -1412,6 +1554,16 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             headed = lines.joined(separator: "\n") + "\n\n" + summary.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        let sourceAttachments = TranscriptWriter.parseFrontmatter(text: transcriptSource)?.attachments
+            ?? item.meta.attachments
+        let filedAttachments = MeetingAttachmentStore.attachmentsForFiling(attachments: sourceAttachments)
+        var noteBody = headed
+        if !filedAttachments.isEmpty,
+           let section = MeetingAttachmentStore.renderSection(
+            attachments: filedAttachments, documentURL: noteURL, vault: vault) {
+            noteBody += "\n\n" + section
+        }
+
         let sections = TranscriptWriter.extractBodySections(text: transcriptSource)
         var appendix: [String] = ["", "---", "", "## Raw Transcript", ""]
         if let notes = sections.manualNotes, !notes.isEmpty {
@@ -1422,7 +1574,39 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }
         appendix.append(sections.transcript.isEmpty ? "_(no transcript text)_" : sections.transcript)
         appendix.append("")
-        return headed.trimmingCharacters(in: CharacterSet.newlines) + "\n" + appendix.joined(separator: "\n")
+        return noteBody.trimmingCharacters(in: CharacterSet.newlines) + "\n" + appendix.joined(separator: "\n")
+    }
+
+    nonisolated static func strippingAttachmentsSection(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        guard let idx = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == "## Attachments"
+        }) else { return text }
+        var end = idx + 1
+        while end < lines.count {
+            let t = lines[end].trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("## ") { break }
+            end += 1
+        }
+        var result = lines[..<idx] + lines[end...]
+        while result.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { result.removeLast() }
+        return result.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func strippingDiagramsSection(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        guard let idx = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == "## Diagrams"
+        }) else { return text }
+        var end = idx + 1
+        while end < lines.count {
+            let t = lines[end].trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("## ") { break }
+            end += 1
+        }
+        var result = lines[..<idx] + lines[end...]
+        while result.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { result.removeLast() }
+        return result.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Removes a trailing `## Raw Transcript` section (and the `---` rule above it, if any).

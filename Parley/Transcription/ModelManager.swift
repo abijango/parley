@@ -67,6 +67,16 @@ final class ModelManager: ObservableObject {
         guard UserDefaults.standard.bool(forKey: loadInProgressKey) else { return }
         AppLog.log("Previous model load didn't finish (likely a crash) — clearing compiled cache to recover", category: "model")
         clearCompiledCache()
+        markCompiledLoadFinished()
+    }
+
+    /// Shared with FluidAudio ANE warmup. A crash mid-specialize corrupts the same
+    /// `e5bundlecache`, so both loaders must set this sentinel.
+    static func markCompiledLoadInProgress() {
+        UserDefaults.standard.set(true, forKey: loadInProgressKey)
+    }
+
+    static func markCompiledLoadFinished() {
         UserDefaults.standard.set(false, forKey: loadInProgressKey)
     }
 
@@ -78,7 +88,7 @@ final class ModelManager: ObservableObject {
     /// ~150s cold re-specialization. Since cold specialization is slow enough
     /// that users routinely quit during it, that wipe was self-perpetuating.
     static func noteGracefulShutdown() {
-        UserDefaults.standard.set(false, forKey: loadInProgressKey)
+        markCompiledLoadFinished()
     }
 
     // MARK: Download management
@@ -226,7 +236,7 @@ final class ModelManager: ObservableObject {
             status = .loading(stage: "Preparing…", fraction: 0.05)
             // Sentinel: if we crash during the compute-graph load below, this
             // flag survives and the next launch clears the corrupt cache.
-            UserDefaults.standard.set(true, forKey: Self.loadInProgressKey)
+            ModelManager.markCompiledLoadInProgress()
             // If the model is already on disk, point WhisperKit straight at the
             // local folder so it never touches the network — even offline loads
             // succeed. When the model is absent we let WhisperKit download it
@@ -264,7 +274,7 @@ final class ModelManager: ObservableObject {
                 // during the loadModels() below only fails to map already-compiled
                 // weights into memory; it can't corrupt the cache, so it must not
                 // trigger a recovery wipe on the next launch.
-                UserDefaults.standard.set(false, forKey: Self.loadInProgressKey)
+                ModelManager.markCompiledLoadFinished()
             }
 
             let loadStart = Date()
@@ -275,11 +285,11 @@ final class ModelManager: ObservableObject {
             loadedModel = model
             loadedCompute = compute
             status = .ready
-            UserDefaults.standard.set(false, forKey: Self.loadInProgressKey)   // clean load completed
+            ModelManager.markCompiledLoadFinished()
             refreshDownloadedModels()
             return kit
         } catch {
-            UserDefaults.standard.set(false, forKey: Self.loadInProgressKey)
+            ModelManager.markCompiledLoadFinished()
             AppLog.log("Model \(model.rawValue) failed after \(Self.secs(overallStart))s: \(error.localizedDescription)", category: "model")
             status = .failed(error.localizedDescription)
             return nil

@@ -229,4 +229,21 @@ final class TranscriptFallbackAttributionTests: XCTestCase {
         XCTAssertEqual(changed, 1)
         XCTAssertTrue(out.contains("[00:00:00] Alice: hello"))
     }
+
+    func testTurnsHelperMapsFluidShapedTuples() {
+        let segs: [(speakerId: String, start: TimeInterval, end: TimeInterval)] = [
+            ("1", 0, 4), ("2", 4, 9),
+        ]
+        let turns = DiarizationAttribution.turns(from: segs)
+        XCTAssertEqual(turns.map(\.speakerId), ["1", "2"])
+        let body = "**[00:00:00] Remote:** hi\n**[00:00:05] Remote:** there"
+        let (out, changed) = TranscriptFallbackAttribution.relabel(
+            body: body,
+            turns: turns,
+            resolvedName: { $0 == "1" ? "Ada" : "Bob" }
+        )
+        XCTAssertEqual(changed, 2)
+        XCTAssertTrue(out.contains("Ada:"))
+        XCTAssertTrue(out.contains("Bob:"))
+    }
 }

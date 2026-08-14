@@ -156,6 +156,8 @@ final class SummaryComparison: ObservableObject {
 
     // MARK: Runs
 
+    private var processHandles: [SummaryBackend: ProcessHandle] = [:]
+
     /// Run every *enabled* backend (concurrent). Claude uses a live run even if seeded.
     func runAllEnabled() {
         for backend in enabledBackends {
@@ -171,12 +173,14 @@ final class SummaryComparison: ObservableObject {
         }
         runTokens[backend, default: 0] += 1
         let token = runTokens[backend]!
+        let handle = ProcessHandle()
+        processHandles[backend] = handle
         if backend == .claude { claudeSeedSource = nil }
         update(backend) { $0.state = .running; $0.markdown = ""; $0.elapsed = nil }
         bumpActive(+1)
         let prompt = buildPrompt(transcriptURL)
         Task.detached(priority: .userInitiated) { [weak self] in
-            let outcome = await Self.generate(backend: backend, prompt: prompt)
+            let outcome = await Self.generate(backend: backend, prompt: prompt, processHandle: handle)
             await MainActor.run {
                 guard let self, self.runTokens[backend] == token else { return }
                 switch outcome {
@@ -201,6 +205,8 @@ final class SummaryComparison: ObservableObject {
     }
 
     func cancelAll() {
+        for handle in processHandles.values { handle.terminate() }
+        processHandles.removeAll()
         for b in SummaryBackend.allCases {
             runTokens[b, default: 0] += 1
             if case .running = result(for: b).state {
@@ -241,7 +247,7 @@ final class SummaryComparison: ObservableObject {
     }
 
     /// Runs one backend off the main actor; measures wall time around the call.
-    private nonisolated static func generate(backend: SummaryBackend, prompt: String) async -> GenOutcome {
+    private nonisolated static func generate(backend: SummaryBackend, prompt: String, processHandle: ProcessHandle) async -> GenOutcome {
         let settings = await MainActor.run { (
             claudeBinary: AppSettings.shared.claudeBinaryPath,
             claudeModel: AppSettings.shared.claudeModel,
@@ -256,7 +262,8 @@ final class SummaryComparison: ObservableObject {
                 SummaryService.runClaudeForCompare(
                     binary: settings.claudeBinary,
                     prompt: prompt,
-                    model: settings.claudeModel)
+                    model: settings.claudeModel,
+                    processHandle: processHandle)
             }.value
             return map(r, start: start)
         case .grok:
@@ -264,7 +271,8 @@ final class SummaryComparison: ObservableObject {
                 SummaryService.runGrokForCompare(
                     binary: settings.grokBinary,
                     prompt: prompt,
-                    model: settings.grokModel)
+                    model: settings.grokModel,
+                    processHandle: processHandle)
             }.value
             return map(r, start: start)
         case .local:
@@ -288,7 +296,8 @@ final class SummaryComparison: ObservableObject {
                 SummaryService.runCursorForCompare(
                     binary: settings.cursorBinary,
                     prompt: prompt,
-                    model: model)
+                    model: model,
+                    processHandle: processHandle)
             }.value
             return map(r, start: start)
         }

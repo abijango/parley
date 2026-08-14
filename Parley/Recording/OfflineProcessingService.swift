@@ -35,6 +35,10 @@ final class OfflineProcessingService: ObservableObject {
 
     private var queue: [OfflineJob] = []
     private var isRunning = false
+    private var runningTask: Task<Void, Never>?
+    private var runningJob: OfflineJob?
+    private var attemptsBeforeRun = 0
+    private var preemptRequested = false
 
     private let models: ModelManager
     private let voiceprints: VoiceprintStore
@@ -97,6 +101,7 @@ final class OfflineProcessingService: ObservableObject {
         progress[job.id] = nil
         SessionStore.setOfflineStatus(.pending, transcriptPath: job.transcriptURL.path,
                                       presentReviewWhenDone: job.presentReviewWhenDone, in: job.sessionDir)
+        SessionStore.setTranscriptionEngine(job.engine, in: job.sessionDir)
         jobs[job.id] = .queued
         queue.append(job)
     }
@@ -105,7 +110,9 @@ final class OfflineProcessingService: ObservableObject {
     /// `.running` (crashed mid-pass). Re-running is safe (idempotent + coverage-guarded).
     func enqueuePendingFromDisk() {
         for (dir, m) in SessionStore.pendingOfflineSessions() {
-            guard let job = OfflineJob(dir: dir, manifest: m, autoSummarize: settings.autoRunClaude) else { continue }
+            guard let job = OfflineJob(dir: dir, manifest: m, autoSummarize: settings.autoRunClaude,
+                                       fallbackEngine: settings.transcriptionEngine,
+                                       fallbackAsrProfile: FluidAsrBinding.profile(from: settings)) else { continue }
             enqueue(job)
         }
         if !queue.isEmpty {
@@ -130,7 +137,18 @@ final class OfflineProcessingService: ObservableObject {
         let job = queue.removeFirst()
         jobs[job.id] = .running
         runningJobID = job.id
-        Task { await self.run(job) }
+        runningJob = job
+        preemptRequested = false
+        runningTask = Task { await self.run(job) }
+    }
+
+    /// Live capture is about to take the ANE. Cancel the detached offline worker
+    /// and park the job as `.pending` so it retries after the meeting, without
+    /// burning the retry budget or stamping `.done`.
+    func yieldToLiveRecording() {
+        guard isRunning else { return }
+        preemptRequested = true
+        runningTask?.cancel()
     }
 
     // MARK: Worker
@@ -141,7 +159,10 @@ final class OfflineProcessingService: ObservableObject {
             queue.insert(job, at: 0)
             jobs[job.id] = .queued
             runningJobID = nil
+            runningJob = nil
+            runningTask = nil
             isRunning = false
+            preemptRequested = false
             return
         }
         // Audio gone (e.g. filed + deleted) → permanent failure, surfaced in History.
@@ -162,9 +183,14 @@ final class OfflineProcessingService: ObservableObject {
             finishAndPump()
             return
         }
+        attemptsBeforeRun = prior
         SessionStore.setOfflineStatus(.running, attempts: prior + 1, in: job.sessionDir)
         jobs[job.id] = .running
         AppLog.log("Offline job started: \(job.id) (attempt \(prior + 1))", category: "offline")
+        if shouldParkForLive() {
+            parkRunningJob()
+            return
+        }
 
         // Create a relay that publishes fraction updates directly into `progress`.
         // The relay is Sendable and lock-guarded; it's safe to capture in the detached
@@ -180,6 +206,10 @@ final class OfflineProcessingService: ObservableObject {
         // Mid-call resume writes mic.2.caf / system.2.caf; concat legs so offline
         // diarization covers the full meeting, not just the pre-resume segment.
         let archives = await Self.resolveArchives(for: job)
+        if shouldParkForLive() {
+            parkRunningJob()
+            return
+        }
 
         // Transient engine bound to THIS job's audio; collect auto-identified names.
         var identified: [String] = []
@@ -196,6 +226,10 @@ final class OfflineProcessingService: ObservableObject {
         eng.onOfflineProgress = { event in relay.report(event) }
         _ = await eng.runOfflinePass()
         eng.onOfflineProgress = nil  // prevent leaking a reference past this job
+        if shouldParkForLive() {
+            parkRunningJob()
+            return
+        }
 
         // GUARDED rewrite: never let a thin offline pass shrink a fuller transcript.
         let segs = eng.finalTimeline()
@@ -249,11 +283,19 @@ final class OfflineProcessingService: ObservableObject {
         // independently refuses any `.active` session). The relay is Sendable, so
         // capturing it in the detached task is safe — set() uses the same lock+Task-hop
         // as report() and can be called from any thread.
+        if shouldParkForLive() {
+            parkRunningJob()
+            return
+        }
         relay.set(stage: .compact, fraction: nil, sublabel: nil)
         let dir = job.sessionDir
-        await Task.detached(priority: .utility) {
+        await CancellableDetached.run(priority: .utility) {
             AudioCompactor.compactSession(dir) { f in relay.set(stage: .compact, fraction: f, sublabel: nil) }
-        }.value
+        }
+        if shouldParkForLive() {
+            parkRunningJob()
+            return
+        }
 
         SessionStore.setOfflineStatus(.done, in: job.sessionDir)
 
@@ -310,7 +352,30 @@ final class OfflineProcessingService: ObservableObject {
     private func finishAndPump() {
         isRunning = false
         runningJobID = nil
+        runningJob = nil
+        runningTask = nil
+        preemptRequested = false
         runNextIfIdle()
+    }
+
+    private func shouldParkForLive() -> Bool {
+        preemptRequested || Task.isCancelled || !isIdle()
+    }
+
+    private func parkRunningJob() {
+        guard let job = runningJob else {
+            finishAndPump()
+            return
+        }
+        let parked = OfflineJobPark.diskState(attemptsBeforeRun: attemptsBeforeRun)
+        SessionStore.setOfflineStatus(parked.status, attempts: parked.attempts, in: job.sessionDir)
+        if !queue.contains(where: { $0.id == job.id }) {
+            queue.insert(job, at: 0)
+        }
+        jobs[job.id] = .queued
+        progress[job.id] = nil
+        AppLog.log("Offline job \(job.id): parked for live recording", category: "offline")
+        finishAndPump()
     }
 
     // MARK: Helpers
@@ -354,18 +419,18 @@ final class OfflineProcessingService: ObservableObject {
         let needSys = !Self.fullArchiveIsCurrent(legs: sysUse, full: sysFull)
 
         if needMic {
-            let ok = await Task.detached(priority: .userInitiated) {
+            let ok = await CancellableDetached.run(priority: .userInitiated) {
                 AudioConcatenator.concatenate(micUse, gaps: gapsMic, output: micFull)
-            }.value
+            }
             if !ok {
                 AppLog.log("Offline job \(job.id): multi-leg mic concat failed — falling back to first leg", category: "offline")
                 return ResolvedArchives(mic: job.micArchiveURL, system: job.systemArchiveURL, mixed: job.mixedURL)
             }
         }
         if needSys {
-            let ok = await Task.detached(priority: .userInitiated) {
+            let ok = await CancellableDetached.run(priority: .userInitiated) {
                 AudioConcatenator.concatenate(sysUse, gaps: gapsSys, output: sysFull)
-            }.value
+            }
             if !ok {
                 AppLog.log("Offline job \(job.id): multi-leg system concat failed — falling back to first leg", category: "offline")
                 return ResolvedArchives(mic: job.micArchiveURL, system: job.systemArchiveURL, mixed: job.mixedURL)
@@ -390,13 +455,17 @@ final class OfflineProcessingService: ObservableObject {
                                    archives: ResolvedArchives,
                                    onIdentified: @escaping (String) -> Void) -> SpeakerCapableEngine {
         let eng: SpeakerCapableEngine
-        switch settings.transcriptionEngine {
+        switch job.engine {
         case .whisperKit:
             eng = WhisperKitSpeakerKitEngine(models: models, settings: settings, voiceprints: voiceprints,
                                              identificationThreshold: settings.identificationThreshold)
         case .fluidAudio:
-            eng = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
-                                   identificationThreshold: settings.identificationThreshold)
+            let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
+                                         identificationThreshold: settings.identificationThreshold)
+            fluid.sessionAttendees = job.attendees
+            fluid.sessionMeetingTitle = job.title
+            fluid.asrProfile = job.fluidAsrProfile
+            eng = fluid
         case .speechAnalyzer:
             eng = SpeechAnalyzerEngine(settings: settings, voiceprints: voiceprints,
                                        identificationThreshold: settings.identificationThreshold)
@@ -443,9 +512,8 @@ extension OfflineProcessingService: ProcessingQueue {
         guard let i = queue.firstIndex(where: { $0.id == id }) else { return }
         let job = queue.remove(at: i)
         jobs[job.id] = nil
-        progress[job.id] = nil   // clear any frozen failure progress
-        // Mark resolved so it isn't re-discovered at launch (no further offline wanted).
-        SessionStore.setOfflineStatus(.done, in: job.sessionDir)
+        progress[job.id] = nil
+        SessionStore.setOfflineStatus(OfflineQueueCancel.diskStatus, in: job.sessionDir)
         objectWillChange.send()
     }
 }

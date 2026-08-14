@@ -203,6 +203,7 @@ struct RecordDetailView: View {
     @EnvironmentObject private var vault: VaultDirectory
     /// Observed so the offline-queue strip republishes as jobs come and go.
     @ObservedObject private var offline = RecordingController.shared.offlineService
+    @ObservedObject private var summaryService = RecordingController.shared.summaryService
     @State private var apps: [CapturableApp] = []
     @State private var mode: WindowMode = .live
     @State private var pendingPerson: PendingPerson?
@@ -211,6 +212,12 @@ struct RecordDetailView: View {
     /// auto-fill (discovered titles): only focused changes count as user edits.
     @FocusState private var titleFocused: Bool
     @AppStorage("parley.axBannerDismissed") private var axBannerDismissed = false
+    /// Cached AX trust, matching how `SettingsView` reads it. `AXIsProcessTrusted()` is
+    /// a synchronous system call, and reading it inline in `advisoryRows` meant making
+    /// it on the main thread on *every* body evaluation of the always-mounted inspector
+    /// rail. AX trust only changes via System Settings, so re-reading on activation
+    /// (plus at appear) catches it. See docs/RECORDING_FREEZE_INVESTIGATION.md.
+    @State private var axTrusted = PermissionManager.accessibilityAuthorized()
     /// User-resizable inspector width (drag the divider). View-local presentation
     /// state — deliberately not in AppSettings. Default 340 (a touch roomier than
     /// the old fixed 300); double-clicking the divider resets to it.
@@ -257,7 +264,12 @@ struct RecordDetailView: View {
         .frame(minWidth: 480, minHeight: 520)
         .onAppear {
             apps = ProcessLister.capturableApps()
-            recording.launchWarmup()   // warm the model + surface both permission prompts up front
+            axTrusted = PermissionManager.accessibilityAuthorized()
+        }
+        // The user grants AX in System Settings and comes back — that return is the only
+        // moment the cached trust can go stale.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            axTrusted = PermissionManager.accessibilityAuthorized()
         }
         // Auto-switch to the rendered note when a recording finishes writing it —
         // but never while a (new) recording is already live, so a back-to-back
@@ -315,50 +327,69 @@ struct RecordDetailView: View {
                         .padding(.bottom, Theme.Spacing.small)
                 }
                 Divider()
-                ZStack {
-                    LiveTranscriptView(
-                        segments: live.segments,
-                        isRecording: recording.isRecording,
-                        people: vault.people,
-                        attendees: TranscriptWriter.splitAttendees(meeting.attendees),
-                        onNameSpeaker: (settings.transcriptionEngine == .fluidAudio
-                                        || settings.transcriptionEngine == .speechAnalyzer)
-                            ? { id, name in recording.nameSpeaker(id, as: name) } : nil,
-                        liveDisabled: (settings.transcriptionEngine == .whisperKit
-                                       || settings.transcriptionEngine == .speechAnalyzer)
-                            && !settings.liveTranscriptEnabled,
-                        hidesEmptyState: isPreRecordIdle
-                    )
-                    .equatable()
-                    if isPreRecordIdle {
-                        preRecordIdleMessage
-                            .transition(.opacity)
+                // An overlay, not a ZStack: during recording the idle message is absent, so
+                // a ZStack was a stack level that held one child and bought nothing but
+                // layout cost. The transcript sits at the bottom of a seven-level nest and
+                // every level multiplies the sizing work — see
+                // docs/LAYOUT_EXPLOSION_AUDIT.md.
+                LiveTranscriptView(
+                    segments: live.segments,
+                    isRecording: recording.isRecording,
+                    people: vault.people,
+                    attendees: TranscriptWriter.splitAttendees(meeting.attendees),
+                    onNameSpeaker: (settings.transcriptionEngine == .fluidAudio
+                                    || settings.transcriptionEngine == .speechAnalyzer)
+                        ? { id, name in recording.nameSpeaker(id, as: name) } : nil,
+                    liveDisabled: settings.transcriptionEngine == .whisperKit
+                        && !settings.liveTranscriptEnabled,
+                    hidesEmptyState: isPreRecordIdle
+                )
+                .overlay {
+                    // Scoped to the message that actually animates. Previously this
+                    // animation sat on the whole live VStack, so flipping isPreRecordIdle
+                    // animated a layout pass over the entire transcript subtree. Same
+                    // correction as offlinePassBar above.
+                    Group {
+                        if isPreRecordIdle {
+                            preRecordIdleMessage
+                                .transition(.opacity)
+                        }
                     }
+                    .animation(Theme.Motion.spring, value: isPreRecordIdle)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .animation(Theme.Motion.spring, value: isPreRecordIdle)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .preview:
             VStack(spacing: 0) {
-                NotesActionBar(
-                    generator: recording.notes,
-                    destination: meeting.destinationPath,
-                    attendees: meeting.attendees,
-                    model: settings.claudeModel,
-                    onGenerate: {
-                        recording.notes.generate(
-                            transcriptURL: recording.lastTranscriptURL,
-                            destination: meeting.destinationPath,
-                            attendees: meeting.attendees,
-                            settings: settings
-                        )
-                    }
-                )
+                previewSummaryBar
                 Divider()
                 TranscriptPreviewView(url: recording.lastTranscriptURL, reloadToken: recording.transcriptRevision)
             }
         }
+    }
+
+    private var previewSummaryBar: some View {
+        HStack(spacing: Theme.Spacing.medium) {
+            if summaryService.runningID != nil {
+                ProgressView().controlSize(.small)
+                Text(summaryService.runningActivity ?? "Generating notes…")
+                    .font(Theme.Typography.secondary)
+                    .foregroundStyle(.secondary)
+            } else {
+                Button {
+                    recording.enqueuePreviewSummary()
+                } label: {
+                    Label("Generate meeting notes", systemImage: "sparkles")
+                }
+                .glassProminentButton()
+                .disabled(recording.lastTranscriptURL == nil)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Spacing.large)
+        .padding(.vertical, Theme.Spacing.small)
+        .chromeSurface()
     }
 
     // MARK: Inspector rail
@@ -523,8 +554,7 @@ struct RecordDetailView: View {
         }
         // One-time nudge: meeting-detail suggestions are on but can't work
         // without the Accessibility permission (recording is unaffected).
-        if settings.metadataDiscoveryEnabled, !axBannerDismissed,
-           !PermissionManager.accessibilityAuthorized() {
+        if settings.metadataDiscoveryEnabled, !axBannerDismissed, !axTrusted {
             HStack(alignment: .top, spacing: Theme.Spacing.xSmall) {
                 StatusBanner(.info,
                              "Grant Accessibility to auto-suggest meeting titles & attendees. Already granted? Quit and reopen Parley.",
@@ -577,18 +607,12 @@ struct RecordDetailView: View {
     private var audioModelBadgeInfo: AudioModelBadgeInfo {
         switch settings.transcriptionEngine {
         case .fluidAudio:
-            return AudioModelBadgeInfo(engine: nil, model: settings.parakeetVersion.displayName)
+            return AudioModelBadgeInfo(engine: nil, model: FluidAsrRouting.displayModelName(settings: settings))
         case .speechAnalyzer:
-            return AudioModelBadgeInfo(engine: "Speech", model: speechLocaleLabel)
+            return AudioModelBadgeInfo(engine: nil, model: "Apple Speech")
         case .whisperKit:
             return AudioModelBadgeInfo(engine: WhisperModel.engineName, model: WhisperModel.turbo.displayName)
         }
-    }
-
-    private var speechLocaleLabel: String {
-        let id = settings.speechLocale
-        if let name = Locale.current.localizedString(forIdentifier: id) { return name }
-        return id
     }
 
     /// Audio capture controls, always visible directly under the record button:
@@ -675,6 +699,7 @@ struct RecordDetailView: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
+        .help("Regular = normal mic level. Room = +6 dB boost for distant speakers (applied to the mic track).")
     }
 
     private var appPicker: some View {

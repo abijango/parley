@@ -1,7 +1,7 @@
 # FluidAudio Parakeet Unified upgrade path
 
-> Status: **planned, not implemented.** Follow-on after SpeechAnalyzer third-engine
-> work. Targets FluidAudio **0.15.5+** features already pinned in `project.yml`.
+> Status: **implemented** (Parakeet Unified English route, custom vocabulary, diarization
+> compute-units audit, GPU encoder toggle, FluidSmoke unified smoke test).
 
 ## Goal
 

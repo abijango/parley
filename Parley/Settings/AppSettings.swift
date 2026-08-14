@@ -51,7 +51,7 @@ enum ComputeMode: String, CaseIterable, Identifiable {
 
 /// Which transcription engine a recording uses. Chosen in Settings; applies to
 /// the NEXT recording session (no mid-session switch).
-enum TranscriptionEngineKind: String, CaseIterable, Identifiable {
+enum TranscriptionEngineKind: String, Codable, CaseIterable, Identifiable {
     case whisperKit      // WhisperKit ASR + SpeakerKit diarization + speaker ID
     case fluidAudio      // native FluidAudio stack — Parakeet ASR + diarization + speaker ID
     case speechAnalyzer  // Apple SpeechAnalyzer ASR + FluidAudio diarization + speaker ID
@@ -266,6 +266,9 @@ final class AppSettings: ObservableObject {
         static let diarizationThreshold = "parley.diarizationThreshold"
         static let identificationThreshold = "parley.identificationThreshold"
         static let offlineAsrRepass = "parley.offlineAsrRepass"
+        static let useParakeetUnified = "parley.useParakeetUnified"
+        static let boostAttendeeNames = "parley.boostAttendeeNames"
+        static let fluidGpuEncoder = "parley.fluidGpuEncoder"
         static let minSpeechToIdentify = "parley.minSpeechToIdentify"
         static let liveTranscriptEnabled = "parley.liveTranscriptEnabled"
         static let summaryPromptTemplate = "parley.summaryPromptTemplate"
@@ -340,7 +343,7 @@ final class AppSettings: ObservableObject {
     /// is the lowest-latency multilingual tier; "auto" uses the full-vocab model
     /// (covers zh/ja). Only affects the in-session live transcript — the final
     /// transcript is the offline TDT v3 re-pass.
-    @AppStorage(Key.liveStreamingTier) var liveStreamingTierRaw: Int = FluidStreamingTier.ms560.rawValue
+    @AppStorage(Key.liveStreamingTier) var liveStreamingTierRaw: Int = FluidStreamingTier.ms2240.rawValue
     @AppStorage(Key.liveStreamingLanguage) var liveStreamingLanguage: String = "auto"
     /// FluidAudio in-session diarization clustering threshold (lower = more speakers /
     /// more sensitive; higher = merges similar voices). Default 0.6 — the library's
@@ -354,6 +357,17 @@ final class AppSettings: ObservableObject {
     /// batch Parakeet pass (higher accuracy than the streaming chunks) and rewrite
     /// the saved transcript. Off = keep the live streaming transcript.
     @AppStorage(Key.offlineAsrRepass) var offlineAsrRepass: Bool = true
+    /// When the live language is English, use Parakeet Unified 0.6B for streaming
+    /// (~2 s latency) and the full-attention offline batch pass instead of Nemotron
+    /// + TDT v3. Non-English sessions always use the multilingual path.
+    @AppStorage(Key.useParakeetUnified) var useParakeetUnified: Bool = true
+    /// Boost attendee names and meeting-title tokens in the offline batch transcript
+    /// via FluidAudio custom vocabulary (CTC spotter + rescorer).
+    @AppStorage(Key.boostAttendeeNames) var boostAttendeeNames: Bool = true
+    /// Run the Parakeet v3 conformer encoder on GPU for the multilingual offline
+    /// re-pass (+~8% RTFx, WER-neutral). Unified English models manage placement
+    /// internally; this only affects the Nemotron + TDT v3 path.
+    @AppStorage(Key.fluidGpuEncoder) var fluidGpuEncoder: Bool = false
     /// Seconds of clean, quality-gated speech before a voice is auto-identified/named.
     @AppStorage(Key.minSpeechToIdentify) var minSpeechToIdentify: Double = 5
     /// WhisperKit + SpeakerKit only: show a live (streaming) transcript while recording.

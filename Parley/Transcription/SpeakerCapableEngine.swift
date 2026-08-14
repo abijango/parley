@@ -82,10 +82,6 @@ extension FluidAudioEngine: SpeakerCapableEngine {
     var embeddingModelId: String { VoiceprintStore.embeddingModel }   // wespeaker_v2
     var embeddingDim: Int { VoiceprintStore.embeddingDim }            // 256
 
-    // FluidAudio keeps its turn model in an internal struct type rather than
-    // DiarizationAttribution.Turn, so it exposes no turns for fallback attribution.
-    func diarizedTurns() -> [DiarizationAttribution.Turn] { [] }
-
     // FluidAudio does not emit fine-grained stage events; the UI shows an indeterminate
     // shimmer for its stages. A no-op computed var satisfies the protocol requirement
     // without any internal state or behaviour change.

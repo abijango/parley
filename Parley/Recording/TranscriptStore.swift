@@ -27,6 +27,7 @@ struct TranscriptItem: Identifiable, Equatable {
             && lhs.meta.note == rhs.meta.note
             && lhs.meta.title == rhs.meta.title
             && lhs.meta.attendees == rhs.meta.attendees
+            && lhs.meta.attachments == rhs.meta.attachments
     }
 }
 
@@ -241,7 +242,8 @@ final class TranscriptStore: ObservableObject {
 
     /// Resolves a meeting's linked artifacts (audio session, filed note, staged summary).
     func links(for item: TranscriptItem) -> MeetingLinks {
-        MeetingFiles.links(transcript: item.url, meta: item.meta, staging: item.summaryReadyURL)
+        MeetingFiles.links(transcript: item.url, meta: item.meta, staging: item.summaryReadyURL,
+                           vault: AppSettings.shared.vaultURL)
     }
 
     /// Trashes a meeting (recoverable, macOS Trash): always the transcript and any staged
@@ -264,7 +266,14 @@ final class TranscriptStore: ObservableObject {
     private func trashArtifacts(of item: TranscriptItem, alsoAudio: Bool, alsoNote: Bool) {
         let l = links(for: item)
         if alsoAudio, let session = l.audioSession { MeetingFiles.trash(session) }
-        if alsoNote, let note = l.note { MeetingFiles.trash(note) }
+        if alsoNote, let note = l.note {
+            MeetingFiles.trash(note)
+            let noteAttachments = MeetingAttachmentStore.noteAttachmentsFolder(noteURL: note)
+            if FileManager.default.fileExists(atPath: noteAttachments.path) {
+                MeetingFiles.trash(noteAttachments)
+            }
+        }
+        for folder in l.attachmentFolders { MeetingFiles.trash(folder) }
         for s in item.stagedSummaries { MeetingFiles.trash(s.url) }
         if item.stagedSummaries.isEmpty, let staged = l.staging { MeetingFiles.trash(staged) }
         MeetingFiles.trash(item.url)

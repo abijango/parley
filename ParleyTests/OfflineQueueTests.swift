@@ -90,6 +90,7 @@ final class OfflineQueueTests: XCTestCase {
         m.offlineAttempts = 1
         m.transcriptPath = "/tmp/x.md"
         m.presentReviewWhenDone = true
+        m.transcriptionEngine = .fluidAudio
         let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
         let back = try dec.decode(SessionManifest.self, from: try enc.encode(m))
@@ -97,6 +98,21 @@ final class OfflineQueueTests: XCTestCase {
         XCTAssertEqual(back.offlineAttempts, 1)
         XCTAssertEqual(back.transcriptPath, "/tmp/x.md")
         XCTAssertEqual(back.presentReviewWhenDone, true)
+        XCTAssertEqual(back.transcriptionEngine, .fluidAudio)
+    }
+
+    func testCancelledOfflineStatusRoundTrips() throws {
+        var m = SessionManifest(
+            id: "2026-06-08-160310", title: "T", attendees: "A, B", filing: "",
+            model: "m", computeMode: "c", startedAt: Date(timeIntervalSince1970: 1),
+            lastHeartbeat: Date(timeIntervalSince1970: 2), status: .finalized,
+            startedByDetection: true, callBundleID: nil, callDisplayName: nil,
+            manualNotes: "", audioTracks: ["mic.caf"], titleSource: nil, suggestedAttendees: nil)
+        m.offlineStatus = .cancelled
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let back = try dec.decode(SessionManifest.self, from: try enc.encode(m))
+        XCTAssertEqual(back.offlineStatus, .cancelled)
     }
 
     func testLegacyManifestDecodesWithNilOfflineFields() throws {
@@ -111,6 +127,92 @@ final class OfflineQueueTests: XCTestCase {
         XCTAssertNil(m.offlineStatus)
         XCTAssertNil(m.transcriptPath)
         XCTAssertNil(m.presentReviewWhenDone)
+        XCTAssertNil(m.transcriptionEngine)
+    }
+
+    func testStoredEngineBeatsLiveFallback() {
+        XCTAssertEqual(OfflineEngineBinding.kind(stored: .fluidAudio, fallback: .whisperKit), .fluidAudio)
+        XCTAssertEqual(OfflineEngineBinding.kind(stored: nil, fallback: .speechAnalyzer), .speechAnalyzer)
+    }
+
+    func testJobFromManifestKeepsStoredEngine() {
+        var m = SessionManifest(
+            id: "2026-06-08-160310", title: "T", attendees: "", filing: "",
+            model: "m", computeMode: "c", startedAt: Date(timeIntervalSince1970: 1),
+            lastHeartbeat: Date(timeIntervalSince1970: 2), status: .finalized,
+            startedByDetection: false, callBundleID: nil, callDisplayName: nil,
+            manualNotes: "", audioTracks: [])
+        m.transcriptPath = "/tmp/x.md"
+        m.transcriptionEngine = .fluidAudio
+        let job = OfflineJob(dir: URL(fileURLWithPath: "/tmp/sess"), manifest: m,
+                             autoSummarize: false, fallbackEngine: .whisperKit,
+                             fallbackAsrProfile: .parakeetV3)
+        XCTAssertEqual(job?.engine, .fluidAudio)
+    }
+
+    func testJobFromLegacyManifestUsesFallbackEngine() {
+        var m = SessionManifest(
+            id: "2026-06-08-160310", title: "T", attendees: "", filing: "",
+            model: "m", computeMode: "c", startedAt: Date(timeIntervalSince1970: 1),
+            lastHeartbeat: Date(timeIntervalSince1970: 2), status: .finalized,
+            startedByDetection: false, callBundleID: nil, callDisplayName: nil,
+            manualNotes: "", audioTracks: [])
+        m.transcriptPath = "/tmp/x.md"
+        let job = OfflineJob(dir: URL(fileURLWithPath: "/tmp/sess"), manifest: m,
+                             autoSummarize: false, fallbackEngine: .speechAnalyzer,
+                             fallbackAsrProfile: .parakeetV3)
+        XCTAssertEqual(job?.engine, .speechAnalyzer)
+        XCTAssertEqual(job?.fluidAsrProfile, .parakeetV3)
+    }
+
+    func testStoredAsrProfileBeatsLiveFallback() {
+        XCTAssertEqual(FluidAsrBinding.profile(stored: .parakeetV2, fallback: .parakeetUnified), .parakeetV2)
+        XCTAssertEqual(FluidAsrBinding.profile(stored: nil, fallback: .parakeetV3), .parakeetV3)
+    }
+
+    func testJobFromManifestKeepsStoredAsrProfile() {
+        var m = SessionManifest(
+            id: "2026-06-08-160310", title: "T", attendees: "", filing: "",
+            model: "m", computeMode: "c", startedAt: Date(timeIntervalSince1970: 1),
+            lastHeartbeat: Date(timeIntervalSince1970: 2), status: .finalized,
+            startedByDetection: false, callBundleID: nil, callDisplayName: nil,
+            manualNotes: "", audioTracks: [])
+        m.transcriptPath = "/tmp/x.md"
+        m.transcriptionEngine = .fluidAudio
+        m.fluidAsrProfile = .parakeetV2
+        let job = OfflineJob(dir: URL(fileURLWithPath: "/tmp/sess"), manifest: m,
+                             autoSummarize: false, fallbackEngine: .whisperKit,
+                             fallbackAsrProfile: .parakeetUnified)
+        XCTAssertEqual(job?.fluidAsrProfile, .parakeetV2)
+    }
+
+    func testManifestAsrProfileRoundTrip() throws {
+        var m = SessionManifest(
+            id: "2026-06-08-160310", title: "T", attendees: "A, B", filing: "",
+            model: "m", computeMode: "c", startedAt: Date(timeIntervalSince1970: 1),
+            lastHeartbeat: Date(timeIntervalSince1970: 2), status: .finalized,
+            startedByDetection: true, callBundleID: nil, callDisplayName: nil,
+            manualNotes: "", audioTracks: ["mic.caf"], titleSource: nil, suggestedAttendees: nil)
+        m.fluidAsrProfile = .parakeetUnified
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let back = try dec.decode(SessionManifest.self, from: try enc.encode(m))
+        XCTAssertEqual(back.fluidAsrProfile, .parakeetUnified)
+    }
+
+    func testOfflinePassReadsJobProfileNotLiveParakeetVersion() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fluid = try String(
+            contentsOf: root.appendingPathComponent("Parley/Transcription/FluidAudioEngine.swift"),
+            encoding: .utf8)
+        let service = try String(
+            contentsOf: root.appendingPathComponent("Parley/Recording/OfflineProcessingService.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(service.contains("fluid.asrProfile = job.fluidAsrProfile"))
+        XCTAssertFalse(fluid.contains("settings.parakeetVersion == .v2"))
+        XCTAssertTrue(fluid.contains("asrProfile ?? FluidAsrBinding.profile"))
     }
 
     // (The old TokenField delta-merge tests were removed with the AppKit bridge — the

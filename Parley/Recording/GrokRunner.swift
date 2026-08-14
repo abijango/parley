@@ -60,7 +60,7 @@ enum GrokRunner {
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.currentDirectoryURL = URL(fileURLWithPath: summaryWorkingDirectory)
         process.arguments = [
-            "-p", prompt,
+            "-p", PromptStdin.argvPlaceholder,
             "-m", model,
             "--output-format", "json",
             "--no-subagents",
@@ -78,7 +78,7 @@ enum GrokRunner {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        process.standardInput = FileHandle.nullDevice
+        try PromptStdin.attach(prompt, to: process)
         return (process, stdout, stderr)
     }
 

@@ -203,6 +203,27 @@ struct HistoryView: View {
         recording.summaryService.enqueueIfPolicyAllows(item, trigger: .userInitiated)
     }
 
+    private func describeAttachments(for item: TranscriptItem) {
+        isDescribingAttachments = true
+        switch summaryService.describeAttachments(for: item) {
+        case .success(let digest):
+            attachmentError = nil
+            let documentURL = SummaryService.prospectiveNoteURL(
+                item: item, destination: item.meta.filing, vault: settings.vaultURL)
+            if let staged = item.summaryReadyURL,
+               var body = try? String(contentsOf: staged, encoding: .utf8) {
+                body = AttachmentVisionService.mergeDiagrams(
+                    into: body, visionDigest: digest, attachments: item.meta.attachments,
+                    documentURL: documentURL, vault: settings.vaultURL)
+                try? body.write(to: staged, atomically: true, encoding: .utf8)
+                store.refresh()
+            }
+        case .failure(let reason):
+            attachmentError = reason
+        }
+        isDescribingAttachments = false
+    }
+
     private func isPending(_ item: TranscriptItem) -> Bool {
         if case .pending = summaryService.state(for: item) { return true }
         return false
@@ -664,6 +685,7 @@ struct HistoryView: View {
                 .help("Rename, refile, or delete this meeting")
             }
             attendeesEditor(item)
+            historyAttachmentsEditor(item)
             filesStrip(item)
             if item.hasUnnamedSpeakers {
                 StatusBanner(.warning,
@@ -711,6 +733,51 @@ struct HistoryView: View {
             get: { item.meta.attendees },
             set: { recording.setAttendees(on: item.url, to: $0) }
         )
+    }
+
+    @State private var attachmentError: String?
+    @State private var isDescribingAttachments = false
+
+    @ViewBuilder private func historyAttachmentsEditor(_ item: TranscriptItem) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+            MeetingAttachmentsView(
+                attachments: item.meta.attachments,
+                vaultURL: settings.vaultURL,
+                onPaste: {
+                    if let err = recording.pasteAttachment(on: item.url) { attachmentError = err }
+                },
+                onPickFiles: { recording.pickAndAddAttachments(on: item.url) },
+                onRemove: { recording.removeAttachment(id: $0, on: item.url) },
+                onCaptionChange: { id, caption in
+                    recording.updateAttachmentCaption(id: id, caption: caption, on: item.url)
+                }
+            )
+            if item.isProcessed {
+                Text("Add screenshots here, then Re-summarize to include them in the filed note.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            if !item.meta.attachments.isEmpty,
+               settings.attachmentUnderstanding == .vision,
+               item.summaryReadyURL != nil {
+                Button {
+                    describeAttachments(for: item)
+                } label: {
+                    Label(isDescribingAttachments ? "Describing attachments…" : "Describe attachments",
+                          systemImage: "eye")
+                }
+                .buttonStyle(.chip)
+                .disabled(isDescribingAttachments)
+            }
+        }
+        .alert("Attachment", isPresented: Binding(
+            get: { attachmentError != nil },
+            set: { if !$0 { attachmentError = nil } }
+        )) {
+            Button("OK", role: .cancel) { attachmentError = nil }
+        } message: {
+            Text(attachmentError ?? "")
+        }
     }
 
     private func metadataLine(_ item: TranscriptItem) -> some View {
@@ -845,7 +912,7 @@ struct HistoryView: View {
 
     /// Note generation is in flight — disable the action buttons.
     private var busy: Bool {
-        recording.notes.isRunning
+        recording.summaryService.runningID != nil
     }
 
     /// This item's recording already has an offline pass queued or running (so its

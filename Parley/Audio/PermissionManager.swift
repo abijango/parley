@@ -2,10 +2,11 @@ import Foundation
 import AVFoundation
 import AppKit
 import ApplicationServices
+import Speech
 
-/// Microphone permission helper. The system-audio (tap) permission has no
-/// pre-check API — it prompts on first tap creation — so only the mic is
-/// handled proactively here.
+/// Microphone and speech-recognition permission helpers. The system-audio (tap)
+/// permission has no pre-check API — it prompts on first tap creation — so only
+/// the mic is handled proactively here alongside Speech recognition.
 enum PermissionManager {
     static func microphoneAuthorized() -> Bool {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
@@ -37,6 +38,39 @@ enum PermissionManager {
     /// Opens System Settings → Privacy & Security → Microphone.
     static func openMicrophoneSettings() {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+    }
+
+    static func speechRecognitionAuthorized() -> Bool {
+        SFSpeechRecognizer.authorizationStatus() == .authorized
+    }
+
+    static func speechRecognitionDenied() -> Bool {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .denied, .restricted: return true
+        default: return false
+        }
+    }
+
+    /// Requests Speech-framework access (shared by SpeechAnalyzer and legacy APIs).
+    @MainActor
+    static func requestSpeechRecognition() async -> Bool {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { status in
+                    continuation.resume(returning: status == .authorized)
+                }
+            }
+        default:
+            return false
+        }
+    }
+
+    /// Opens System Settings → Privacy & Security → Speech Recognition.
+    static func openSpeechRecognitionSettings() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
     }
 
     /// Opens System Settings → Privacy & Security. The system-audio-capture

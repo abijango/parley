@@ -13,7 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
-        MainActor.assumeIsolated { CallNotifier.shared.configure() }
+        MainActor.assumeIsolated {
+            CallNotifier.shared.configure()
+            RecordingController.shared.launchWarmup()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

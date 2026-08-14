@@ -161,7 +161,7 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
             return abs(mixDur - micDur) > 1.0
         }()
         if shouldRebuild {
-            let built = await Task.detached { AudioMix.buildCleanMix(mic: mic, system: sys, output: url) }.value
+            let built = await CancellableDetached.run { AudioMix.buildCleanMix(mic: mic, system: sys, output: url) }
             AppLog.log("SpeakerKit offline pass: rebuilt clean mix (built=\(built))", category: "record")
         } else {
             AppLog.log("SpeakerKit offline pass: reusing existing clean mix (duration matched)", category: "record")

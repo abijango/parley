@@ -15,11 +15,14 @@ struct MeetingLinks {
     let note: URL?
     /// A summary staged for review (`.staging/<base>.md`), if present.
     let staging: URL?
+    /// Attachment folders linked from the transcript frontmatter.
+    let attachmentFolders: [URL]
     /// Recursive byte size of the audio session folder (0 when there's no audio).
     let audioBytes: Int64
 
     var hasAudio: Bool { audioSession != nil }
     var hasNote: Bool { note != nil }
+    var hasAttachments: Bool { !attachmentFolders.isEmpty }
 }
 
 /// Pure, nonisolated filesystem helpers shared by `TranscriptStore`, `RecordingsStore`, and
@@ -27,7 +30,7 @@ struct MeetingLinks {
 enum MeetingFiles {
     /// Resolves the linked artifacts for a transcript's metadata. `staging` is the staged-summary
     /// URL if one exists (the caller already knows this from the scan), else nil.
-    static func links(transcript: URL, meta: TranscriptMeta, staging: URL?) -> MeetingLinks {
+    static func links(transcript: URL, meta: TranscriptMeta, staging: URL?, vault: URL) -> MeetingLinks {
         let fm = FileManager.default
         let session = sessionDir(forAudioPath: meta.audio)
         let note: URL? = {
@@ -35,9 +38,11 @@ enum MeetingFiles {
             let u = URL(fileURLWithPath: n)
             return fm.fileExists(atPath: u.path) ? u : nil
         }()
+        let attachmentFolders = MeetingAttachmentStore.attachmentFolderURLs(for: meta.attachments, vault: vault)
         let bytes = session.map { size(of: $0) } ?? 0
         return MeetingLinks(transcript: transcript, audioSession: session,
-                            note: note, staging: staging, audioBytes: bytes)
+                            note: note, staging: staging, attachmentFolders: attachmentFolders,
+                            audioBytes: bytes)
     }
 
     /// The recording session folder for an `audio:` path — but **only** when it resolves under

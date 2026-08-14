@@ -69,8 +69,7 @@ enum ClaudeRunner {
     /// Builds (does not start) a RAW `claude -p` process for the summary-comparison
     /// path: the prompt is fully self-contained, so NO skill, NO tools, and NO vault
     /// access (`--add-dir`/`--allowedTools` omitted). `--output-format text` returns the
-    /// Markdown directly on stdout. stdin is the null device to skip the CLI's 3s
-    /// "no stdin received" wait. Filing happens later via the Approve step, not here.
+    /// Markdown directly on stdout. The full prompt is on stdin, not argv.
     static func makeRawSummaryProcess(
         binaryPath: String,
         prompt: String,
@@ -82,7 +81,7 @@ enum ClaudeRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.arguments = [
-            "-p", prompt,
+            "-p", PromptStdin.argvPlaceholder,
             "--model", model,
             "--output-format", "text",
             "--strict-mcp-config",
@@ -92,7 +91,7 @@ enum ClaudeRunner {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        process.standardInput = FileHandle.nullDevice
+        try PromptStdin.attach(prompt, to: process)
         return (process, stdout, stderr)
     }
 
@@ -110,7 +109,7 @@ enum ClaudeRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.arguments = [
-            "-p", prompt,
+            "-p", PromptStdin.argvPlaceholder,
             "--add-dir", vaultPath,
             "--permission-mode", "acceptEdits",
             "--allowedTools", "Read,Write,Edit,Skill,Bash",
@@ -128,6 +127,7 @@ enum ClaudeRunner {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
+        try PromptStdin.attach(prompt, to: process)
         return (process, stdout, stderr)
     }
 
@@ -146,7 +146,7 @@ enum ClaudeRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.arguments = [
-            "-p", prompt,
+            "-p", PromptStdin.argvPlaceholder,
             "--model", model,
             "--output-format", "stream-json",
             "--verbose",
@@ -158,7 +158,7 @@ enum ClaudeRunner {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        process.standardInput = FileHandle.nullDevice
+        try PromptStdin.attach(prompt, to: process)
         return (process, stdout, stderr)
     }
 

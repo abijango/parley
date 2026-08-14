@@ -26,6 +26,7 @@ struct SummaryMarkupReviewView: View {
     /// Editable buffer while in Edit mode (flattened note).
     @State private var editBuffer: String = ""
     @State private var showPendingConfirm = false
+    @State private var isDescribingAttachments = false
 
     private let runStore = SummaryRunStore()
     private let terminologyStore = TerminologyStore()
@@ -371,6 +372,16 @@ struct SummaryMarkupReviewView: View {
                 Label("Regenerate", systemImage: "arrow.clockwise")
             }
             .glassButton()
+            if !item.meta.attachments.isEmpty, settings.attachmentUnderstanding == .vision {
+                Button {
+                    describeAttachments()
+                } label: {
+                    Label(isDescribingAttachments ? "Describing…" : "Describe attachments",
+                          systemImage: "eye")
+                }
+                .glassButton()
+                .disabled(isDescribingAttachments)
+            }
             Button {
                 editingMode.wrappedValue = true
             } label: {
@@ -576,6 +587,36 @@ struct SummaryMarkupReviewView: View {
         terminologyStore.upsert(from: from, to: to, notes: notes, source: "summary-hunk:\(hunk.id)",
                                 scope: customerScope)
         statusMessage = "Remembered “\(from)” → “\(to)” for \(customerScope.isEmpty ? "this path" : customerScope)"
+    }
+
+    private func describeAttachments() {
+        isDescribingAttachments = true
+        statusMessage = nil
+        switch summaryService.describeAttachments(for: item) {
+        case .success(let digest):
+            let documentURL = SummaryService.prospectiveNoteURL(
+                item: item, destination: item.meta.filing, vault: settings.vaultURL)
+            let merge: (String) -> String = {
+                AttachmentVisionService.mergeDiagrams(
+                    into: $0, visionDigest: digest, attachments: item.meta.attachments,
+                    documentURL: documentURL, vault: settings.vaultURL)
+            }
+            if isEditing {
+                editBuffer = merge(editBuffer)
+            } else {
+                draft = merge(draft)
+                hunks = []
+                if let runID = selectedRunID {
+                    runStore.replaceHunks(runID: runID, hunks: [])
+                    runStore.updateDraftMarkdown(runID: runID, markdown: draft)
+                    summaryService.refreshV2Staging(transcriptURL: item.url, runID: runID)
+                }
+            }
+            statusMessage = "Diagrams updated from attachment vision."
+        case .failure(let reason):
+            statusMessage = reason
+        }
+        isDescribingAttachments = false
     }
 
     private func acceptAndFile() {

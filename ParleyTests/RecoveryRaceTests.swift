@@ -107,7 +107,7 @@ final class RecoveryRaceTests: XCTestCase {
     ///     status × (nil/pending/done/failed) × (nil/queued/done/failed).
     func testPredicatesAreMutuallyExclusive() {
         let statuses: [SessionManifest.Status] = [.active, .finalized]
-        let offlineStatuses: [SessionManifest.OfflineStatus?] = [nil, .pending, .running, .done, .failed]
+        let offlineStatuses: [SessionManifest.OfflineStatus?] = [nil, .pending, .running, .done, .failed, .cancelled]
         let summaryStatuses: [SessionManifest.SummaryStatus?] = [nil, .queued, .running, .paused, .done, .failed]
 
         for status in statuses {
@@ -137,6 +137,11 @@ final class RecoveryRaceTests: XCTestCase {
         XCTAssertFalse(SessionStore.isFinalizedButUnlanded(m))
     }
 
+    func testFinalizedWithCancelledOfflineIsNotOrphaned() {
+        let m = manifest(status: .finalized, offlineStatus: .cancelled)
+        XCTAssertFalse(SessionStore.isFinalizedButUnlanded(m))
+    }
+
     // MARK: Boundary: summary .paused / .running
 
     func testFinalizedWithPausedSummaryIsNotOrphaned() {
@@ -148,5 +153,39 @@ final class RecoveryRaceTests: XCTestCase {
     func testFinalizedWithRunningSummaryIsNotOrphaned() {
         let m = manifest(status: .finalized, summaryStatus: .running)
         XCTAssertFalse(SessionStore.isFinalizedButUnlanded(m))
+    }
+
+    func testStampedWriteTargetsTheProvidedDirectory() throws {
+        let fm = FileManager.default
+        let oldDir = fm.temporaryDirectory.appendingPathComponent("parley-stamp-old-\(UUID().uuidString)")
+        let newDir = fm.temporaryDirectory.appendingPathComponent("parley-stamp-new-\(UUID().uuidString)")
+        try fm.createDirectory(at: oldDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: newDir, withIntermediateDirectories: true)
+        defer {
+            try? fm.removeItem(at: oldDir)
+            try? fm.removeItem(at: newDir)
+        }
+
+        var live = manifest(status: .active)
+        live.title = "New session"
+        SessionStore.write(live, to: newDir)
+
+        let old = SessionStore.stamped(
+            manifest(status: .active),
+            status: .finalized,
+            title: "Old session",
+            attendees: "Ada",
+            filing: "Customers/Ada",
+            manualNotes: "",
+            attachments: nil,
+            titleSource: nil,
+            suggestedAttendees: nil,
+            heartbeat: Date(timeIntervalSince1970: 99))
+        SessionStore.write(old, to: oldDir)
+
+        XCTAssertEqual(SessionStore.read(oldDir)?.status, .finalized)
+        XCTAssertEqual(SessionStore.read(oldDir)?.title, "Old session")
+        XCTAssertEqual(SessionStore.read(newDir)?.status, .active)
+        XCTAssertEqual(SessionStore.read(newDir)?.title, "New session")
     }
 }

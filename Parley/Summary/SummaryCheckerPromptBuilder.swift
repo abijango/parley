@@ -21,6 +21,10 @@ enum SummaryCheckerPromptBuilder {
     - SUPPLIED ATTENDEES — authoritative for who was present and (where annotated \
     in parentheses) their company. Never override an annotated company from the \
     transcript.
+    - ATTACHMENT VISION — when provided, authoritative for what appears in images \
+    (whiteboards, slides, screenshots). Do not delete ## Diagrams or mermaid blocks \
+    that are grounded in ATTACHMENT VISION. You may trim invented detail not supported \
+    by vision or captions.
 
     Structural rules — the draft follows a required note format. You must NOT:
     - add, remove, rename, or reorder any `##` section;
@@ -70,6 +74,8 @@ enum SummaryCheckerPromptBuilder {
                       attendees: String = "",
                       destination: String = "",
                       terminologyBlock: String = "",
+                      visionDigest: String? = nil,
+                      attachmentCaptions: String = "",
                       instructions: String = defaultInstructions) -> String {
         // `instructions` comes from a free-text Settings editor. Cleared to empty, the prompt
         // would lose the JSON output contract entirely — the backend answers in prose, the
@@ -96,6 +102,18 @@ enum SummaryCheckerPromptBuilder {
             parts.append("""
             Terminology glossary (use these spellings/forms in proposed edits):
             \(terminologyBlock)
+            """)
+        }
+        if !attachmentCaptions.isEmpty {
+            parts.append("""
+            ATTACHMENTS (filenames and captions):
+            \(attachmentCaptions)
+            """)
+        }
+        if let visionDigest, !visionDigest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parts.append("""
+            ATTACHMENT VISION (model-analyzed — authoritative for visual content):
+            \(visionDigest.trimmingCharacters(in: .whitespacesAndNewlines))
             """)
         }
         parts.append("""

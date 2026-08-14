@@ -554,7 +554,7 @@ struct PersonEditorView: View {
     // MARK: - Voiceprint rebuild/re-enroll
 
     /// Rebuild a WhisperKit (pyannote) voiceprint from the retained clip for this person.
-    /// Uses the same SpeakerKitDiarizer path as SpeakersSettingsView.rebuildPyannoteFromClips,
+    /// Uses the same SpeakerKitDiarizer path as the People tab rebuild-from-clips flow,
     /// scoped to the single voiceprint that has the clip.
     private func rebuildWhisperKit() {
         guard let clipVP = person.voiceprints.first(where: { $0.audioSample != nil }),
@@ -583,12 +583,12 @@ struct PersonEditorView: View {
 
     /// Re-enroll a FluidAudio voiceprint from the retained clip. Handles both the
     /// "stale model" recovery case and a standard re-embed after a FluidAudio upgrade.
-    /// Mirrors the per-person portion of SpeakersSettingsView.reEnrollFromClips.
+    /// Mirrors the per-person re-enroll-from-clips flow in the People tab.
     private func reenrollFluidAudio() {
         // Find a FluidAudio (wespeaker) or stale print that has the clip.
         // Never fall back to a pyannote print: reEnroll re-stamps the model as wespeaker_v2,
         // which would silently destroy WhisperKit identification for that person
-        // (same protection as SpeakersSettingsView.reEnrollFromClips).
+        // (same protection as the People tab re-enroll flow).
         let candidate = person.voiceprints.first { vp in
             (vp.embeddingModel == VoiceprintStore.embeddingModel
                 || !VoiceprintStore.currentEmbeddingModels.contains(vp.embeddingModel))

@@ -25,13 +25,19 @@ struct OfflineJob: Identifiable, Equatable {
     /// Whether to chain a Claude summary once speakers are resolved (snapshot of the
     /// auto-summarize setting at enqueue time).
     let autoSummarize: Bool
+    /// Engine that produced this session. Never read live Settings at run time.
+    let engine: TranscriptionEngineKind
+    /// Fluid ASR stack for this session. Ignored when `engine` is not FluidAudio.
+    let fluidAsrProfile: FluidAsrProfile
 
     /// Stable id = session folder name (e.g. "2026-06-08-160310"); also the manifest id.
     var id: String { sessionDir.lastPathComponent }
 
     /// Build a job from a session directory + the saved manifest, resolving the standard
     /// archive paths. Returns nil if the manifest carries no transcript link to rewrite.
-    init?(dir: URL, manifest: SessionManifest, autoSummarize: Bool) {
+    init?(dir: URL, manifest: SessionManifest, autoSummarize: Bool,
+          fallbackEngine: TranscriptionEngineKind,
+          fallbackAsrProfile: FluidAsrProfile) {
         guard let path = manifest.transcriptPath, !path.isEmpty else { return nil }
         self.sessionDir = dir
         self.transcriptURL = URL(fileURLWithPath: path)
@@ -43,12 +49,16 @@ struct OfflineJob: Identifiable, Equatable {
         self.filing = manifest.filing
         self.presentReviewWhenDone = manifest.presentReviewWhenDone ?? false
         self.autoSummarize = autoSummarize
+        self.engine = OfflineEngineBinding.kind(stored: manifest.transcriptionEngine, fallback: fallbackEngine)
+        self.fluidAsrProfile = FluidAsrBinding.profile(
+            stored: manifest.fluidAsrProfile, fallback: fallbackAsrProfile)
     }
 
     /// Direct construction (post-stop / History flows), where paths and metadata are
     /// known without re-reading the manifest.
     init(sessionDir: URL, transcriptURL: URL, title: String, attendees: String,
-         filing: String, presentReviewWhenDone: Bool, autoSummarize: Bool) {
+         filing: String, presentReviewWhenDone: Bool, autoSummarize: Bool,
+         engine: TranscriptionEngineKind, fluidAsrProfile: FluidAsrProfile) {
         self.sessionDir = sessionDir
         self.transcriptURL = transcriptURL
         self.micArchiveURL = sessionDir.appendingPathComponent("mic.caf")
@@ -59,5 +69,13 @@ struct OfflineJob: Identifiable, Equatable {
         self.filing = filing
         self.presentReviewWhenDone = presentReviewWhenDone
         self.autoSummarize = autoSummarize
+        self.engine = engine
+        self.fluidAsrProfile = fluidAsrProfile
+    }
+}
+
+enum OfflineEngineBinding {
+    static func kind(stored: TranscriptionEngineKind?, fallback: TranscriptionEngineKind) -> TranscriptionEngineKind {
+        stored ?? fallback
     }
 }

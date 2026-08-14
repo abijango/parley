@@ -10,6 +10,7 @@ final class MeetingSessionState: ObservableObject {
     @Published var destinationPath = ""
     @Published var attendees = ""
     @Published var manualNotes = ""
+    @Published var attachments: [MeetingAttachment] = []
 
     @Published var suggestedAttendees: [SuggestedAttendee] = []
     @Published var discoveredTitle: String?

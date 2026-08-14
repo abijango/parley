@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import FluidAudio
 
 // Phase-1 smoke test: prove FluidAudio's Parakeet ASR + diarization (with
@@ -32,6 +33,35 @@ line("Decoded \(samples.count) samples (~\(String(format: "%.1f", Double(samples
 // Captured across sections for the diarization-first attribution validation below.
 var asrTokens: [(text: String, start: Double, end: Double)] = []
 var diarSegs: [(spk: String, start: Double, end: Double)] = []
+
+// ───────────────────────────── ASR (Parakeet Unified 2080ms) ─────────────────────────────
+line("\n[1b/3] ASR — Parakeet Unified 0.6B streaming (2080ms)")
+do {
+    let variant = StreamingModelVariant.parakeetUnified2080ms
+    let config = variant.unifiedConfig ?? UnifiedConfig()
+    let streaming = StreamingUnifiedAsrManager(config: config)
+    try await streaming.loadModels()
+
+    if let fmt = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false),
+       let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(samples.count)) {
+        buf.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { src in
+            if let base = src.baseAddress { buf.floatChannelData![0].update(from: base, count: samples.count) }
+        }
+        try await streaming.appendAudio(buf)
+        try await streaming.processBufferedAudio()
+        let partial = await streaming.getPartialTranscript()
+        let timings = await streaming.consumeTokenTimings()
+        line("  partial: \"\(partial.prefix(80))…\"")
+        line("  token timings: \(timings.count)")
+        _ = try await streaming.finish()
+        await streaming.cleanup()
+    }
+} catch {
+    FileHandle.standardError.write(Data("  Unified streaming FAILED: \(error)\n".utf8))
+    exit(2)
+}
 
 // ───────────────────────────── ASR (Parakeet TDT v3) ─────────────────────────────
 line("\n[1/2] ASR — Parakeet TDT 0.6b v3 (multilingual)")
@@ -79,7 +109,7 @@ do {
 // ───────────────────────────── Diarization + embeddings ─────────────────────────────
 // Optional arg 2 = clusteringThreshold override (default 0.7).
 let threshold = CommandLine.arguments.count > 2 ? Float(CommandLine.arguments[2]) ?? 0.7 : 0.7
-line("\n[2/2] Diarization — pyannote segmentation + WeSpeaker embeddings (clusteringThreshold \(threshold))")
+line("\n[2/3] Diarization — pyannote segmentation + WeSpeaker embeddings (clusteringThreshold \(threshold))")
 
 func cosine(_ a: [Float], _ b: [Float]) -> Float {
     guard a.count == b.count, !a.isEmpty else { return .nan }

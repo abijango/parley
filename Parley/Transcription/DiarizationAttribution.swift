@@ -24,17 +24,37 @@ enum DiarizationAttribution {
         let end: TimeInterval
     }
 
+    static func turns(
+        from segs: [(speakerId: String, start: TimeInterval, end: TimeInterval)]
+    ) -> [Turn] {
+        segs.map { Turn(speakerId: $0.speakerId, start: $0.start, end: $0.end) }
+    }
+
     /// A token begins a new word if it starts with the SentencePiece ▁ marker
-    /// (streaming) or a literal leading space (offline batch ASR).
+    /// (streaming) or a literal leading space (offline batch ASR / Apple Speech).
     static func isWordStart(_ text: String) -> Bool {
-        text.hasPrefix("\u{2581}") || text.hasPrefix(" ")
+        text.hasPrefix("\u{2581}") || text.first?.isWhitespace == true
     }
 
     /// Rebuild readable text from sub-word tokens (▁ → space).
+    ///
+    /// Whisper/Parakeet emit SentencePiece pieces (`▁word` or ` word`). Apple
+    /// Speech emits whole words with *no* boundary marker once spaces are
+    /// trimmed — those must be re-joined with spaces or you get
+    /// `Thescreenitselfis…`.
     static func reconstruct(_ tokens: [String]) -> String {
-        tokens.joined()
-            .replacingOccurrences(of: "\u{2581}", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasBoundaryMarkers = tokens.contains {
+            $0.hasPrefix("\u{2581}") || $0.first?.isWhitespace == true || $0.contains("\u{2581}")
+        }
+        if hasBoundaryMarkers {
+            return tokens.joined()
+                .replacingOccurrences(of: "\u{2581}", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return tokens
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     /// The diarized speaker active at time `t`: the turn containing it, else the turn

@@ -15,9 +15,10 @@ struct SessionManifest: Codable, Equatable {
     /// Offline-processing lifecycle for the *background* batch pass (ASR re-pass +
     /// diarization + speaker ID + compaction), run by `OfflineProcessingService`
     /// AFTER a clean stop. Orthogonal to `status`: a finalized recording normally
-    /// becomes `.pending`, runs to `.done`, or `.failed` after repeated attempts.
+    /// becomes `.pending`, runs to `.done`, `.failed` after repeated attempts,
+    /// or `.cancelled` if the user dropped it from the queue.
     /// `nil` = legacy manifest / never queued (e.g. a non-speaker engine).
-    enum OfflineStatus: String, Codable { case pending, running, done, failed }
+    enum OfflineStatus: String, Codable { case pending, running, done, failed, cancelled }
 
     /// Background Claude-summary lifecycle, mirroring `OfflineStatus`, so a queued-but-
     /// not-yet-run summary survives a quit and is re-collected at launch (under the
@@ -37,6 +38,8 @@ struct SessionManifest: Codable, Equatable {
     var callBundleID: String?
     var callDisplayName: String?
     var manualNotes: String
+    /// Image attachments captured during the session (crash-safe).
+    var attachments: [MeetingAttachment]?
     /// Audio track files in this session, in capture order (resume appends one).
     var audioTracks: [String]
     // Meeting-metadata discovery (Accessibility). Optional so manifests written
@@ -59,6 +62,11 @@ struct SessionManifest: Codable, Equatable {
     var presentReviewWhenDone: Bool?
     /// Background Claude-summary state for this session's transcript (nil ⇒ never queued).
     var summaryStatus: SummaryStatus?
+    /// Engine that recorded this session. Offline passes must use this, not live Settings.
+    var transcriptionEngine: TranscriptionEngineKind?
+    /// Fluid ASR stack for this session (Unified / TDT v2 / TDT v3). Nil on non-Fluid
+    /// sessions and on manifests written before this field existed.
+    var fluidAsrProfile: FluidAsrProfile?
 }
 
 /// One person discovered in the meeting roster, with the join timestamp
@@ -90,6 +98,34 @@ enum SessionStore {
 
     static func manifestURL(in sessionDir: URL) -> URL {
         sessionDir.appendingPathComponent("session.json")
+    }
+
+    /// Applies inspector fields and status without touching any controller globals.
+    /// Callers that might race a new `start()` must pass the session they mean, not
+    /// whatever is currently live.
+    static func stamped(
+        _ manifest: SessionManifest,
+        status: SessionManifest.Status,
+        title: String,
+        attendees: String,
+        filing: String,
+        manualNotes: String,
+        attachments: [MeetingAttachment]?,
+        titleSource: String?,
+        suggestedAttendees: [SuggestedAttendee]?,
+        heartbeat: Date = Date()
+    ) -> SessionManifest {
+        var m = manifest
+        m.title = title
+        m.attendees = attendees
+        m.filing = filing
+        m.manualNotes = manualNotes
+        m.attachments = attachments
+        m.titleSource = titleSource
+        m.suggestedAttendees = suggestedAttendees
+        m.lastHeartbeat = heartbeat
+        m.status = status
+        return m
     }
 
     static func write(_ manifest: SessionManifest, to sessionDir: URL) {
@@ -134,8 +170,7 @@ enum SessionStore {
             at: recordings, includingPropertiesForKeys: nil) else { return [] }
         return dirs
             .compactMap { dir -> (URL, SessionManifest)? in
-                guard let m = read(dir),
-                      m.offlineStatus == .pending || m.offlineStatus == .running else { return nil }
+                guard let m = read(dir), isRerunnableOffline(m.offlineStatus) else { return nil }
                 return (dir, m)
             }
             .sorted { $0.1.startedAt < $1.1.startedAt }
@@ -166,6 +201,12 @@ enum SessionStore {
         write(m, to: dir)
     }
 
+    static func setTranscriptionEngine(_ engine: TranscriptionEngineKind, in dir: URL) {
+        guard var m = read(dir) else { return }
+        m.transcriptionEngine = engine
+        write(m, to: dir)
+    }
+
     /// Finalized sessions whose summary hasn't completed — `.queued`/`.paused`/`.running`
     /// (a crash mid-run). Used at launch to re-collect pending summaries (then routed
     /// through the bulk-confirm policy). Oldest first.
@@ -190,6 +231,12 @@ enum SessionStore {
     /// mid-recording and the session belongs to the crash-Recovery sheet.
     static func isCrashed(_ manifest: SessionManifest) -> Bool {
         manifest.status == .active
+    }
+
+    /// True when launch should re-enqueue this session's offline pass.
+    /// `.cancelled` and `.done` stay off the queue.
+    static func isRerunnableOffline(_ status: SessionManifest.OfflineStatus?) -> Bool {
+        status == .pending || status == .running
     }
 
     /// True when a session's manifest was already stamped `.finalized` but the

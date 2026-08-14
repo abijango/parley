@@ -152,10 +152,16 @@ final class MicCapture {
             os_unfair_lock_unlock(&self.tapLock)
 
             let mode = self.micInputMode
-            MicInputGain.apply(to: buffer, mode: mode)
+            // Boost the tap buffer before archive + resample. Returns false when the
+            // buffer layout can't be mutated in place (rare); fall back to boosting
+            // the float samples used by ASR/meters so Room mode still has an effect.
+            let boostedBuffer = MicInputGain.apply(to: buffer, mode: mode)
 
             currentArchiver?.append(buffer)
-            if let floats = currentResampler?.resample(buffer), !floats.isEmpty {
+            if var floats = currentResampler?.resample(buffer), !floats.isEmpty {
+                if mode == .room, !boostedBuffer {
+                    floats = MicInputGain.apply(floats, mode: .room)
+                }
                 floats.withUnsafeBufferPointer { self.ringBuffer.write($0) }
                 self.meter.update(floats)
             }

@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// Settings pane: eight tabs, all rendered as grouped forms (the System
+/// Settings pane: seven tabs, all rendered as grouped forms (the System
 /// Settings idiom) so every tab shares one container style, one inset rhythm,
 /// and native section cards — replacing the three ad-hoc layout idioms the
 /// design audit catalogued.
@@ -24,13 +24,12 @@ struct SettingsView: View {
     /// Settings sections — rendered as a left sidebar (Cursor / System-Settings idiom)
     /// rather than top tabs.
     enum SettingsTab: String, CaseIterable, Identifiable {
-        case general, transcription, speakers, notes, summary, detection, storage, vault
+        case general, transcription, notes, summary, detection, storage, vault
         var id: String { rawValue }
         var title: String {
             switch self {
             case .general:       return "General"
             case .transcription: return "Transcription"
-            case .speakers:      return "Speakers"
             case .notes:         return "Notes"
             case .summary:       return "Summary"
             case .detection:     return "Detection"
@@ -42,7 +41,6 @@ struct SettingsView: View {
             switch self {
             case .general:       return "gearshape"
             case .transcription: return "waveform"
-            case .speakers:      return "person.2.wave.2"
             case .notes:         return "doc.text"
             case .summary:       return "rectangle.split.3x1"
             case .detection:     return "dot.radiowaves.left.and.right"
@@ -96,13 +94,7 @@ struct SettingsView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .navigationTitle("Settings")
-        .frame(
-            minWidth: 680,
-            idealWidth: 780,
-            maxWidth: screenMaxSize.width,
-            minHeight: 420,
-            idealHeight: 560,
-            maxHeight: screenMaxSize.height)
+        .frame(minWidth: 680, minHeight: 420)
         .background(SettingsWindowConfigurator(maxSize: screenMaxSize))
     }
 
@@ -111,8 +103,6 @@ struct SettingsView: View {
         switch selection ?? .general {
         case .general:       generalTab
         case .transcription: transcriptionTab
-        case .speakers:      SpeakersSettingsView(store: recording.voiceprints,
-                                                  diarizationThreshold: settings.diarizationThreshold)
         case .notes:         notesTab
         case .summary:       summaryTab
         case .detection:     detectionTab
@@ -152,7 +142,7 @@ struct SettingsView: View {
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
                 }
             }
-            Section("Vault") {
+            Section("Paths") {
                 LabeledContent("Obsidian vault") {
                     TextField("path to your vault", text: $settings.vaultPath)
                         .textFieldStyle(.roundedBorder).frame(maxWidth: 280)
@@ -229,28 +219,37 @@ struct SettingsView: View {
 
             Section("Provider") {
                 if settings.summaryPipeline == .v2 {
-                    Picker("Writer", selection: $settings.summaryWriterBackendRaw) {
-                        ForEach(SummaryBackend.writerBackends) { backend in
-                            Text(backend.displayName).tag(backend.rawValue)
+                    SettingRow("Writer", description: settings.summaryWriterBackend.blurb) {
+                        Picker("", selection: $settings.summaryWriterBackendRaw) {
+                            ForEach(SummaryBackend.writerBackends) { backend in
+                                Text(backend.displayName).tag(backend.rawValue)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(maxWidth: 280)
                     }
-                    .pickerStyle(.menu)
-                    helpText(settings.summaryWriterBackend.blurb)
-                    Picker("Checker", selection: $settings.summaryCheckerBackendRaw) {
-                        ForEach(SummaryBackend.checkerBackends) { backend in
-                            Text(backend.displayName).tag(backend.rawValue)
+                    SettingRow("Checker", description: settings.summaryCheckerBackend.blurb) {
+                        Picker("", selection: $settings.summaryCheckerBackendRaw) {
+                            ForEach(SummaryBackend.checkerBackends) { backend in
+                                Text(backend.displayName).tag(backend.rawValue)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(maxWidth: 280)
                     }
-                    .pickerStyle(.menu)
-                    helpText(settings.summaryCheckerBackend.blurb)
                 } else {
-                    Picker("Summarize with", selection: $settings.summaryBackendRaw) {
-                        ForEach(SummaryBackend.allCases) { backend in
-                            Text(backend.displayName).tag(backend.rawValue)
+                    SettingRow("Summarize with", description: settings.summaryBackend.blurb) {
+                        Picker("", selection: $settings.summaryBackendRaw) {
+                            ForEach(SummaryBackend.allCases) { backend in
+                                Text(backend.displayName).tag(backend.rawValue)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(maxWidth: 280)
                     }
-                    .pickerStyle(.menu)
-                    helpText(settings.summaryBackend.blurb)
                 }
             }
 
@@ -532,8 +531,17 @@ struct SettingsView: View {
 
             Section("Sessions") {
                 if recordings.sessions.isEmpty {
-                    Text("No recordings yet.")
-                        .font(Theme.Typography.secondary).foregroundStyle(.secondary)
+                    Label {
+                        VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+                            Text("No recordings yet")
+                            Text("Session folders appear here after you record a meeting.")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "internaldrive")
+                            .foregroundStyle(.secondary)
+                    }
                 } else {
                     ForEach(recordings.sessions) { folder in
                         sessionRow(folder)
@@ -685,6 +693,7 @@ struct SettingsView: View {
                     .font(Theme.Typography.mono).foregroundStyle(.secondary)
             }
             helpText("How much clean speech from a speaker before they're auto-identified and named. Lower names people sooner but on less evidence.")
+            helpText("Manage voiceprints — rebuild, delete, and backup — in the People tab.")
         }
     }
 
@@ -760,13 +769,18 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Speaker detection") {
-                    helpText("SpeakerKit (pyannote v4, on the Neural Engine) labels who spoke. It runs once when the recording stops — the live transcript stays fast; speaker names appear at stop. Models download on first use.")
-                }
-
                 speakerRecognitionSection
             } else if settings.transcriptionEngine == .fluidAudio {
-                FluidModelSection(models: recording.fluidModels, isRecording: recording.isRecording)
+                FluidModelSection(models: recording.fluidModels, settings: settings, isRecording: recording.isRecording)
+
+                Section("English optimization") {
+                    Toggle("Parakeet Unified (English)", isOn: $settings.useParakeetUnified)
+                        .disabled(recording.isRecording)
+                    helpText("When the live language is English, use Parakeet Unified 0.6B for streaming (~2 s latency) and a full-attention offline batch pass. Non-English sessions keep Nemotron multilingual + TDT v3.")
+                    Toggle("Boost attendee names in transcript", isOn: $settings.boostAttendeeNames)
+                        .disabled(recording.isRecording)
+                    helpText("Imports attendee names and meeting-title tokens into custom vocabulary for the offline batch re-pass (multilingual path only).")
+                }
 
                 Section("Speaker separation") {
                     HStack(spacing: Theme.Spacing.medium) {
@@ -782,13 +796,19 @@ struct SettingsView: View {
                 speakerRecognitionSection
 
                 Section("Live transcript") {
-                    Picker("Latency", selection: Binding(
-                        get: { settings.liveStreamingTier },
-                        set: { settings.liveStreamingTier = $0 }
-                    )) {
-                        ForEach(FluidStreamingTier.allCases) { Text($0.label).tag($0) }
+                    if FluidAsrRouting.usesParakeetUnified(settings: settings) {
+                        Text("Parakeet Unified 2080 ms streaming (English). Latency tier applies to the Nemotron multilingual path only.")
+                            .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Picker("Latency", selection: Binding(
+                            get: { settings.liveStreamingTier },
+                            set: { settings.liveStreamingTier = $0 }
+                        )) {
+                            ForEach(FluidStreamingTier.allCases) { Text($0.label).tag($0) }
+                        }
+                        .disabled(recording.isRecording)
                     }
-                    .disabled(recording.isRecording)
                     Picker("Language", selection: $settings.liveStreamingLanguage) {
                         Text("Auto (all languages)").tag("auto")
                         Text("English").tag("en-US")
@@ -807,6 +827,12 @@ struct SettingsView: View {
                 Section("Final transcript") {
                     Toggle("Re-transcribe the whole recording after stopping", isOn: $settings.offlineAsrRepass)
                     helpText("A full-context batch pass over the recorded audio — more accurate than the live streaming chunks. Runs once at stop (adds a few seconds) and rewrites the saved transcript. Turn off to keep the live transcript as-is.")
+                }
+
+                Section("Advanced") {
+                    Toggle("GPU encoder (Parakeet v3 offline)", isOn: $settings.fluidGpuEncoder)
+                        .disabled(recording.isRecording)
+                    helpText("Runs the multilingual TDT v3 conformer encoder on GPU during the offline re-pass (~8% faster, WER-neutral). Parakeet Unified manages placement internally.")
                 }
             } else {
                 SpeechAnalyzerSettingsSection(
@@ -1017,13 +1043,7 @@ struct SettingsView: View {
 
     private var notesTab: some View {
         Form {
-            Section("Notes generation") {
-                SettingRow("Automatically generate notes when a recording finishes",
-                           description: "When off, use the “Generate meeting notes” button on the Preview after a recording.") {
-                    Toggle("", isOn: $settings.autoRunClaude).labelsHidden()
-                }
-            }
-            Section("Claude") {
+            Section {
                 LabeledContent("CLI") {
                     TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
                         .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
@@ -1033,6 +1053,10 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
                         .frame(maxWidth: 220)
                 }
+            } header: {
+                Text("Claude")
+            } footer: {
+                Text("Meeting notes are generated from the Preview tab after a recording — use the “Generate meeting notes” button on the action bar.")
             }
             Section("Prompt template") {
                 editorStyle(TextEditor(text: $settings.claudePromptTemplate), height: 120)
@@ -1085,7 +1109,7 @@ private struct CursorConnectionView: View {
                 ProgressView().controlSize(.small)
             }
             Spacer()
-            Button("Recheck") { connection.refresh() }
+            Button("Re-check") { connection.refresh() }
                 .disabled(connection.isChecking)
         }
         .onAppear { connection.refresh() }
@@ -1123,7 +1147,7 @@ private struct SpeechAnalyzerSettingsSection: View {
     ]
 
     var body: some View {
-        FluidModelSection(models: fluidModels, isRecording: isRecording)
+        FluidModelSection(models: fluidModels, settings: settings, isRecording: isRecording)
 
         Section("Speech language") {
             Picker("Locale", selection: $settings.speechLocale) {
@@ -1144,14 +1168,6 @@ private struct SpeechAnalyzerSettingsSection: View {
                 }
                 Spacer()
                 speechStatusControl
-            }
-        }
-
-        Section("Live transcript") {
-            SettingRow("Show a live transcript while recording",
-                       description: "Off = offline-only: capture audio silently and generate the full, speaker-attributed transcript when you stop. On streams text during the call using SpeechAnalyzer.") {
-                Toggle("", isOn: $settings.liveTranscriptEnabled).labelsHidden()
-                    .disabled(isRecording)
             }
         }
 
@@ -1201,7 +1217,15 @@ private struct SpeechAnalyzerSettingsSection: View {
 /// model list, which doesn't apply to this engine).
 private struct FluidModelSection: View {
     @ObservedObject var models: FluidModelManager
+    @ObservedObject var settings: AppSettings
     let isRecording: Bool
+
+    private var modelLabel: String {
+        if FluidAsrRouting.usesParakeetUnified(settings: settings) {
+            return "Parakeet Unified 0.6B (English)"
+        }
+        return "Parakeet TDT 0.6b v3 (multilingual)"
+    }
 
     var body: some View {
         Section("Speech model") {
@@ -1212,7 +1236,7 @@ private struct FluidModelSection: View {
 
             HStack(alignment: .top, spacing: Theme.Spacing.medium) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                    Text("Parakeet TDT 0.6b v3 (multilingual)")
+                    Text(modelLabel)
                         .font(Theme.Typography.controlLabel)
                     Text("Streaming on-device ASR. Downloads on first use.")
                         .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
@@ -1244,6 +1268,12 @@ private struct FluidModelSection: View {
                 Text("Downloading…")
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
             }
+        case .loading:
+            HStack(spacing: Theme.Spacing.small) {
+                ProgressView().controlSize(.small)
+                Text("Loading…")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+            }
         case .downloaded:
             Label("Active", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(Theme.Severity.success.color)
@@ -1263,21 +1293,30 @@ private struct FluidModelSection: View {
 private struct SettingsWindowConfigurator: NSViewRepresentable {
     var maxSize: CGSize
 
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        DispatchQueue.main.async { configure(view.window) }
+        DispatchQueue.main.async { configure(view.window, coordinator: context.coordinator) }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { configure(nsView.window) }
+        DispatchQueue.main.async { configure(nsView.window, coordinator: context.coordinator) }
     }
 
-    private func configure(_ window: NSWindow?) {
+    private func configure(_ window: NSWindow?, coordinator: Coordinator) {
         guard let window else { return }
-        window.styleMask.insert(.resizable)
-        window.title = "Settings"
-        window.minSize = NSSize(width: 680, height: 420)
+        if !coordinator.didConfigure {
+            coordinator.didConfigure = true
+            window.styleMask.insert(.resizable)
+            window.title = "Settings"
+            window.minSize = NSSize(width: 680, height: 420)
+        }
         window.maxSize = NSSize(width: maxSize.width, height: maxSize.height)
+    }
+
+    final class Coordinator {
+        var didConfigure = false
     }
 }

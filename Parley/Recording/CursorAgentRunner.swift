@@ -48,14 +48,54 @@ enum CursorAgentRunner {
             "--model", model,
             "--trust",
             "--workspace", summaryWorkingDirectory,
-            prompt,
+            PromptStdin.argvPlaceholder,
         ]
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        process.standardInput = FileHandle.nullDevice
+        try PromptStdin.attach(prompt, to: process)
         return (process, stdout, stderr)
+    }
+
+    /// Read-only vision pass: plan mode + vault workspace so the agent can open image files.
+    static func makeVisionProcess(
+        binaryPath: String,
+        prompt: String,
+        model: String,
+        vaultPath: String
+    ) throws -> (process: Process, stdout: Pipe, stderr: Pipe) {
+        guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
+            throw RunError.binaryNotFound(binaryPath)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.currentDirectoryURL = URL(fileURLWithPath: vaultPath)
+        process.arguments = [
+            "agent",
+            "-p",
+            "--mode", "plan",
+            "--output-format", "json",
+            "--model", model,
+            "--trust",
+            "--workspace", vaultPath,
+            PromptStdin.argvPlaceholder,
+        ]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try PromptStdin.attach(prompt, to: process)
+        return (process, stdout, stderr)
+    }
+
+    /// Drop agent chatter before the Diagrams section.
+    static func sanitizeDiagramText(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = trimmed.range(of: "## Diagrams", options: .caseInsensitive) {
+            return String(trimmed[range.lowerBound...])
+        }
+        return trimmed
     }
 
     /// Drop agent chatter before the first standard section heading.

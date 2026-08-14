@@ -43,10 +43,32 @@ final class MicCaptureGainTests: XCTestCase {
 
     func testRoomMode_bufferMatchesSamplePath() {
         let buffer = makeBuffer(frames: 4, value: 0.15)
-        MicInputGain.apply(to: buffer, mode: .room)
+        XCTAssertTrue(MicInputGain.apply(to: buffer, mode: .room))
         let ptr = buffer.floatChannelData![0]
         XCTAssertEqual(ptr[0], 0.3)
         XCTAssertEqual(ptr[1], 0.3)
+    }
+
+    func testRoomMode_int16BufferIsBoosted() {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        )!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2)!
+        buffer.frameLength = 2
+        buffer.int16ChannelData![0][0] = 1000
+        buffer.int16ChannelData![0][1] = -2000
+        XCTAssertTrue(MicInputGain.apply(to: buffer, mode: .room))
+        XCTAssertEqual(buffer.int16ChannelData![0][0], 2000)
+        XCTAssertEqual(buffer.int16ChannelData![0][1], -4000)
+    }
+
+    func testRegularMode_bufferIsUnchanged() {
+        let buffer = makeBuffer(frames: 2, value: 0.25)
+        XCTAssertFalse(MicInputGain.apply(to: buffer, mode: .regular))
+        XCTAssertEqual(buffer.floatChannelData![0][0], 0.25)
     }
 
     func testModeToggle_midStream_noCrash() {

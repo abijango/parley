@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreML
 import FluidAudio
 
 /// Per-speaker summary for the at-stop "Assign speakers" review panel.
@@ -15,11 +16,10 @@ struct CallSpeakerSummary: Identifiable, Equatable {
 /// Self-contained native transcription engine powered entirely by FluidAudio.
 ///
 /// Mixes the mic + system capture rings into a single 16 kHz mono stream and runs
-/// everything from that one buffer: live Parakeet ASR via the multilingual
-/// Nemotron `StreamingNemotronMultilingualAsrManager` (cache-aware true streaming,
-/// ~one-chunk latency) plus pyannote/WeSpeaker diarization via `DiarizerManager`.
-/// The accurate, token-timed final transcript is produced by the offline TDT v3
-/// batch re-pass at stop (`offlineTranscribe`).
+/// everything from that one buffer: live Parakeet ASR (Nemotron multilingual or
+/// Parakeet Unified on English when enabled) plus pyannote/WeSpeaker diarization
+/// via `DiarizerManager`. The accurate final transcript comes from the offline
+/// batch re-pass at stop (`offlineTranscribe`) when enabled.
 ///
 /// Display segments are DERIVED from ASR "units" (each with per-token timings) and
 /// the diarization timeline: every token is attributed to the diarized speaker whose
@@ -33,6 +33,9 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Saved voiceprints for cross-session auto-identification (nil = no matching).
     private let voiceprints: VoiceprintStore?
     private let identificationThreshold: Double
+    /// Launch-warmup holder. Live Start takes a prepared streaming session so the
+    /// ANE specialize does not run twice.
+    private let modelManager: FluidModelManager?
     /// Clean mixed file built at stop from the archived tracks (used for the final
     /// diarization + play-sample + retained clips). Set before `start()`.
     var mixedAudioURL: URL?
@@ -43,15 +46,23 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// re-processing an already-recorded call from History (there are no streaming
     /// units, so the batch pass is the only source of transcript text + timings).
     var forceOfflineAsr = false
+    /// Meeting metadata for custom vocabulary (set before `start()`).
+    var sessionAttendees = ""
+    var sessionMeetingTitle = ""
+    /// ASR stack for this engine instance. Offline jobs set this from the session
+    /// snapshot so a later Settings change cannot retarget the re-pass.
+    var asrProfile: FluidAsrProfile?
     /// Accepted for SpeakerCapableEngine conformance; not forwarded to FluidAudio's
     /// DiarizerManager (which uses its own clusteringThreshold from settings).
     var speakerCountHint: Int? = nil
-    // Live ASR is the multilingual Nemotron cache-aware STREAMING model — true
-    // low-latency (~one chunk) transcription. The old `SlidingWindowAsrManager`
-    // floored at chunk+right (~13s) because it re-ran a *batch* model over
-    // overlapping windows; this carries encoder state forward and emits within a
-    // chunk. The chunk tier + language come from settings at load time.
-    private let asr = StreamingNemotronMultilingualAsrManager()
+    // Live ASR — Nemotron multilingual or Parakeet Unified (English). Chunk tier +
+    // language come from settings at load time.
+    private var nemotronAsr: StreamingNemotronMultilingualAsrManager?
+    private var unifiedAsr: StreamingUnifiedAsrManager?
+    private var usesUnifiedRoute = false
+    /// Cached vocabulary + CTC models for the offline TDT re-pass (non-unified).
+    private var sessionVocabulary: CustomVocabularyContext?
+    private var sessionCtcModels: CtcModels?
 
     /// The same mixed audio fed to ASR, buffered for the diarizer (drained in chunks).
     private let diarRing = AudioRingBuffer(capacity: 16_000 * 60)
@@ -101,7 +112,16 @@ final class FluidAudioEngine: TranscriptionEngine {
     private var mixerTask: Task<Void, Never>?
     private var diarTask: Task<Void, Never>?
     private var lastPublishTime = Date.distantPast
-    private let publishMinInterval: TimeInterval = 0.2
+    /// EXPERIMENT (2026-08-07), see docs/LAYOUT_EXPLOSION_AUDIT.md — was 0.2.
+    /// Every publish hands `LiveTranscriptView` a freshly-built array of *all* segments,
+    /// and the volatile tail's text changes each tick, which defeats the view's
+    /// `Equatable` short-circuit and re-lays out every realised row. At a 0.2s floor that
+    /// is up to 5 full re-layouts per second, growing with the transcript — the suspected
+    /// cause of the 3–4½ minute freeze. Raising the floor cuts the re-layout rate ~5×
+    /// without touching any view code: if the freeze onset moves out correspondingly, the
+    /// mechanism is confirmed and the structural fix (splitting the volatile tail into its
+    /// own view) is justified. Revert or tune once that lands.
+    private let publishMinInterval: TimeInterval = 1.0
     private var publishDeferredTask: Task<Void, Never>?
 
     /// 16 kHz mono — the format every FluidAudio model consumes.
@@ -112,16 +132,21 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// Fired when a speaker is auto-identified to a saved voiceprint (the person's name).
     var onSpeakerIdentified: ((String) -> Void)?
 
-    init(settings: AppSettings, voiceprints: VoiceprintStore? = nil, identificationThreshold: Double = 0.6) {
+    init(settings: AppSettings, voiceprints: VoiceprintStore? = nil,
+         identificationThreshold: Double = 0.6, modelManager: FluidModelManager? = nil) {
         self.settings = settings
         self.voiceprints = voiceprints
         self.identificationThreshold = identificationThreshold
+        self.modelManager = modelManager
     }
 
     // MARK: - Derived timeline
 
     func confirmedTimeline() -> [Segment] { derive(confirmedUnits, volatile: nil) }
     func finalTimeline() -> [Segment] { derive(confirmedUnits, volatile: volatileUnit) }
+    func diarizedTurns() -> [DiarizationAttribution.Turn] {
+        DiarizationAttribution.turns(from: diarSegments)
+    }
     func seed(_ segments: [Segment]) {
         seeded = segments
         invalidateDerivedCache()
@@ -355,7 +380,7 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// offline token-timed transcript. Without per-word tokens every unit collapses
     /// into one ▁-less "word" and the whole live history lands on a single speaker.
     /// The offline TDT v3 re-pass replaces these with real timings at stop.
-    private static func wordToks(_ text: String, start: TimeInterval, end: TimeInterval) -> [Tok] {
+    nonisolated private static func wordToks(_ text: String, start: TimeInterval, end: TimeInterval) -> [Tok] {
         let words = text.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
         guard !words.isEmpty else { return [] }
         let step = max(0, end - start) / Double(words.count)
@@ -372,19 +397,44 @@ final class FluidAudioEngine: TranscriptionEngine {
         let clusterThreshold = Float(settings.diarizationThreshold)
         let chunkMs = settings.liveStreamingTier.rawValue
         let language = settings.liveStreamingLanguage
+        usesUnifiedRoute = FluidAsrRouting.usesParakeetUnified(settings: settings)
+        asrProfile = FluidAsrBinding.profile(from: settings)
+        let prepareKey = FluidPrepareKey.current(settings: settings)
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
-                // Download (cached after first run) + load the multilingual streaming
-                // variant for the chosen tier/language, then route its cumulative
-                // partial transcript into the live timeline via the callback.
-                let dir = try await StreamingNemotronMultilingualAsrManager.downloadVariant(
-                    languageCode: language, chunkMs: chunkMs)
-                try await self.asr.loadModels(from: dir)
-                await self.asr.setPartialCallback { [weak self] text in
-                    Task { @MainActor in self?.applyPartial(text, startElapsed: startElapsed) }
+                if let warmed = await self.modelManager?.takePrepared(matching: prepareKey) {
+                    switch warmed {
+                    case .unified(let unified):
+                        self.unifiedAsr = unified
+                        self.usesUnifiedRoute = true
+                        AppLog.log("FluidAudio engine ready — Parakeet Unified streaming (preloaded)", category: "record")
+                    case .nemotron(let nemotron):
+                        await nemotron.setPartialCallback { [weak self] text in
+                            Task { @MainActor in self?.applyPartial(text, startElapsed: startElapsed) }
+                        }
+                        self.nemotronAsr = nemotron
+                        self.usesUnifiedRoute = false
+                        AppLog.log("FluidAudio engine ready — Nemotron multilingual streaming (preloaded)", category: "record")
+                    }
+                } else if self.usesUnifiedRoute {
+                    let variant = FluidAsrRouting.unifiedStreamingVariant()
+                    let config = variant.unifiedConfig ?? UnifiedConfig()
+                    let unified = StreamingUnifiedAsrManager(config: config)
+                    try await unified.loadModels()
+                    self.unifiedAsr = unified
+                    AppLog.log("FluidAudio engine ready — Parakeet Unified streaming (\(config.latencyMs)ms)", category: "record")
+                } else {
+                    let dir = try await StreamingNemotronMultilingualAsrManager.downloadVariant(
+                        languageCode: language, chunkMs: chunkMs)
+                    let nemotron = StreamingNemotronMultilingualAsrManager()
+                    try await nemotron.loadModels(from: dir)
+                    await nemotron.setPartialCallback { [weak self] text in
+                        Task { @MainActor in self?.applyPartial(text, startElapsed: startElapsed) }
+                    }
+                    self.nemotronAsr = nemotron
+                    AppLog.log("FluidAudio engine ready — Nemotron multilingual streaming (\(chunkMs)ms, \(language))", category: "record")
                 }
-                AppLog.log("FluidAudio engine ready — Nemotron multilingual streaming (\(chunkMs)ms, \(language))", category: "record")
                 self.beginConsumingAndMixing(micRing: micRing, systemRing: systemRing,
                                              startElapsed: startElapsed, clusterThreshold: clusterThreshold)
             } catch {
@@ -398,8 +448,18 @@ final class FluidAudioEngine: TranscriptionEngine {
         mixerTask?.cancel()
         diarTask?.cancel()
         loadTask = nil; mixerTask = nil; diarTask = nil
-        _ = try? await asr.finish()
-        await asr.cleanup()
+        if let unified = unifiedAsr {
+            _ = try? await unified.finish()
+            await unified.cleanup()
+            unifiedAsr = nil
+        }
+        if let nemotron = nemotronAsr {
+            _ = try? await nemotron.finish()
+            await nemotron.cleanup()
+            nemotronAsr = nil
+        }
+        sessionVocabulary = nil
+        sessionCtcModels = nil
     }
 
     // MARK: - Consume updates + feed mixed audio
@@ -410,19 +470,28 @@ final class FluidAudioEngine: TranscriptionEngine {
         liveSegStart = startElapsed
 
         // Mix both capture rings into one mono stream; feed the recognizer AND
-        // buffer the same samples for the diarizer. The streaming ASR delivers its
-        // running transcript via the partial callback set in `start()`.
-        let asr = self.asr
+        // buffer the same samples for the diarizer.
+        let useUnified = usesUnifiedRoute
+        let nemotron = nemotronAsr
+        let unified = unifiedAsr
         let diarRing = self.diarRing
-        mixerTask = Task.detached {
+        mixerTask = Task.detached { [weak self] in
             var fedSamples = 0
             var lastLogged = 0
             while !Task.isCancelled {
                 if let mixed = Self.mix(mic: micRing, system: systemRing), !mixed.isEmpty {
-                    // `process(samples:)` appends the 16 kHz mix and drains every
-                    // complete chunk through the encoder (firing the partial
-                    // callback); the diarizer reads the same samples.
-                    try? await asr.process(samples: mixed)
+                    if useUnified, let unified {
+                        if let buf = Self.makePCMBuffer(mixed) {
+                            try? await unified.appendAudio(buf)
+                            try? await unified.processBufferedAudio()
+                            let timings = await unified.consumeTokenTimings()
+                            if !timings.isEmpty {
+                                await self?.applyStreamingTokenTimings(timings)
+                            }
+                        }
+                    } else if let nemotron {
+                        try? await nemotron.process(samples: mixed)
+                    }
                     mixed.withUnsafeBufferPointer { diarRing.write($0) }
                     fedSamples += mixed.count
                     if fedSamples - lastLogged >= 16_000 * 5 {
@@ -432,7 +501,6 @@ final class FluidAudioEngine: TranscriptionEngine {
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
-            // The clean mixed.caf is built from the archived tracks at stop, not here.
         }
 
         // Diarize in ~10s chunks on a long-lived DiarizerManager so in-session
@@ -471,7 +539,9 @@ final class FluidAudioEngine: TranscriptionEngine {
 
     /// Load diarization models and build a session-long manager (owned by the diarTask).
     nonisolated private static func makeDiarizer(clusterThreshold: Float) async throws -> DiarizerManager {
-        let models = try await DiarizerModels.downloadIfNeeded()
+        var mlConfig = MLModelConfiguration()
+        mlConfig.computeUnits = .all
+        let models = try await DiarizerModels.downloadIfNeeded(configuration: mlConfig)
         var config = DiarizerConfig()
         config.clusteringThreshold = clusterThreshold
         // NOTE: leave the segmentation params (minSpeechDuration / minSilenceGap) at
@@ -669,17 +739,37 @@ final class FluidAudioEngine: TranscriptionEngine {
         let mic = micArchiveURL, sys = systemArchiveURL
         let threshold = Float(settings.diarizationThreshold)
         let doAsr = settings.offlineAsrRepass || forceOfflineAsr
-        let version: AsrModelVersion = settings.parakeetVersion == .v2 ? .v2 : .v3
+        let profile = asrProfile ?? FluidAsrBinding.profile(from: settings)
+        let useUnified = profile == .parakeetUnified
+        let version: AsrModelVersion = profile == .parakeetV2 ? .v2 : .v3
+        let gpuEncoder = settings.fluidGpuEncoder
+        var vocab = sessionVocabulary
+        var ctc = sessionCtcModels
+        if vocab == nil, !useUnified, settings.boostAttendeeNames {
+            let terms = FluidVocabularyBuilder.build(
+                attendees: sessionAttendees,
+                meetingTitle: sessionMeetingTitle,
+                enabled: true)
+            if let loaded = await FluidVocabularyBuilder.loadContext(terms: terms) {
+                vocab = loaded.0
+                ctc = loaded.1
+                AppLog.log("FluidAudio offline vocabulary: \(loaded.0.terms.count) term(s)", category: "record")
+            }
+        }
+        let vocabSnapshot = vocab
+        let ctcSnapshot = ctc
         // One detached pass: build the clean mix, resample once, then run the
         // diarizer AND (optionally) the batch ASR over the same samples.
-        let pass: OfflinePassResult = await Task.detached {
+        let pass: OfflinePassResult = await CancellableDetached.run {
             // Build a CLEAN mixed file from the archived tracks (the live per-tick
             // mixer is glitchy — fine for streaming ASR, bad for diarization + playback).
             let built = Self.buildCleanMix(mic: mic, system: sys, output: url)
+            guard !Task.isCancelled else { return OfflinePassResult(segs: nil, tokens: nil) }
             guard let samples = try? AudioConverter().resampleAudioFile(url), !samples.isEmpty else {
                 AppLog.log("finalizeDiarization: couldn't read clean mix (built=\(built))", category: "record")
                 return OfflinePassResult(segs: nil, tokens: nil)
             }
+            if Task.isCancelled { return OfflinePassResult(segs: nil, tokens: nil) }
             // Diarization (independent of ASR — one failing doesn't block the other).
             // Plain whole-file diarization with library-default segmentation — the
             // behavior that separated speakers reliably. No forced re-clustering.
@@ -695,10 +785,22 @@ final class FluidAudioEngine: TranscriptionEngine {
             } else {
                 AppLog.log("finalizeDiarization: diarization unavailable (init or run failed)", category: "record")
             }
+            if Task.isCancelled { return OfflinePassResult(segs: segs, tokens: nil) }
             // Higher-accuracy offline transcript (full-context batch Parakeet).
-            let tokens = doAsr ? await Self.offlineTranscribe(samples: samples, version: version) : nil
+            let tokens: [TokTiming]?
+            if doAsr {
+                if useUnified {
+                    tokens = await Self.offlineTranscribeUnified(samples: samples)
+                } else {
+                    tokens = await Self.offlineTranscribe(
+                        samples: samples, version: version, gpuEncoder: gpuEncoder,
+                        vocabulary: vocabSnapshot, ctcModels: ctcSnapshot)
+                }
+            } else {
+                tokens = nil
+            }
             return OfflinePassResult(segs: segs, tokens: tokens)
-        }.value
+        }
 
         // Apply the offline transcript first (replaces the streaming units), so the
         // re-derived segments pick up the fresh diarization labels below.
@@ -746,26 +848,73 @@ final class FluidAudioEngine: TranscriptionEngine {
     private struct TokTiming: Sendable { let text: String; let start: TimeInterval; let end: TimeInterval }
     private struct OfflinePassResult: Sendable { let segs: [Seg]?; let tokens: [TokTiming]? }
 
-    /// Batch (full-context) Parakeet transcription of the whole recording — more
-    /// accurate than the 11 s sliding-window stream. Returns token-level timings, or
-    /// nil on failure (the caller keeps the streaming transcript). Runs off-main.
-    nonisolated private static func offlineTranscribe(samples: [Float], version: AsrModelVersion) async -> [TokTiming]? {
+    /// Batch Parakeet transcription — TDT v3 (multilingual path) with optional
+    /// vocabulary rescoring. Returns token-level timings, or nil on failure.
+    nonisolated private static func offlineTranscribe(
+        samples: [Float],
+        version: AsrModelVersion,
+        gpuEncoder: Bool,
+        vocabulary: CustomVocabularyContext?,
+        ctcModels: CtcModels?
+    ) async -> [TokTiming]? {
         do {
-            let models = try await AsrModels.downloadAndLoad(version: version)
+            let encoderUnits: MLComputeUnits? = gpuEncoder ? .cpuAndGPU : nil
+            let models = try await AsrModels.downloadAndLoad(
+                version: version, encoderComputeUnits: encoderUnits)
             let mgr = AsrManager(config: .default)
             try await mgr.loadModels(models)
             var state = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
-            let result = try await mgr.transcribe(samples, decoderState: &state)
+            var result = try await mgr.transcribe(samples, decoderState: &state)
             await mgr.cleanup()
+
+            var timings = result.tokenTimings
+            if let vocab = vocabulary, let ctc = ctcModels,
+               let tokenTimings = timings, !tokenTimings.isEmpty {
+                let rescored = await FluidVocabularyRescorer.apply(
+                    transcript: result.text,
+                    tokenTimings: tokenTimings,
+                    samples: samples,
+                    vocabulary: vocab,
+                    ctcModels: ctc)
+                if rescored.modified {
+                    AppLog.log("FluidAudio offline vocabulary: applied rescore", category: "record")
+                    let spanStart = tokenTimings.first?.startTime ?? 0
+                    let spanEnd = tokenTimings.last?.endTime
+                        ?? TimeInterval(samples.count) / 16_000
+                    return Self.wordToks(rescored.text, start: spanStart, end: spanEnd).map {
+                        TokTiming(text: $0.text, start: $0.start, end: $0.end)
+                    }
+                }
+            }
+
             if let timings = result.tokenTimings, !timings.isEmpty {
                 return timings.map { TokTiming(text: $0.token, start: $0.startTime, end: $0.endTime) }
             }
-            // No token timings — fall back to one span covering the whole clip.
             let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             return [TokTiming(text: text, start: 0, end: TimeInterval(samples.count) / 16_000)]
         } catch {
             AppLog.log("finalizeDiarization: offline ASR re-pass failed: \(error.localizedDescription)", category: "record")
+            return nil
+        }
+    }
+
+    /// Parakeet Unified offline batch (15 s windows). No per-token API — spread text
+    /// evenly across the clip duration for diarization attribution.
+    nonisolated private static func offlineTranscribeUnified(samples: [Float]) async -> [TokTiming]? {
+        do {
+            let mgr = UnifiedAsrManager()
+            try await mgr.loadModels()
+            let text = try await mgr.transcribe(samples)
+            await mgr.cleanup()
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let duration = TimeInterval(samples.count) / 16_000
+            return Self.wordToks(trimmed, start: 0, end: duration).map {
+                TokTiming(text: $0.text, start: $0.start, end: $0.end)
+            }
+        } catch {
+            AppLog.log("finalizeDiarization: unified offline ASR failed: \(error.localizedDescription)", category: "record")
             return nil
         }
     }
@@ -898,6 +1047,38 @@ final class FluidAudioEngine: TranscriptionEngine {
             if let base = src.baseAddress { pcm.floatChannelData![0].update(from: base, count: samples.count) }
         }
         return pcm
+    }
+
+    /// Ingest native per-token timings from Parakeet Unified streaming — replaces
+    /// the wall-clock `wordToks` approximation with real RNNT frame positions.
+    private func applyStreamingTokenTimings(_ timings: [TokenTiming]) {
+        guard !timings.isEmpty else { return }
+        var newUnits: [ASRUnit] = []
+        var cur: [Tok] = []
+        var lastEnd: TimeInterval?
+        func flush() {
+            defer { cur = [] }
+            guard !cur.isEmpty else { return }
+            let text = Self.reconstruct(cur.map(\.text))
+            guard !text.isEmpty else { return }
+            newUnits.append(ASRUnit(id: UUID(), tokens: cur, text: text, confirmed: true))
+        }
+        for t in timings {
+            if let le = lastEnd, t.startTime - le > 0.8 { flush() }
+            cur.append(Tok(text: t.token, start: t.startTime, end: t.endTime))
+            lastEnd = t.endTime
+        }
+        flush()
+        guard !newUnits.isEmpty else { return }
+        confirmedUnits.append(contentsOf: newUnits)
+        volatileUnit = nil
+        invalidateDerivedCache()
+        publish(immediate: true)
+    }
+
+    /// Build a 16 kHz mono PCM buffer from float samples for unified streaming ASR.
+    nonisolated private static func makePCMBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
+        makeBuffer(samples)
     }
 
     /// Consume a cumulative partial transcript from the streaming ASR. The text is

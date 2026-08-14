@@ -12,7 +12,7 @@ enum RecordingState: Equatable {
 }
 
 /// Owns a recording session end-to-end: permissions, the two capture sources,
-/// their ring buffers, the shared clock, the model, the two transcription
+/// their ring buffers, the model, the two transcription
 /// pipelines, and the merged live timeline.
 @MainActor
 final class RecordingController: ObservableObject {
@@ -24,7 +24,7 @@ final class RecordingController: ObservableObject {
         // speaker-review sheet is open, so when either settles we may now be free to
         // start (or restart) a full-delay countdown. `dropFirst` skips the initial
         // publish at construction; `armClearIfReady` is self-gating, so a no-op is cheap.
-        notes.$state.dropFirst().receive(on: RunLoop.main)
+        summaryService.$runningID.dropFirst().receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.armClearIfReady() }
             .store(in: &cancellables)
         $pendingSpeakerReview.dropFirst().receive(on: RunLoop.main)
@@ -120,7 +120,7 @@ final class RecordingController: ObservableObject {
     /// older session's data, so it must not pin the Record view (which could otherwise
     /// stay un-clearable indefinitely under a queue backlog).
     private var clearIsBusy: Bool {
-        pendingSpeakerReview != nil || pendingEnrichment != nil || notes.isRunning
+        pendingSpeakerReview != nil || pendingEnrichment != nil || summaryService.runningID != nil
     }
 
     /// Bumped whenever a saved transcript's body is rewritten (offline pass, speaker
@@ -156,7 +156,6 @@ final class RecordingController: ObservableObject {
     private let systemRing = AudioRingBuffer(capacity: 16_000 * 30)
     private var micCapture: MicCapture?
     private var systemCapture: SystemAudioCapture?
-    private var clock: RecordingClock?
     private var sessionDirectory: URL?
     private var recordingStartDate: Date?
     private var meterTimer: Timer?
@@ -206,7 +205,10 @@ final class RecordingController: ObservableObject {
             engine = wsk
         case .fluidAudio:
             let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
-                                         identificationThreshold: settings.identificationThreshold)
+                                         identificationThreshold: settings.identificationThreshold,
+                                         modelManager: fluidModels)
+            fluid.sessionAttendees = meeting.attendees
+            fluid.sessionMeetingTitle = meeting.meetingTitle
             // Auto-add a recognized person to the attendees list (above threshold).
             fluid.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
             engine = fluid
@@ -505,9 +507,8 @@ final class RecordingController: ObservableObject {
 
     private var didWarmup = false
 
-    /// One-time launch warmup: surface both permission prompts together up front
-    /// and load the model in the background, so the first recording neither
-    /// prompts nor waits.
+    /// One-time launch warmup. Called from `AppDelegate.applicationDidFinishLaunching`
+    /// so menu-bar Start and call detection do not wait on the Record tab appearing.
     func launchWarmup() {
         guard !didWarmup else { return }
         didWarmup = true
@@ -641,17 +642,17 @@ final class RecordingController: ObservableObject {
 
     /// Loads (and on first run downloads) the model in the background so the
     /// first Start is instant instead of paying cold-start latency at record time.
-    /// Engine-aware: only the WhisperKit path uses `ModelManager`; the FluidAudio
-    /// engine loads its own model at record time (we just check presence here).
+    /// WhisperKit and FluidAudio both `prepare` into a shared holder. SpeechAnalyzer
+    /// only needs locale assets on disk plus Fluid diarization presence.
     func preloadModel() {
         switch settings.transcriptionEngine {
         case .whisperKit:
             Task { _ = await models.prepare(settings.model) }
         case .fluidAudio:
-            fluidModels.refreshPresence()
+            Task { _ = await fluidModels.prepare() }
         case .speechAnalyzer:
             speechAssets.refreshPresence(for: settings.speechLocale)
-            fluidModels.refreshPresence()   // diarization models
+            fluidModels.refreshPresence()
         }
     }
 
@@ -672,7 +673,7 @@ final class RecordingController: ObservableObject {
             meeting.meetingTitle = "Recorded call"   // fallback for the notification-Start path
         }
         live.state = .preparing
-        live.micInputMode = .regular
+        // Keep the user's Regular/Room selection across Start — do not reset here.
         cancelPendingClear(); clearArmable = false   // a new recording supersedes any pending auto-clear
         resetSegmentPublishState()
         lastResult = nil
@@ -698,6 +699,14 @@ final class RecordingController: ObservableObject {
             return
         }
         micDenied = false
+
+        if settings.transcriptionEngine == .speechAnalyzer {
+            guard await PermissionManager.requestSpeechRecognition() else {
+                live.state = .error("Speech recognition access denied. Enable it in System Settings → Privacy & Security → Speech Recognition.")
+                startedByDetection = false
+                return
+            }
+        }
 
         // Capture-first: start capturing immediately and load the model in
         // PARALLEL (transcription catches up when it's ready) so a detected call
@@ -729,7 +738,7 @@ final class RecordingController: ObservableObject {
         // Recovery-sheet resume of an auto-started meeting both land here).
         startedByDetection = m.startedByDetection
         live.state = .preparing
-        live.micInputMode = .regular
+        // Keep the user's Regular/Room selection across Resume — do not reset here.
         cancelPendingClear(); clearArmable = false   // a resumed recording supersedes any pending auto-clear
         meeting.meetingTitle = m.title
         meeting.attendees = m.attendees
@@ -746,6 +755,13 @@ final class RecordingController: ObservableObject {
             return
         }
         micDenied = false
+
+        if settings.transcriptionEngine == .speechAnalyzer {
+            guard await PermissionManager.requestSpeechRecognition() else {
+                live.state = .error("Speech recognition access denied. Enable it in System Settings → Privacy & Security → Speech Recognition.")
+                return
+            }
+        }
 
         let dir = session.dir
         sessionDirectory = dir
@@ -783,8 +799,6 @@ final class RecordingController: ObservableObject {
         let mic = MicCapture(ringBuffer: micRing, archiveURL: micArchive)
         mic.micInputMode = live.micInputMode
         let system = SystemAudioCapture(ringBuffer: systemRing, archiveURL: systemArchive)
-        let clock = RecordingClock()
-        self.clock = clock
         recordingStartDate = Date()
         live.recordingStarted = recordingStartDate
 
@@ -816,9 +830,14 @@ final class RecordingController: ObservableObject {
             eng.micArchiveURL = micArchive
             eng.systemArchiveURL = systemArchive
         }
+        offlineService.yieldToLiveRecording()
+        summaryService.yieldToLiveRecording()
         engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
 
         startMeterTimer()
+        // Session-scoped freeze detector: captures main-thread stacks if the main
+        // actor wedges mid-recording (see docs/RECORDING_FREEZE_INVESTIGATION.md).
+        MainActorWatchdog.shared.start()
         if reactivate { reactivateSessionManifest(dir: sessionDir) }
         else { beginSessionManifest(dir: sessionDir) }
         live.state = .recording
@@ -865,14 +884,20 @@ final class RecordingController: ObservableObject {
         if remote >= Self.remoteActiveFloor { remoteLastActive = now }
         let remoteActiveRecently = remoteLastActive.map { now.timeIntervalSince($0) < 4 } ?? false
         let micSilentFor = micLastActive.map { now.timeIntervalSince($0) } ?? 0
-        live.micSeemsSilent = !micDenied && remoteActiveRecently && micSilentFor >= Self.silenceGrace
+        // Assign only on change: `@Published` doesn't dedupe, so an unconditional write
+        // here published `objectWillChange` 5×/second for the whole meeting, re-running
+        // every body that observes `live` (the entire record detail tree).
+        let silent = !micDenied && remoteActiveRecently && micSilentFor >= Self.silenceGrace
+        if live.micSeemsSilent != silent { live.micSeemsSilent = silent }
     }
 
     private func stopTimers() {
         meterTimer?.invalidate(); meterTimer = nil
-        live.micLevel = 0; live.remoteLevel = 0
+        if live.micLevel != 0 { live.micLevel = 0 }
+        if live.remoteLevel != 0 { live.remoteLevel = 0 }
         lastPublishedMicLevel = 0; lastPublishedRemoteLevel = 0
-        live.micSeemsSilent = false; micLastActive = nil; remoteLastActive = nil
+        if live.micSeemsSilent { live.micSeemsSilent = false }
+        micLastActive = nil; remoteLastActive = nil
     }
 
     private func partialURL() -> URL? {
@@ -944,6 +969,10 @@ final class RecordingController: ObservableObject {
         systemCapture?.stop()
         micCapture = nil
         systemCapture = nil
+        // Only now — `MicCapture.stop()` does a `rebuildQueue.sync` from this thread, the
+        // one named main-thread block candidate in the codebase. Keeping the watchdog
+        // armed across teardown is the whole point of having it.
+        MainActorWatchdog.shared.stop()
 
         // Tear down the engine off the main actor; finalize() reads the
         // already-populated timeline synchronously, so it needn't wait on this. The
@@ -953,7 +982,6 @@ final class RecordingController: ObservableObject {
         // previous call's offline work.
         let engine = self.engine
         Task { await engine?.stop() }
-        clock = nil
 
         finalize()
     }
@@ -987,8 +1015,10 @@ final class RecordingController: ObservableObject {
         // starting immediately (which reassigns `sessionDirectory`/`engine`) can never
         // redirect this session's offline job — the root cause of the data-loss bug.
         let sessionDir = sessionDirectory
+        let sessionManifest = manifest
         let isSpeakerEngine = engine is SpeakerCapableEngine
         let autoSummarize = settings.autoRunClaude
+        let partialPath = sessionDir.map { $0.appendingPathComponent("transcript.partial.md") }
         // Link to the session audio (mic track) if it was archived.
         let audioPath = sessionDir.map { $0.appendingPathComponent("mic.caf").path }
 
@@ -1010,7 +1040,7 @@ final class RecordingController: ObservableObject {
                     vaultURL: vaultURL
                 )
                 AppLog.log("Transcript written: \(result.url.path)\(segments.isEmpty ? " (no speech — saved for the record + audio link)" : "")", category: "record")
-                if let p = partialURL() { try? FileManager.default.removeItem(at: p) }   // clean recovery files
+                if let p = partialPath { try? FileManager.default.removeItem(at: p) }
                 if let dir = sessionDir {
                     try? FileManager.default.removeItem(at: dir.appendingPathComponent("segments.jsonl"))
                 }
@@ -1046,7 +1076,14 @@ final class RecordingController: ObservableObject {
                 // Transcript write succeeded — stamp the manifest finalized NOW, before
                 // the offline enqueue. `setOfflineStatus` does a read-modify-write on the
                 // manifest, so the `.finalized` stamp must be on disk first.
-                stampFinalizedManifest()
+                stampFinalizedManifest(
+                    directory: sessionDir,
+                    manifest: sessionManifest,
+                    title: title,
+                    attendees: attendees,
+                    filing: destination,
+                    manualNotes: manual,
+                    attachments: attachments)
                 // Hand the finalized session to the idle-gated offline queue: ASR re-pass
                 // + speaker detect + compaction, run when nothing is recording. The job is
                 // a self-contained snapshot, so it's safe even if a new recording starts.
@@ -1056,7 +1093,10 @@ final class RecordingController: ObservableObject {
                     offlineService.enqueue(OfflineJob(
                         sessionDir: dir, transcriptURL: result.url, title: title,
                         attendees: attendees, filing: destination,
-                        presentReviewWhenDone: false, autoSummarize: autoSummarize))
+                        presentReviewWhenDone: false, autoSummarize: autoSummarize,
+                        engine: sessionManifest?.transcriptionEngine ?? settings.transcriptionEngine,
+                        fluidAsrProfile: FluidAsrBinding.resolved(
+                            stored: sessionManifest?.fluidAsrProfile, settings: settings)))
                     offlineService.runNextIfIdle()
                 }
                 // The transcript is on disk — the Record view is settled and eligible for
@@ -1186,12 +1226,17 @@ final class RecordingController: ObservableObject {
         guard FileManager.default.fileExists(atPath: micURL.path) else {
             lastResult = "The audio for this recording was deleted — can't detect speakers."; return
         }
+        let stored = SessionStore.read(dir)
+        let engine = stored?.transcriptionEngine ?? settings.transcriptionEngine
         SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: transcript.path,
                                       presentReviewWhenDone: true, in: dir)
         offlineService.enqueue(OfflineJob(
             sessionDir: dir, transcriptURL: transcript, title: title,
             attendees: attendees, filing: filing,
-            presentReviewWhenDone: true, autoSummarize: false))
+            presentReviewWhenDone: true, autoSummarize: false,
+            engine: engine,
+            fluidAsrProfile: FluidAsrBinding.resolved(
+                stored: stored?.fluidAsrProfile, settings: settings)))
         offlineService.runNextIfIdle()
         lastResult = isRecording
             ? "Speaker detection queued — runs when the current recording stops."
@@ -1645,6 +1690,19 @@ final class RecordingController: ObservableObject {
         summaryService.enqueueIfPolicyAllows(item, trigger: .freshRecording)
     }
 
+    /// Record-tab Preview "Generate notes" uses the same queue as History, not NotesGenerator.
+    func enqueuePreviewSummary() {
+        guard let url = lastTranscriptURL else { return }
+        let meta = TranscriptWriter.parseFrontmatter(url)
+            ?? TranscriptMeta(title: url.deletingPathExtension().lastPathComponent,
+                              date: Date(), attendees: [], filing: meeting.destinationPath,
+                              status: "unprocessed", note: nil, audio: nil, type: "recording")
+        let item = store.items.first(where: { $0.url == url })
+            ?? store.items.first { $0.url.lastPathComponent == url.lastPathComponent }
+            ?? TranscriptItem(url: url, meta: meta, isProcessed: false)
+        summaryService.enqueueIfPolicyAllows(item, trigger: .userInitiated)
+    }
+
     /// Rewrite the saved transcript from the engine's current (post-offline-pass)
     /// timeline + attendees. Used both after the speaker review and automatically
     /// once the offline diarization + ASR re-pass finishes (so the saved file gets
@@ -1748,32 +1806,35 @@ final class RecordingController: ObservableObject {
     /// reloads on the next call/record while capture proceeds, so the only cost
     /// is a short catch-up at the start of that meeting.
     /// Free WhisperKit GPU/ANE memory before a local LLM summary so Qwen can load.
-    /// No-op while recording. FluidAudio models are left alone (separate footprint).
+    /// No-op while recording. Also drops a Fluid warmup session that nobody took.
     func prepareForLocalSummary() async {
         guard !isRecording else { return }
         await models.unload()
-        AppLog.log("Summary(local): unloaded WhisperKit ahead of MLX summary", category: "summary")
+        await fluidModels.unload()
+        AppLog.log("Summary(local): unloaded WhisperKit / Fluid warmup ahead of MLX summary", category: "summary")
     }
 
     private func scheduleIdleUnload() {
         idleUnloadTimer?.invalidate(); idleUnloadTimer = nil
-        // Idle-unload only applies to the persistent WhisperKit model. FluidAudio
-        // loads its models per-recording and releases them on stop, so there's
-        // nothing to idle-unload (and logging it would be misleading).
-        guard settings.idleUnloadEnabled, settings.transcriptionEngine == .whisperKit else { return }
+        guard settings.idleUnloadEnabled else { return }
+        let engine = settings.transcriptionEngine
+        guard engine == .whisperKit || engine == .fluidAudio else { return }
         let interval = max(60, settings.idleUnloadMinutes * 60)
         idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.settings.idleUnloadEnabled,
                       self.live.state == .idle, !self.isRecording else { return }
-                // Don't unload while the offline queue has work — it needs the heavier
-                // batch model and would just have to reload it immediately.
                 if self.offlineService.hasWork {
-                    self.scheduleIdleUnload()   // re-arm; try again after another idle stretch
+                    self.scheduleIdleUnload()
                     return
                 }
                 AppLog.log("Idle \(Int(interval / 60))min — unloading model to free memory", category: "model")
-                Task { await self.models.unload() }
+                Task {
+                    if self.settings.transcriptionEngine == .whisperKit {
+                        await self.models.unload()
+                    }
+                    await self.fluidModels.unload()
+                }
             }
         }
     }
@@ -1788,7 +1849,7 @@ final class RecordingController: ObservableObject {
     /// manifest that's still `active` at next launch means we crashed.
     private func beginSessionManifest(dir: URL) {
         let call = callDetector.activeCall
-        let m = SessionManifest(
+        var m = SessionManifest(
             id: dir.lastPathComponent,
             title: meeting.meetingTitle, attendees: meeting.attendees, filing: meeting.destinationPath,
             model: settings.model.rawValue, computeMode: settings.computeMode.rawValue,
@@ -1797,6 +1858,8 @@ final class RecordingController: ObservableObject {
             callBundleID: call?.bundleID, callDisplayName: call?.displayName,
             manualNotes: meeting.manualNotes, attachments: meeting.attachments.isEmpty ? nil : meeting.attachments,
             audioTracks: ["mic.caf", "system.caf"])
+        m.transcriptionEngine = settings.transcriptionEngine
+        m.fluidAsrProfile = FluidAsrBinding.profile(from: settings)
         manifest = m
         SessionStore.write(m, to: dir)
         AppLog.log("Session manifest written (active) — \(dir.lastPathComponent)", category: "record")
@@ -1835,18 +1898,52 @@ final class RecordingController: ObservableObject {
     /// Refresh the manifest with the latest user-editable metadata + heartbeat
     /// (so a mid-call title/attendee/notes edit survives a crash), or finalize it.
     private func persistManifest(status: SessionManifest.Status) {
-        guard var m = manifest, let dir = sessionDirectory else { return }
-        m.title = meeting.meetingTitle
-        m.attendees = meeting.attendees
-        m.filing = meeting.destinationPath
-        m.manualNotes = meeting.manualNotes
-        m.attachments = meeting.attachments.isEmpty ? nil : meeting.attachments
-        m.titleSource = meeting.titleSource
-        m.suggestedAttendees = meeting.suggestedAttendees.isEmpty ? nil : meeting.suggestedAttendees
-        m.lastHeartbeat = Date()
-        m.status = status
-        manifest = m
-        SessionStore.write(m, to: dir)
+        persistManifest(
+            status: status,
+            manifest: manifest,
+            directory: sessionDirectory,
+            title: meeting.meetingTitle,
+            attendees: meeting.attendees,
+            filing: meeting.destinationPath,
+            manualNotes: meeting.manualNotes,
+            attachments: meeting.attachments.isEmpty ? nil : meeting.attachments,
+            titleSource: meeting.titleSource,
+            suggestedAttendees: meeting.suggestedAttendees.isEmpty ? nil : meeting.suggestedAttendees,
+            releaseLivePointers: false)
+    }
+
+    private func persistManifest(
+        status: SessionManifest.Status,
+        manifest snapshot: SessionManifest?,
+        directory: URL?,
+        title: String,
+        attendees: String,
+        filing: String,
+        manualNotes: String,
+        attachments: [MeetingAttachment]?,
+        titleSource: String?,
+        suggestedAttendees: [SuggestedAttendee]?,
+        releaseLivePointers: Bool
+    ) {
+        guard let snapshot, let directory else { return }
+        let m = SessionStore.stamped(
+            snapshot,
+            status: status,
+            title: title,
+            attendees: attendees,
+            filing: filing,
+            manualNotes: manualNotes,
+            attachments: attachments,
+            titleSource: titleSource,
+            suggestedAttendees: suggestedAttendees)
+        SessionStore.write(m, to: directory)
+        guard sessionDirectory == directory else { return }
+        if releaseLivePointers {
+            manifest = nil
+            journal = nil
+        } else {
+            manifest = m
+        }
     }
 
     /// Stop the heartbeat timer so no further `.active` stamps can land after the
@@ -1861,12 +1958,28 @@ final class RecordingController: ObservableObject {
     /// Stamp the manifest `.finalized` and release the in-memory references.
     /// Called from inside the async Task in `finalize()` AFTER the transcript write
     /// succeeds, so durability is guaranteed before the status advances.
-    private func stampFinalizedManifest() {
-        guard manifest != nil else { return }
-        persistManifest(status: .finalized)
-        AppLog.log("Session manifest finalized — \(manifest?.id ?? "?")", category: "record")
-        manifest = nil
-        journal = nil
+    private func stampFinalizedManifest(
+        directory: URL?,
+        manifest snapshot: SessionManifest?,
+        title: String,
+        attendees: String,
+        filing: String,
+        manualNotes: String,
+        attachments: [MeetingAttachment]
+    ) {
+        persistManifest(
+            status: .finalized,
+            manifest: snapshot,
+            directory: directory,
+            title: title,
+            attendees: attendees,
+            filing: filing,
+            manualNotes: manualNotes,
+            attachments: attachments.isEmpty ? nil : attachments,
+            titleSource: snapshot?.titleSource,
+            suggestedAttendees: snapshot?.suggestedAttendees,
+            releaseLivePointers: true)
+        AppLog.log("Session manifest finalized — \(snapshot?.id ?? "?")", category: "record")
     }
 
     // MARK: Crash recovery (launch)
@@ -1916,7 +2029,10 @@ final class RecordingController: ObservableObject {
                     offlineService.enqueue(OfflineJob(
                         sessionDir: dir, transcriptURL: result.url, title: m.title,
                         attendees: m.attendees, filing: m.filing,
-                        presentReviewWhenDone: false, autoSummarize: settings.autoRunClaude))
+                        presentReviewWhenDone: false, autoSummarize: settings.autoRunClaude,
+                        engine: m.transcriptionEngine ?? settings.transcriptionEngine,
+                        fluidAsrProfile: FluidAsrBinding.resolved(
+                            stored: m.fluidAsrProfile, settings: settings)))
                     offlineService.runNextIfIdle()
                 }
             } catch {

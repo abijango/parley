@@ -58,8 +58,8 @@ an Active marker for each.
 > **Voiceprints are biometric data.** Each one is encrypted at rest (AES-GCM, key in
 > your Keychain) and tagged with the embedding model that produced it, so prints from
 > different models never cross-match. Embeddings don't survive a model upgrade, so short
-> enrollment clips are kept alongside each voiceprint — **Settings → Speakers →
-> Re-enrollment** regenerates the vectors from those clips without re-recording anyone.
+> enrollment clips are kept alongside each voiceprint — the **People** tab can
+> rebuild voiceprints from those clips without re-recording anyone.
 > Two thresholds, two jobs: the diarization threshold groups voices *within* one
 > recording; the identification threshold matches a voice to a saved person *across*
 > recordings. Both default to 0.6 and live in Settings → Transcription.
@@ -127,12 +127,12 @@ process tap is created.
 
 ## Settings
 
-Eight tabs: **General**, **Transcription**, **Speakers**, **Notes**, **Summary**,
+Seven tabs: **General**, **Transcription**, **Notes**, **Summary**,
 **Detection**, **Storage**, and **Vault**. The ones you'll touch first:
 
 - **Transcription** — pick the engine, its models, and the two speaker thresholds.
-- **Speakers** — manage saved voiceprints: encrypted export / import / backup, and
-  re-enrollment after a model upgrade.
+- **People** (main window) — manage saved voiceprints: rebuild, delete, and
+  encrypted export / import for backup and transfer.
 - **Notes** — the `claude` binary path, model, and prompt template (`{{file}}`,
   `{{destination}}`, `{{attendees}}` are substituted at run time).
 - **Detection** — let Parley start and stop recording by itself when it sees a call.

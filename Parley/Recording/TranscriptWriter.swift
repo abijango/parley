@@ -13,6 +13,7 @@ struct TranscriptMeta {
     var note: String?         // path to the produced polished note, once processed
     var audio: String?        // path to the session audio (.caf), if archived
     var type: String          // "recording" | "manual"
+    var attachments: [MeetingAttachment] = []
 }
 
 /// Writes the final transcript to the app-owned vault folder as Markdown.
@@ -34,6 +35,9 @@ enum TranscriptWriter {
                          destination: String,
                          segments: [Segment],
                          manualNotes: String? = nil,
+                         attachments: [MeetingAttachment] = [],
+                         documentURL: URL? = nil,
+                         vaultURL: URL? = nil,
                          meta metaOverride: TranscriptMeta? = nil) -> String {
         let attendeeList = splitAttendees(attendees)
         let meta = metaOverride ?? TranscriptMeta(
@@ -68,6 +72,16 @@ enum TranscriptWriter {
             out.append("## Notes (manual)")
             out.append("")
             out.append(notes)
+            out.append("")
+        }
+
+        if !attachments.isEmpty, let doc = documentURL, let vault = vaultURL,
+           let section = MeetingAttachmentStore.renderSection(attachments: attachments,
+                                                              documentURL: doc, vault: vault) {
+            out.append(section)
+            out.append("")
+        } else if !attachments.isEmpty {
+            out.append(attachmentsMarkdown(attachments: attachments))
             out.append("")
         }
 
@@ -194,8 +208,10 @@ enum TranscriptWriter {
                       destination: String,
                       segments: [Segment],
                       manualNotes: String? = nil,
+                      attachments: [MeetingAttachment] = [],
                       audioPath: String? = nil,
                       folderURL: URL,
+                      vaultURL: URL? = nil,
                       type: String = "recording",
                       status: String = "unprocessed") throws -> Result {
         try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
@@ -203,13 +219,16 @@ enum TranscriptWriter {
             ? "Untitled Meeting" : rawTitle
         let meta = TranscriptMeta(
             title: title, date: date, attendees: splitAttendees(attendees),
-            filing: destination, status: status, note: nil, audio: audioPath, type: type
+            filing: destination, status: status, note: nil, audio: audioPath, type: type,
+            attachments: attachments
         )
         let filename = "\(fileStamp(date)) - \(sanitize(title)).md"
         let url = folderURL.appendingPathComponent(filename)
+        let vault = vaultURL ?? folderURL.deletingLastPathComponent().deletingLastPathComponent()
         let body = makeBody(title: title, date: date, attendees: attendees,
                             destination: destination, segments: segments,
-                            manualNotes: manualNotes, meta: meta)
+                            manualNotes: manualNotes, attachments: attachments,
+                            documentURL: url, vaultURL: vault, meta: meta)
         try body.write(to: url, atomically: true, encoding: .utf8)
         return Result(url: url)
     }
@@ -262,6 +281,16 @@ enum TranscriptWriter {
         lines.append("status: \(yamlScalar(meta.status))")
         if let note = meta.note { lines.append("note: \(yamlScalar(note))") }
         if let audio = meta.audio { lines.append("audio: \(yamlScalar(audio))") }
+        if !meta.attachments.isEmpty {
+            lines.append("attachments:")
+            for att in meta.attachments {
+                lines.append("  - path: \(yamlScalar(att.vaultRelativePath))")
+                if !att.caption.isEmpty { lines.append("    caption: \(yamlScalar(att.caption))") }
+                if let offset = att.capturedAtOffset {
+                    lines.append("    captured_at: \(offset)")
+                }
+            }
+        }
         lines.append("type: \(yamlScalar(meta.type))")
         lines.append("---")
         return lines.joined(separator: "\n")
@@ -292,13 +321,25 @@ enum TranscriptWriter {
         var note: String?
         var audio: String?
         var type = ""
+        var attachments: [MeetingAttachment] = []
 
         var i = 1
         while i < close {
             let raw = lines[i]
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            // attachments list item (path/caption/captured_at sub-keys)
+            if trimmed.hasPrefix("- ") && trimmed.contains("path:") {
+                if let att = parseAttachmentListItem(trimmed) {
+                    attachments.append(att)
+                }
+                i += 1
+                continue
+            }
+            if trimmed.hasPrefix("path:") || trimmed.hasPrefix("caption:") || trimmed.hasPrefix("captured_at:") {
+                // Continuation of a YAML list item — handled below via block scan.
+            }
             // attendees list item
-            if trimmed.hasPrefix("- ") {
+            if trimmed.hasPrefix("- ") && !trimmed.contains("path:") {
                 let item = unquote(String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces))
                 if !item.isEmpty { attendees.append(item) }
                 i += 1
@@ -315,6 +356,11 @@ enum TranscriptWriter {
             case "note": note = value.isEmpty ? nil : value
             case "audio": audio = value.isEmpty ? nil : value
             case "type": type = value
+            case "attachments":
+                let parsed = parseAttachmentsBlock(lines: lines, start: i, close: close)
+                attachments = parsed.attachments
+                i = parsed.nextIndex
+                continue
             case "attendees":
                 // Inline form: "attendees: [a, b]" or single value; list-form handled above.
                 if value.hasPrefix("[") {
@@ -332,7 +378,65 @@ enum TranscriptWriter {
 
         return TranscriptMeta(title: title, date: date, attendees: attendees,
                               filing: filing, status: status, note: note,
-                              audio: audio, type: type.isEmpty ? "recording" : type)
+                              audio: audio, type: type.isEmpty ? "recording" : type,
+                              attachments: attachments)
+    }
+
+    private static func parseAttachmentsBlock(lines: [String], start: Int, close: Int)
+        -> (attachments: [MeetingAttachment], nextIndex: Int) {
+        var result: [MeetingAttachment] = []
+        var i = start + 1
+        while i < close {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("- ") {
+                var path = ""
+                var caption = ""
+                var capturedAt: Double?
+                var j = i
+                while j < close {
+                    var line = lines[j].trimmingCharacters(in: .whitespaces)
+                    if j > i, line.hasPrefix("- ") { break }
+                    if line.hasPrefix("- ") { line = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces) }
+                    if line.hasPrefix("path:") {
+                        path = unquote(line.replacingOccurrences(of: "path:", with: "").trimmingCharacters(in: .whitespaces))
+                    } else if line.hasPrefix("caption:") {
+                        caption = unquote(line.replacingOccurrences(of: "caption:", with: "").trimmingCharacters(in: .whitespaces))
+                    } else if line.hasPrefix("captured_at:") {
+                        let v = line.replacingOccurrences(of: "captured_at:", with: "").trimmingCharacters(in: .whitespaces)
+                        capturedAt = Double(v)
+                    }
+                    j += 1
+                }
+                if !path.isEmpty {
+                    let filename = URL(fileURLWithPath: path).lastPathComponent
+                    result.append(MeetingAttachment(
+                        filename: filename, vaultRelativePath: path, caption: caption,
+                        capturedAtOffset: capturedAt, mimeType: "image/png", source: .file))
+                }
+                i = j
+                continue
+            }
+            if !trimmed.isEmpty, !trimmed.contains(":") { break }
+            i += 1
+        }
+        return (result, i)
+    }
+
+    private static func parseAttachmentListItem(_ line: String) -> MeetingAttachment? {
+        guard let pathRange = line.range(of: "path:") else { return nil }
+        let path = unquote(String(line[pathRange.upperBound...]).trimmingCharacters(in: .whitespaces))
+        guard !path.isEmpty else { return nil }
+        let filename = URL(fileURLWithPath: path).lastPathComponent
+        return MeetingAttachment(filename: filename, vaultRelativePath: path, mimeType: "image/png", source: .file)
+    }
+
+    private static func attachmentsMarkdown(attachments: [MeetingAttachment]) -> String {
+        var lines = ["## Attachments", ""]
+        for att in attachments {
+            lines.append("![\(att.displayLabel)](\(att.vaultRelativePath))")
+            lines.append("")
+        }
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Rewrites just the frontmatter block in place, preserving the body.

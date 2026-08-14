@@ -19,7 +19,9 @@ enum SummaryPromptBuilder {
                       destination: String,
                       contactsURL: URL?,
                       contactsFromDB: [Contact]? = nil,
-                      terminologyBlock: String? = nil) -> Built {
+                      terminologyBlock: String? = nil,
+                      visionDigest: String? = nil,
+                      attachmentUnderstanding: AttachmentUnderstanding = .captionsOnly) -> Built {
         let transcript = readTranscript(transcriptURL)
         let contacts = readContacts(contactsURL, dbContacts: contactsFromDB)
         let annotatedAttendees = attendees.isEmpty
@@ -33,7 +35,41 @@ enum SummaryPromptBuilder {
         if let terminologyBlock, !terminologyBlock.isEmpty {
             prompt = injectTerminology(terminologyBlock, into: prompt)
         }
+        let attachments = TranscriptWriter.parseFrontmatter(transcriptURL)?.attachments ?? []
+        if attachmentUnderstanding != .off, !attachments.isEmpty {
+            let attachmentBlock = MeetingAttachmentStore.promptBlock(attachments: attachments)
+            if !attachmentBlock.isEmpty {
+                prompt = injectAttachments(attachmentBlock, into: prompt)
+            }
+        }
+        if let visionDigest, !visionDigest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            prompt = injectVisionDigest(visionDigest, into: prompt)
+        }
         return Built(prompt: prompt, transcriptChars: transcript.count)
+    }
+
+    /// Injects model-analyzed attachment descriptions before TRANSCRIPT.
+    static func injectVisionDigest(_ block: String, into prompt: String) -> String {
+        let section = """
+        ATTACHMENT VISION (model-analyzed from images — authoritative for visual content):
+        \(block.trimmingCharacters(in: .whitespacesAndNewlines))
+        """
+        if let range = prompt.range(of: "\nTRANSCRIPT:", options: .backwards) {
+            var out = prompt
+            out.insert(contentsOf: "\n\n" + section, at: range.lowerBound)
+            return out
+        }
+        return prompt + "\n\n" + section
+    }
+
+    /// Injects attachment captions/paths before the TRANSCRIPT section (or at end).
+    static func injectAttachments(_ block: String, into prompt: String) -> String {
+        if let range = prompt.range(of: "\nTRANSCRIPT:", options: .backwards) {
+            var out = prompt
+            out.insert(contentsOf: "\n\n" + block, at: range.lowerBound)
+            return out
+        }
+        return prompt + "\n\n" + block
     }
 
     /// Injects a terminology glossary block before the TRANSCRIPT section (or at end).

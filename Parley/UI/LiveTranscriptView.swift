@@ -23,8 +23,13 @@ struct LiveTranscriptView: View, Equatable {
 
     /// Default number of trailing rows rendered; older rows load on demand.
     static let defaultVisibleTail = 300
+    /// Floor on how often a tail *revision* may re-scroll. Streaming ASR rewrites the
+    /// last row several times a second; without this the scroll view never settles.
+    private static let tailScrollThrottle: TimeInterval = 0.5
+
     @State private var visibleTail = Self.defaultVisibleTail
     @State private var scrollScheduled = false
+    @State private var lastTailScroll = Date.distantPast
 
     private var displayedSegments: [Segment] {
         guard segments.count > visibleTail else { return segments }
@@ -38,7 +43,7 @@ struct LiveTranscriptView: View, Equatable {
     static func == (lhs: LiveTranscriptView, rhs: LiveTranscriptView) -> Bool {
         lhs.segments.count == rhs.segments.count
             && lhs.segments.last?.id == rhs.segments.last?.id
-            && lhs.segments.last?.text == rhs.segments.last?.text
+            && lhs.segments.last?.confirmed == rhs.segments.last?.confirmed
             && lhs.isRecording == rhs.isRecording
             && lhs.liveDisabled == rhs.liveDisabled
             && lhs.hidesEmptyState == rhs.hidesEmptyState
@@ -64,9 +69,13 @@ struct LiveTranscriptView: View, Equatable {
                         .padding(.bottom, Theme.Spacing.xSmall)
                     }
 
-                    ForEach(displayedSegments) { segment in
+                    ForEach(LiveTranscriptSplit.confirmed(displayedSegments)) { segment in
                         TranscriptRow(segment: segment, people: people, attendees: attendees, onNameSpeaker: onNameSpeaker)
                             .id(segment.id)
+                    }
+                    if let volatile = LiveTranscriptSplit.volatile(displayedSegments) {
+                        TranscriptRow(segment: volatile, people: people, attendees: attendees, onNameSpeaker: onNameSpeaker)
+                            .id(volatile.id)
                     }
                     Color.clear.frame(height: 1).id(Self.bottomID)
                 }
@@ -76,19 +85,32 @@ struct LiveTranscriptView: View, Equatable {
             .overlay { if segments.isEmpty, !hidesEmptyState { emptyState } }
             .onChange(of: segments.count) { _, newCount in
                 if newCount < visibleTail { visibleTail = Self.defaultVisibleTail }
-                scheduleScroll(proxy: proxy)
+                scheduleScroll(proxy: proxy, animated: false)
             }
             .onChange(of: segments.last?.text) {
-                scheduleScroll(proxy: proxy)
+                scheduleScroll(proxy: proxy, animated: false)
             }
         }
     }
 
-    private func scheduleScroll(proxy: ScrollViewProxy) {
+    /// A new row settling in is worth animating. A tail *revision* is not: the live
+    /// recognizer rewrites the last row every few hundred ms, and `Motion.gentle`
+    /// (0.2s) restarts before it finishes, so animating every revision left the scroll
+    /// view in permanent animated relayout — sustained main-thread cost for the whole
+    /// meeting (see docs/RECORDING_FREEZE_INVESTIGATION.md). Revisions jump instead,
+    /// throttled; the confirm that follows always arrives as a count change, so a
+    /// dropped revision is caught up by the next animated scroll.
+    private func scheduleScroll(proxy: ScrollViewProxy, animated: Bool) {
         guard !scrollScheduled else { return }
+        if !animated, Date().timeIntervalSince(lastTailScroll) < Self.tailScrollThrottle { return }
         scrollScheduled = true
         DispatchQueue.main.async {
             scrollScheduled = false
+            guard animated else {
+                lastTailScroll = Date()
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                return
+            }
             withAnimation(Theme.Motion.gentle) {
                 proxy.scrollTo(Self.bottomID, anchor: .bottom)
             }
@@ -139,6 +161,13 @@ private struct TranscriptRow: View {
                 .font(Theme.Typography.reading)
                 .foregroundStyle(segment.confirmed ? .primary : .secondary)
                 .textSelection(.enabled)
+                // Height is computed once from the proposed width instead of being
+                // re-negotiated. This row sits seven stack levels deep (see
+                // docs/LAYOUT_EXPLOSION_AUDIT.md), and each level re-queries child sizes
+                // several times per pass — so an unpinned Text re-runs line breaking at
+                // varying widths, per row, per pass. That is the dominant cost in the
+                // layout cascade that wedges the main actor mid-recording.
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .opacity(segment.confirmed ? 1.0 : 0.6)

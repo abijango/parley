@@ -227,7 +227,7 @@ final class MergeService {
 
         // Write a session.json manifest for the merged session.
         // Status is finalized (not active) so it doesn't surface in the crash-recovery sheet.
-        let mergedManifest = SessionManifest(
+        var mergedManifest = SessionManifest(
             id: mergedDirName,
             title: leg0.meta.title,
             attendees: allAttendees.joined(separator: ", "),
@@ -243,6 +243,10 @@ final class MergeService {
             manualNotes: "",
             audioTracks: ["mic.caf", "system.caf"]
         )
+        mergedManifest.transcriptionEngine = leg0Session.dir.flatMap { SessionStore.read($0)?.transcriptionEngine }
+            ?? settings.transcriptionEngine
+        mergedManifest.fluidAsrProfile = leg0Session.dir.flatMap { SessionStore.read($0)?.fluidAsrProfile }
+            ?? FluidAsrBinding.profile(from: settings)
         SessionStore.write(mergedManifest, to: mergedSessionDir)
 
         // Write seed transcript into Unprocessed (frontmatter + "## Transcript" header, empty body).
@@ -297,7 +301,10 @@ final class MergeService {
             attendees: allAttendees.joined(separator: ", "),
             filing: filing,
             presentReviewWhenDone: false,
-            autoSummarize: settings.autoRunClaude))
+            autoSummarize: settings.autoRunClaude,
+            engine: mergedManifest.transcriptionEngine ?? settings.transcriptionEngine,
+            fluidAsrProfile: FluidAsrBinding.resolved(
+                stored: mergedManifest.fluidAsrProfile, settings: settings)))
         offline.runNextIfIdle()
 
         // Remove source session directories now that audio concat succeeded.
