@@ -48,13 +48,13 @@ enum CursorAgentRunner {
             "--model", model,
             "--trust",
             "--workspace", summaryWorkingDirectory,
-            PromptStdin.argvPlaceholder,
+            prompt,
         ]
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        try PromptStdin.attach(prompt, to: process)
+        process.standardInput = FileHandle.nullDevice
         return (process, stdout, stderr)
     }
 
@@ -79,13 +79,13 @@ enum CursorAgentRunner {
             "--model", model,
             "--trust",
             "--workspace", vaultPath,
-            PromptStdin.argvPlaceholder,
+            prompt,
         ]
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        try PromptStdin.attach(prompt, to: process)
+        process.standardInput = FileHandle.nullDevice
         return (process, stdout, stderr)
     }
 
