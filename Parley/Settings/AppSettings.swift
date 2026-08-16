@@ -125,8 +125,7 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
     case local
     case composer25 = "composer-2.5"
     case composer25Fast = "composer-2.5-fast"
-    case cursorGrok45 = "cursor-grok-4.5-high"
-    case cursorGrok45Fast = "cursor-grok-4.5-high-fast"
+    case cursorGrok46Fast = "cursor-grok-4.6-high-fast"
 
     var id: String { rawValue }
     var displayName: String {
@@ -136,8 +135,7 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
         case .local: return "Qwen (local)"
         case .composer25: return "Composer 2.5"
         case .composer25Fast: return "Composer 2.5 Fast"
-        case .cursorGrok45: return "Cursor Grok 4.5"
-        case .cursorGrok45Fast: return "Cursor Grok 4.5 Fast"
+        case .cursorGrok46Fast: return "Cursor Grok 4.6 Fast"
         }
     }
     var blurb: String {
@@ -149,17 +147,15 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
             return "Runs `cursor agent -p --mode ask` with model `composer-2.5` (Cursor subscription)."
         case .composer25Fast:
             return "Runs `cursor agent -p --mode ask` with model `composer-2.5-fast`."
-        case .cursorGrok45:
-            return "Runs `cursor agent -p --mode ask` with model `cursor-grok-4.5-high`."
-        case .cursorGrok45Fast:
-            return "Runs `cursor agent -p --mode ask` with model `cursor-grok-4.5-high-fast`."
+        case .cursorGrok46Fast:
+            return "Runs `cursor agent -p --mode ask` with model `cursor-grok-4.6-high-fast`."
         }
     }
 
     /// True when this backend is invoked via the Cursor Agent CLI.
     var isCursorAgent: Bool {
         switch self {
-        case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast: return true
+        case .composer25, .composer25Fast, .cursorGrok46Fast: return true
         default: return false
         }
     }
@@ -167,15 +163,25 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
     /// CLI `--model` id (same as `rawValue` for Cursor backends).
     var cursorModelID: String? { isCursorAgent ? rawValue : nil }
 
+    /// Maps persisted raw values, including retired Cursor Grok 4.5 ids.
+    static func resolved(_ raw: String) -> SummaryBackend? {
+        switch raw {
+        case "cursor-grok-4.5-high", "cursor-grok-4.5-high-fast":
+            return .cursorGrok46Fast
+        default:
+            return Self(rawValue: raw)
+        }
+    }
+
     /// Backends suitable for the Summary v2 writer role.
     /// Local Qwen is omitted — `SummaryService.runBackend` does not support it in v2 yet.
     static var writerBackends: [SummaryBackend] {
-        [.composer25, .composer25Fast, .claude, .grok, .cursorGrok45, .cursorGrok45Fast]
+        [.composer25, .composer25Fast, .claude, .grok, .cursorGrok46Fast]
     }
 
     /// Backends suitable for the Summary v2 checker role.
     static var checkerBackends: [SummaryBackend] {
-        [.cursorGrok45, .cursorGrok45Fast, .composer25, .composer25Fast, .claude, .grok]
+        [.cursorGrok46Fast, .composer25, .composer25Fast, .claude, .grok]
     }
 }
 
@@ -235,7 +241,6 @@ final class AppSettings: ObservableObject {
         static let summaryPipeline = "parley.summaryPipeline"
         static let summaryWriterBackend = "parley.summaryWriterBackend"
         static let summaryCheckerBackend = "parley.summaryCheckerBackend"
-        static let contactsUseKnowledgeDB = "parley.contactsUseKnowledgeDB"
         static let claudeBinaryPath = "parley.claudeBinaryPath"
         static let claudePromptTemplate = "parley.claudePromptTemplate"
         static let claudeModel = "parley.claudeModel"
@@ -387,21 +392,19 @@ final class AppSettings: ObservableObject {
     /// Classic single-backend vs v2 writer→checker pipeline.
     @AppStorage(Key.summaryPipeline) var summaryPipelineRaw: String = SummaryPipeline.classic.rawValue
     @AppStorage(Key.summaryWriterBackend) var summaryWriterBackendRaw: String = SummaryBackend.composer25.rawValue
-    @AppStorage(Key.summaryCheckerBackend) var summaryCheckerBackendRaw: String = SummaryBackend.cursorGrok45.rawValue
-    /// When on, contacts/rolodex are read from the knowledge SQLite DB (with optional Rolodex.md export).
-    @AppStorage(Key.contactsUseKnowledgeDB) var contactsUseKnowledgeDB: Bool = false
+    @AppStorage(Key.summaryCheckerBackend) var summaryCheckerBackendRaw: String = SummaryBackend.cursorGrok46Fast.rawValue
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt
     @AppStorage(Key.claudeModel) var claudeModel: String = "sonnet"
     @AppStorage(Key.grokBinaryPath) var grokBinaryPath: String = "\(NSHomeDirectory())/.grok/bin/grok"
-    @AppStorage(Key.grokModel) var grokModel: String = "grok-4.5"
+    @AppStorage(Key.grokModel) var grokModel: String = "grok-4.6"
     /// Hugging Face / MLX model id for `SummaryBackend.local` (files under SummaryModels/).
     @AppStorage(Key.localSummaryModelId) var localSummaryModelId: String = "mlx-community/Qwen3-4B-4bit"
     /// Path to the Cursor CLI (`cursor agent …`). Used by Composer / Cursor Grok backends.
     @AppStorage(Key.cursorBinaryPath) var cursorBinaryPath: String = "/usr/local/bin/cursor"
 
     var summaryBackend: SummaryBackend {
-        get { SummaryBackend(rawValue: summaryBackendRaw) ?? .claude }
+        get { SummaryBackend.resolved(summaryBackendRaw) ?? .claude }
         set { summaryBackendRaw = newValue.rawValue }
     }
 
@@ -411,12 +414,12 @@ final class AppSettings: ObservableObject {
     }
 
     var summaryWriterBackend: SummaryBackend {
-        get { SummaryBackend(rawValue: summaryWriterBackendRaw) ?? .composer25 }
+        get { SummaryBackend.resolved(summaryWriterBackendRaw) ?? .composer25 }
         set { summaryWriterBackendRaw = newValue.rawValue }
     }
 
     var summaryCheckerBackend: SummaryBackend {
-        get { SummaryBackend(rawValue: summaryCheckerBackendRaw) ?? .cursorGrok45 }
+        get { SummaryBackend.resolved(summaryCheckerBackendRaw) ?? .cursorGrok46Fast }
         set { summaryCheckerBackendRaw = newValue.rawValue }
     }
     /// Ask before auto-summarizing a wave of ≥ this many notes at once (backlog / bulk
@@ -521,7 +524,7 @@ final class AppSettings: ObservableObject {
     }
 
     var attachmentVisionBackend: SummaryBackend {
-        get { SummaryBackend(rawValue: attachmentVisionBackendRaw) ?? .composer25 }
+        get { SummaryBackend.resolved(attachmentVisionBackendRaw) ?? .composer25 }
         set { attachmentVisionBackendRaw = newValue.rawValue }
     }
 

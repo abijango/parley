@@ -393,7 +393,7 @@ final class TranscriptStore: ObservableObject {
             // `AppSettings.shared` is MainActor-only — use raw UserDefaults here.
             let preferRaw = UserDefaults.standard.string(forKey: "parley.summaryBackend")
                 ?? SummaryBackend.claude.rawValue
-            let prefer = SummaryBackend(rawValue: preferRaw) ?? .claude
+            let prefer = SummaryBackend.resolved(preferRaw) ?? .claude
             let pipelineRaw = UserDefaults.standard.string(forKey: "parley.summaryPipeline")
                 ?? SummaryPipeline.classic.rawValue
             let pipeline = SummaryPipeline(rawValue: pipelineRaw) ?? .classic

@@ -19,7 +19,7 @@ final class PromptStdinTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: bin) }
         let secret = "UNIQUE-GROK-SECRET-\(UUID().uuidString)"
         let built = try GrokRunner.makeRawSummaryProcess(
-            binaryPath: bin.path, prompt: secret, model: "grok-4.5")
+            binaryPath: bin.path, prompt: secret, model: "grok-4.6")
         let args = built.process.arguments ?? []
         XCTAssertFalse(args.contains(where: { $0.contains(secret) }))
         XCTAssertTrue(args.contains(PromptStdin.argvPlaceholder))

@@ -69,7 +69,7 @@ final class GrokRunnerTests: XCTestCase {
             try GrokRunner.makeRawSummaryProcess(
                 binaryPath: "/tmp/definitely-no-grok-\(UUID().uuidString)",
                 prompt: "hi",
-                model: "grok-4.5")
+                model: "grok-4.6")
         ) { err in
             guard let e = err as? GrokRunner.RunError, case .binaryNotFound = e else {
                 return XCTFail("expected binaryNotFound, got \(err)")

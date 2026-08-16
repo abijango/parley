@@ -19,14 +19,26 @@ enum SummaryPromptBuilder {
                       destination: String,
                       contactsURL: URL?,
                       contactsFromDB: [Contact]? = nil,
+                      peopleRecords: [PersonRecord]? = nil,
                       terminologyBlock: String? = nil,
                       visionDigest: String? = nil,
                       attachmentUnderstanding: AttachmentUnderstanding = .captionsOnly) -> Built {
         let transcript = readTranscript(transcriptURL)
-        let contacts = readContacts(contactsURL, dbContacts: contactsFromDB)
+        let dbContacts = contactsFromDB ?? peopleRecords?.map { $0.asContact() }
+        let attendeeNames = attendees
+            .split(separator: ",", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let contacts: String
+        if let peopleRecords {
+            let block = PeoplePromptRenderer.render(attendeeNames: attendeeNames, records: peopleRecords)
+            contacts = block.isEmpty ? "(no matching people for this meeting)" : block
+        } else {
+            contacts = readContacts(contactsURL, dbContacts: dbContacts)
+        }
         let annotatedAttendees = attendees.isEmpty
             ? "(none provided)"
-            : annotate(attendees: attendees, contacts: parseContactsList(contacts))
+            : annotate(attendees: attendees, contacts: dbContacts ?? parseContactsList(contacts))
         var prompt = template
             .replacingOccurrences(of: "{{contacts}}", with: contacts.isEmpty ? "(no contacts file found)" : contacts)
             .replacingOccurrences(of: "{{attendees}}", with: annotatedAttendees)

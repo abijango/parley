@@ -34,8 +34,10 @@ final class CursorAgentRunnerTests: XCTestCase {
     func testBackendCursorModelIDs() {
         XCTAssertEqual(SummaryBackend.composer25.cursorModelID, "composer-2.5")
         XCTAssertEqual(SummaryBackend.composer25Fast.cursorModelID, "composer-2.5-fast")
-        XCTAssertEqual(SummaryBackend.cursorGrok45.cursorModelID, "cursor-grok-4.5-high")
-        XCTAssertEqual(SummaryBackend.cursorGrok45Fast.cursorModelID, "cursor-grok-4.5-high-fast")
+        XCTAssertEqual(SummaryBackend.cursorGrok46Fast.cursorModelID, "cursor-grok-4.6-high-fast")
+        XCTAssertEqual(SummaryBackend.cursorGrok46Fast.displayName, "Cursor Grok 4.6 Fast")
+        XCTAssertEqual(SummaryBackend.resolved("cursor-grok-4.5-high"), .cursorGrok46Fast)
+        XCTAssertEqual(SummaryBackend.resolved("cursor-grok-4.5-high-fast"), .cursorGrok46Fast)
         XCTAssertTrue(SummaryBackend.composer25.isCursorAgent)
         XCTAssertFalse(SummaryBackend.claude.isCursorAgent)
     }

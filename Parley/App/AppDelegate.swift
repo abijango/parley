@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         MainActor.assumeIsolated {
             CallNotifier.shared.configure()
             RecordingController.shared.launchWarmup()
+            RecordingController.shared.vault.importRolodexIfDBEmpty()
         }
     }
 

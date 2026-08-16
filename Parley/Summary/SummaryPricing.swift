@@ -19,10 +19,12 @@ enum SummaryPricing {
         "claude-sonnet-5": Rates(inputPerM: 3.0, outputPerM: 15.0, cacheReadPerM: 0.30),
         // Grok CLI
         "grok-4.5": Rates(inputPerM: 2.0, outputPerM: 6.0, cacheReadPerM: 0.50),
+        "grok-4.6": Rates(inputPerM: 2.0, outputPerM: 6.0, cacheReadPerM: 0.50),
         // Cursor Agent backends (SummaryBackend.rawValue)
         "composer-2.5": Rates(inputPerM: 0.50, outputPerM: 2.50, cacheReadPerM: 0.20),
         "composer-2.5-fast": Rates(inputPerM: 3.0, outputPerM: 15.0, cacheReadPerM: 0.20),
         "cursor-grok-4.5-high": Rates(inputPerM: 2.0, outputPerM: 6.0, cacheReadPerM: 0.50),
+        "cursor-grok-4.6-high-fast": Rates(inputPerM: 2.0, outputPerM: 6.0, cacheReadPerM: 0.50),
     ]
 
     /// Returns nil for unknown models so the UI shows tokens without a bogus dollar figure.

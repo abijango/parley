@@ -291,7 +291,7 @@ struct SettingsView: View {
                 Section("Grok") {
                     GrokConnectionView()
                     LabeledContent("Model") {
-                        TextField("grok-4.5", text: $settings.grokModel)
+                        TextField("grok-4.6", text: $settings.grokModel)
                             .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
                             .frame(maxWidth: 220)
                     }
@@ -901,12 +901,6 @@ struct SettingsView: View {
                 LabeledContent("Contacts file") {
                     TextField("Rolodex.md", text: $settings.contactsFileName)
                         .textFieldStyle(.roundedBorder)
-                }
-                SettingRow("Use knowledge database for contacts",
-                           description: "Store people in Parley.sqlite instead of (or alongside) Rolodex.md. Import from Rolodex when the DB is empty.") {
-                    Toggle("", isOn: $settings.contactsUseKnowledgeDB)
-                        .labelsHidden()
-                        .onChange(of: settings.contactsUseKnowledgeDB) { vault.refresh(waitForCompletion: true) }
                 }
             }
 

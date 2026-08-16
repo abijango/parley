@@ -664,7 +664,9 @@ final class RolodexNormalizeTests: XCTestCase {
         let rolodexURL = tmpDir.appendingPathComponent("Rolodex.md")
         try text.write(to: rolodexURL, atomically: true, encoding: .utf8)
 
-        let vault = VaultDirectory()
+        let db = KnowledgeDatabase.openTemporary()
+        let store = PeopleStore(database: db)
+        let vault = VaultDirectory(peopleStore: store)
         vault.refresh(waitForCompletion: true)
 
         XCTAssertEqual(vault.company(for: "Christina Wharf-Bulsara"), "Intellias",

@@ -424,7 +424,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             case .claude: return "Starting Claude…"
             case .grok: return "Starting Grok…"
             case .local: return "Starting local Qwen…"
-            case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+            case .composer25, .composer25Fast, .cursorGrok46Fast:
                 return "Starting \(backend.displayName)…"
             }
         }()
@@ -437,7 +437,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let contactsURL = settings.contactsURL
         let terminologyScope = TerminologyStore.customerScope(fromFiling: item.meta.filing)
         let terminology = SummaryPromptBuilder.terminologyBlock(filingScope: terminologyScope)
-        let dbContacts = settings.contactsUseKnowledgeDB ? PeopleStore().contacts() : nil
+        let dbContacts = PeopleStore().contacts()
+        let peopleRecords = PeopleStore().all()
         let claudeBinary = settings.claudeBinaryPath
         let claudeModel = settings.claudeModel
         let grokBinary = settings.grokBinaryPath
@@ -450,7 +451,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             case .claude: return claudeModel
             case .grok: return grokModel
             case .local: return settings.localSummaryModelId
-            case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+            case .composer25, .composer25Fast, .cursorGrok46Fast:
                 return backend.rawValue
             }
         }()
@@ -477,6 +478,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 destination: item.meta.filing,
                 contactsURL: contactsURL,
                 contactsFromDB: dbContacts,
+                peopleRecords: peopleRecords,
                 terminologyBlock: terminology.isEmpty ? nil : terminology,
                 visionDigest: vision,
                 attachmentUnderstanding: attachmentUnderstanding)
@@ -495,7 +497,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 result = await Self.runLocal(prompt: built.prompt, model: modelLabel) { line in
                     Task { @MainActor [weak self] in self?.runningActivity = line }
                 }
-            case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+            case .composer25, .composer25Fast, .cursorGrok46Fast:
                 Task { @MainActor [weak self] in self?.runningActivity = "\(backend.displayName) is writing…" }
                 result = Self.runCursorAgent(binary: cursorBinary, prompt: built.prompt, model: backend.rawValue, processHandle: handle)
             }
@@ -526,7 +528,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                             GrokConnection.shared.noteRunSucceeded()
                         case .local:
                             break
-                        case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                        case .composer25, .composer25Fast, .cursorGrok46Fast:
                             CursorConnection.shared.noteRunSucceeded()
                         }
                         let run = SummaryRunRecord(
@@ -560,7 +562,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                         GrokConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
                     case .local:
                         break
-                    case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                    case .composer25, .composer25Fast, .cursorGrok46Fast:
                         break
                     }
                     AppLog.log("Summary: \(backendLabel) usage/rate limit hit (\(trip.matchedPhrase)) — pausing queue", category: "summary")
@@ -576,10 +578,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     case (.grok, .notInstalled):    GrokConnection.shared.refresh()
                     case (.grok, .notLoggedIn):     GrokConnection.shared.noteAuthFailure(detail: reason)
                     case (.composer25, .notInstalled), (.composer25Fast, .notInstalled),
-                         (.cursorGrok45, .notInstalled), (.cursorGrok45Fast, .notInstalled):
+                         (.cursorGrok46Fast, .notInstalled):
                         CursorConnection.shared.refresh()
                     case (.composer25, .notLoggedIn), (.composer25Fast, .notLoggedIn),
-                         (.cursorGrok45, .notLoggedIn), (.cursorGrok45Fast, .notLoggedIn):
+                         (.cursorGrok46Fast, .notLoggedIn):
                         CursorConnection.shared.noteAuthFailure(detail: reason)
                     default: break
                     }
@@ -607,7 +609,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let visionBackend = settings.attachmentVisionBackend
         let terminology = SummaryPromptBuilder.terminologyBlock(
             filingScope: TerminologyStore.customerScope(fromFiling: item.meta.filing))
-        let dbContacts = settings.contactsUseKnowledgeDB ? PeopleStore().contacts() : nil
+        let dbContacts = PeopleStore().contacts()
+        let peopleRecords = PeopleStore().all()
         let writer = settings.summaryWriterBackend
         let checker = settings.summaryCheckerBackend
         let staged = Self.v2StagingURL(for: item.url)
@@ -649,6 +652,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 destination: item.meta.filing,
                 contactsURL: contactsURL,
                 contactsFromDB: dbContacts,
+                peopleRecords: peopleRecords,
                 terminologyBlock: terminology.isEmpty ? nil : terminology,
                 visionDigest: vision,
                 attachmentUnderstanding: attachmentUnderstanding)
@@ -799,10 +803,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         case (.grok, .notInstalled): GrokConnection.shared.refresh()
         case (.grok, .notLoggedIn): GrokConnection.shared.noteAuthFailure(detail: reason)
         case (.composer25, .notInstalled), (.composer25Fast, .notInstalled),
-             (.cursorGrok45, .notInstalled), (.cursorGrok45Fast, .notInstalled):
+             (.cursorGrok46Fast, .notInstalled):
             CursorConnection.shared.refresh()
         case (.composer25, .notLoggedIn), (.composer25Fast, .notLoggedIn),
-             (.cursorGrok45, .notLoggedIn), (.cursorGrok45Fast, .notLoggedIn):
+             (.cursorGrok46Fast, .notLoggedIn):
             CursorConnection.shared.noteAuthFailure(detail: reason)
         default: break
         }
@@ -822,7 +826,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         case .claude: ClaudeConnection.shared.noteRunSucceeded()
         case .grok: GrokConnection.shared.noteRunSucceeded()
         case .local: break
-        case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                        case .composer25, .composer25Fast, .cursorGrok46Fast:
             CursorConnection.shared.noteRunSucceeded()
         }
     }
@@ -845,7 +849,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             return runGrok(binary: grokBinary, prompt: prompt, model: grokModel, processHandle: processHandle)
         case .local:
             return .failure(reason: "Local Qwen is not supported in the v2 writer/checker roles yet.", setupIssue: nil)
-        case .composer25, .composer25Fast, .cursorGrok45, .cursorGrok45Fast:
+                        case .composer25, .composer25Fast, .cursorGrok46Fast:
             return runCursorAgent(binary: cursorBinary, prompt: prompt, model: backend.rawValue, processHandle: processHandle)
         }
     }

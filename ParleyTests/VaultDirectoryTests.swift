@@ -61,7 +61,9 @@ final class VaultDirectoryTests: XCTestCase {
         let rolodexURL = tmpDir.appendingPathComponent("Rolodex.md")
         try text.write(to: rolodexURL, atomically: true, encoding: .utf8)
 
-        let vault = VaultDirectory()
+        let db = KnowledgeDatabase.openTemporary()
+        let store = PeopleStore(database: db)
+        let vault = VaultDirectory(peopleStore: store)
         vault.refresh(waitForCompletion: true)
         try body(vault, rolodexURL)
     }
@@ -710,13 +712,13 @@ final class VaultDirectoryTests: XCTestCase {
         // strippedTitle must return "" so the editor shows an empty title field,
         // preventing a re-save from producing "Acme, Acme".
         XCTAssertEqual(
-            PersonEditorView.strippedTitle("Acme", company: "Acme"),
+            PersonTitleFormatting.strippedTitle("Acme", company: "Acme"),
             "",
             "Bare-company title should strip to empty string"
         )
         // Case-insensitive: stored value may differ in case from company field.
         XCTAssertEqual(
-            PersonEditorView.strippedTitle("acme", company: "Acme"),
+            PersonTitleFormatting.strippedTitle("acme", company: "Acme"),
             "",
             "Case-insensitive bare-company match should strip to empty string"
         )
@@ -725,17 +727,17 @@ final class VaultDirectoryTests: XCTestCase {
     func testStrippedTitleHandlesTitlePlusCompany() {
         // Normal case: "Engineer, Acme" -> "Engineer".
         XCTAssertEqual(
-            PersonEditorView.strippedTitle("Engineer, Acme", company: "Acme"),
+            PersonTitleFormatting.strippedTitle("Engineer, Acme", company: "Acme"),
             "Engineer"
         )
         // Nil company: title is returned as-is.
         XCTAssertEqual(
-            PersonEditorView.strippedTitle("Engineer", company: nil),
+            PersonTitleFormatting.strippedTitle("Engineer", company: nil),
             "Engineer"
         )
         // Nil title: returns empty string.
         XCTAssertEqual(
-            PersonEditorView.strippedTitle(nil, company: "Acme"),
+            PersonTitleFormatting.strippedTitle(nil, company: "Acme"),
             ""
         )
     }
@@ -829,7 +831,7 @@ final class VaultDirectoryTests: XCTestCase {
                            "Sanity: upsert stores company as title when no title given")
 
             // Simulate editor load: strippedTitle must return "" for the bare-company case.
-            let editorTitle = PersonEditorView.strippedTitle(initial?.title, company: initial?.company)
+            let editorTitle = PersonTitleFormatting.strippedTitle(initial?.title, company: initial?.company)
             XCTAssertEqual(editorTitle, "", "Editor must see empty title, not 'Acme'")
 
             // Simulate save with empty title (what the editor would pass).

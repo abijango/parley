@@ -90,6 +90,7 @@ final class VaultDirectory: ObservableObject {
     private var sideIndex: [String: Set<Side>] = [:]
 
     private var refreshTask: Task<Void, Never>?
+    private let peopleStore: PeopleStore
 
     private let settings = AppSettings.shared
     private static let maxDepth = 4
@@ -101,6 +102,10 @@ final class VaultDirectory: ObservableObject {
     /// Section for contacts with no company (matches the manual "Castlelake"-style
     /// grouping: a plain header line followed by column-0 bullets).
     nonisolated static let otherSection = "Other"
+
+    init(peopleStore: PeopleStore = PeopleStore()) {
+        self.peopleStore = peopleStore
+    }
 
     // MARK: - Refresh
 
@@ -126,12 +131,29 @@ final class VaultDirectory: ObservableObject {
     private func refreshAfterMutation() {
         refreshTask?.cancel()
         migrateContactsFileIfNeeded()
-        applySnapshot(Self.buildSnapshot(
+        applySnapshot(buildSnapshot(
             vaultURL: settings.vaultURL,
             contactsURL: settings.contactsURL,
-            scanRoots: settings.scanRoots,
-            useKnowledgeDB: settings.contactsUseKnowledgeDB
+            scanRoots: settings.scanRoots
         ))
+    }
+
+    private func buildSnapshot(
+        vaultURL: URL, contactsURL: URL, scanRoots: [String]
+    ) -> VaultRefreshSnapshot {
+        if peopleStore.isEmpty() {
+            let contactsText = (try? String(contentsOf: contactsURL, encoding: .utf8)) ?? ""
+            let parsed = Self.parseContacts(contactsText)
+            if !parsed.isEmpty {
+                peopleStore.replaceAll(contacts: parsed)
+            }
+        }
+        return Self.buildSnapshot(
+            vaultURL: vaultURL,
+            contactsURL: contactsURL,
+            scanRoots: scanRoots,
+            contacts: peopleStore.contacts()
+        )
     }
 
     private func scheduleBackgroundRefresh() {
@@ -139,11 +161,20 @@ final class VaultDirectory: ObservableObject {
         let vaultURL = settings.vaultURL
         let contactsURL = settings.contactsURL
         let scanRoots = settings.scanRoots
-        let useKnowledgeDB = settings.contactsUseKnowledgeDB
+        let store = peopleStore
         refreshTask = Task { [weak self] in
             let snapshot = await Task.detached {
-                Self.buildSnapshot(vaultURL: vaultURL, contactsURL: contactsURL,
-                                   scanRoots: scanRoots, useKnowledgeDB: useKnowledgeDB)
+                if store.isEmpty() {
+                    let contactsText = (try? String(contentsOf: contactsURL, encoding: .utf8)) ?? ""
+                    let parsed = VaultDirectory.parseContacts(contactsText)
+                    if !parsed.isEmpty {
+                        store.replaceAll(contacts: parsed)
+                    }
+                }
+                return VaultDirectory.buildSnapshot(
+                    vaultURL: vaultURL, contactsURL: contactsURL,
+                    scanRoots: scanRoots, contacts: store.contacts()
+                )
             }.value
             guard !Task.isCancelled, let self else { return }
             applySnapshot(snapshot)
@@ -170,17 +201,9 @@ final class VaultDirectory: ObservableObject {
     }
 
     nonisolated private static func buildSnapshot(
-        vaultURL: URL, contactsURL: URL, scanRoots: [String], useKnowledgeDB: Bool
+        vaultURL: URL, contactsURL: URL, scanRoots: [String], contacts: [Contact]
     ) -> VaultRefreshSnapshot {
         let destinations = loadDestinations(vaultURL: vaultURL, scanRoots: scanRoots)
-        let contacts: [Contact]
-        if useKnowledgeDB {
-            contacts = PeopleStore().contacts()
-        } else {
-            let contactsText = (try? String(contentsOf: contactsURL, encoding: .utf8)) ?? ""
-            contacts = parseContacts(contactsText)
-        }
-
         var seen = Set<String>()
         var names: [String] = []
         for c in contacts {
@@ -1352,61 +1375,96 @@ final class VaultDirectory: ObservableObject {
         refresh()
     }
 
-    // MARK: Contacts (Rolodex.md / knowledge DB)
+    // MARK: Contacts (SQLite + Rolodex.md projection)
 
-    /// Import Rolodex.md into the knowledge DB when the people table is empty.
+    /// Import Rolodex.md into SQLite when the people table is empty.
     func importRolodexIfDBEmpty() {
         importRolodexToKnowledgeDB(force: false)
     }
 
     /// Import contacts from Rolodex.md into SQLite.
     func importRolodexToKnowledgeDB(force: Bool) {
-        let store = PeopleStore()
-        guard force || store.isEmpty() else { return }
+        guard force || peopleStore.isEmpty() else { return }
         let text = (try? String(contentsOf: settings.contactsURL, encoding: .utf8)) ?? ""
         let parsed = Self.parseContacts(text)
         guard !parsed.isEmpty else { return }
-        store.replaceAll(contacts: parsed)
+        peopleStore.replaceAll(contacts: parsed)
         AppLog.log("Imported \(parsed.count) contacts from Rolodex into knowledge DB", category: "knowledge")
+        exportContactsMarkdown()
         refreshAfterMutation()
     }
 
-    /// Export knowledge DB people to Rolodex.md (Obsidian-compatible).
+    /// Export SQLite people to Rolodex.md (Obsidian-compatible).
     func exportKnowledgeDBToRolodex() {
-        let contacts = PeopleStore().contacts()
-        let rendered = Self.renderCanonical(contacts)
-        writeContacts(rendered, to: settings.contactsURL)
-        AppLog.log("Exported \(contacts.count) contacts to \(settings.contactsFileName)", category: "knowledge")
+        exportContactsMarkdown()
+        AppLog.log("Exported \(peopleStore.contacts().count) contacts to \(settings.contactsFileName)", category: "knowledge")
         refreshAfterMutation()
     }
 
-    private func commitContacts(_ parsed: [Contact]) {
-        let url = settings.contactsURL
-        let rendered = Self.renderCanonical(parsed)
-        if settings.contactsUseKnowledgeDB {
-            PeopleStore().replaceAll(contacts: parsed)
-        }
-        writeContacts(rendered, to: url)
+    func personRecord(for name: String) -> PersonRecord? {
+        peopleStore.find(nameOrAlias: name)
     }
 
-    /// Source of truth for mutations: knowledge DB when enabled, else Rolodex.md.
-    private func loadMutableContacts() -> [Contact] {
-        if settings.contactsUseKnowledgeDB {
-            return PeopleStore().contacts()
-        }
-        let text = (try? String(contentsOf: settings.contactsURL, encoding: .utf8)) ?? ""
-        return Self.parseContacts(text)
+    func savePersonRecord(_ record: PersonRecord) {
+        peopleStore.save(record)
+        exportContactsMarkdown()
+        refreshAfterMutation()
+    }
+
+    func setOrigin(for personId: String, origin: PersonOrigin?) {
+        peopleStore.setOrigin(personId: personId, origin: origin)
+        exportContactsMarkdown()
+        refreshAfterMutation()
+    }
+
+    func startNewRole(for personId: String, title: String, company: String, side: Side) {
+        peopleStore.closeCurrentRole(personId: personId)
+        let stripped = title.trimmingCharacters(in: .whitespaces)
+        let co = company.trimmingCharacters(in: .whitespaces)
+        peopleStore.openRole(
+            personId: personId,
+            company: co.isEmpty ? nil : co,
+            title: stripped.isEmpty ? nil : stripped,
+            side: side
+        )
+        exportContactsMarkdown()
+        refreshAfterMutation()
+    }
+
+    func addPreviousRole(for personId: String, title: String, company: String, side: Side,
+                         startedAt: Date?, endedAt: Date) {
+        let stripped = title.trimmingCharacters(in: .whitespaces)
+        let co = company.trimmingCharacters(in: .whitespaces)
+        peopleStore.addPreviousRole(
+            personId: personId,
+            company: co.isEmpty ? nil : co,
+            title: stripped.isEmpty ? nil : stripped,
+            side: side,
+            startedAt: startedAt,
+            endedAt: endedAt
+        )
+        exportContactsMarkdown()
+        refreshAfterMutation()
+    }
+
+    private func exportContactsMarkdown() {
+        let rendered = Self.renderCanonical(peopleStore.contacts())
+        writeContacts(rendered, to: settings.contactsURL)
+    }
+
+    private func contactFromUpsert(name: String, title: String?, company: String?,
+                                   linkedin: String?, side: Side, aliases: [String]) -> Contact {
+        let titleStr = PersonTitleFormatting.bakedTitle(title: title, company: company)
+        return Contact(name: name, company: company, side: side,
+                       title: titleStr, linkedin: linkedin, aliases: aliases)
     }
 
     /// Appends not-yet-known people (bare names from the attendee list -- no company
     /// or title) under the "Other" section. Uses parse->mutate->render so the output
     /// is always canonical. Names already known by canonical name OR any alias are skipped.
     func addPeople(_ rawNames: [String]) {
-        var parsed = loadMutableContacts()
-
-        // Build a set of all known names + aliases for fast skip-check.
         var knownLower = Set<String>()
-        for c in parsed {
+        for c in peopleStore.contacts() {
             knownLower.insert(c.name.lowercased())
             for alias in c.aliases { knownLower.insert(alias.lowercased()) }
         }
@@ -1417,11 +1475,11 @@ final class VaultDirectory: ObservableObject {
         guard !fresh.isEmpty else { return }
 
         for name in fresh {
-            parsed.append(Contact(name: name, company: nil, side: .other,
-                                  title: nil, linkedin: nil))
+            _ = peopleStore.upsert(contact: Contact(name: name, company: nil, side: .other,
+                                                    title: nil, linkedin: nil))
         }
 
-        commitContacts(parsed)
+        exportContactsMarkdown()
         AppLog.log("Added \(fresh.count) contacts under \(Self.otherSection)", category: "vault")
         refreshAfterMutation()
     }
@@ -1443,12 +1501,14 @@ final class VaultDirectory: ObservableObject {
             .filter { !$0.isEmpty })
         guard !targets.isEmpty else { return 0 }
 
-        let parsed = loadMutableContacts()
-        let kept = parsed.filter { !targets.contains($0.name.lowercased()) }
-        let removed = parsed.count - kept.count
+        let before = peopleStore.contacts().count
+        for name in rawNames {
+            peopleStore.delete(name: name)
+        }
+        let removed = before - peopleStore.contacts().count
         guard removed > 0 else { return 0 }
 
-        commitContacts(kept)
+        exportContactsMarkdown()
         AppLog.log("Removed \(removed) contact(s)", category: "vault")
         refreshAfterMutation()
         return removed
@@ -1488,70 +1548,46 @@ final class VaultDirectory: ObservableObject {
         let company: String? = companyTrimmed.isEmpty ? nil : companyTrimmed
         let link: String? = linkTrimmed.isEmpty ? nil : linkTrimmed
 
-        var parsed = loadMutableContacts()
+        let nameLower = name.lowercased()
+        let existing = peopleStore.find(nameOrAlias: name)
 
-        // Determine side.
-        // - Empty company always -> .other (guards against junk ## Uncategorized sections).
-        // - Explicit side overrides derivation when company is present.
-        // - Otherwise inherit from existing contacts for that company.
         let side: Side
         if company == nil {
             side = .other
         } else if let explicit = explicitSide {
             side = explicit
         } else {
-            side = Self.sideFor(company: company!, in: parsed)
+            side = Self.sideFor(company: company!, in: peopleStore.contacts())
         }
 
-        // Build the title string: "Title, Company" or just "Title" when company is nil.
-        let titleStr: String?
-        if let t = title, let co = company {
-            titleStr = "\(t), \(co)"
-        } else if let t = title {
-            titleStr = t
-        } else if let co = company {
-            titleStr = co
-        } else {
-            titleStr = nil
-        }
-
-        let nameLower = name.lowercased()
-
-        // Find an existing match by canonical name or alias.
-        if let existingIdx = parsed.firstIndex(where: { c in
-            c.name.lowercased() == nameLower ||
-            c.aliases.contains(where: { $0.lowercased() == nameLower })
-        }) {
-            let existing = parsed[existingIdx]
+        if let existing {
             let matchedByAlias = existing.name.lowercased() != nameLower
-
-            if matchedByAlias {
-                // Preserve the canonical name + existing aliases; only update
-                // title/company/linkedin with the new data.
-                let aliasLink = (clearLinkedinIfEmpty && link == nil) ? nil : (link ?? existing.linkedin)
-                var merged = Contact(name: existing.name, company: company, side: side,
-                                     title: titleStr, linkedin: aliasLink)
-                merged.aliases = existing.aliases
-                parsed[existingIdx] = merged
+            let canonicalName = existing.name
+            let resolvedLink: String?
+            if clearLinkedinIfEmpty && link == nil {
+                resolvedLink = nil
             } else {
-                // Matched by canonical name: replace, but preserve any existing aliases
-                // and linkedin if not provided.
-                let existingAliases = existing.aliases
-                let resolvedLink = (clearLinkedinIfEmpty && link == nil) ? nil : (link ?? existing.linkedin)
-                var updated = Contact(name: name, company: company, side: side,
-                                      title: titleStr, linkedin: resolvedLink)
-                updated.aliases = existingAliases
-                parsed[existingIdx] = updated
+                resolvedLink = link ?? existing.linkedin
             }
+
+            let contact = contactFromUpsert(
+                name: matchedByAlias ? canonicalName : name,
+                title: title,
+                company: company,
+                linkedin: resolvedLink,
+                side: side,
+                aliases: existing.aliases
+            )
+            _ = peopleStore.upsert(contact: contact)
         } else {
-            // No existing entry: insert new contact.
-            var newContact = Contact(name: name, company: company, side: side,
-                                     title: titleStr, linkedin: link)
-            newContact.aliases = []
-            parsed.append(newContact)
+            let contact = contactFromUpsert(
+                name: name, title: title, company: company,
+                linkedin: link, side: side, aliases: []
+            )
+            _ = peopleStore.upsert(contact: contact)
         }
 
-        commitContacts(parsed)
+        exportContactsMarkdown()
         let section = company ?? Self.otherSection
         AppLog.log("Upserted contact \(name) under \(section)", category: "vault")
         refreshAfterMutation()
@@ -1574,44 +1610,37 @@ final class VaultDirectory: ObservableObject {
         guard !oldTrimmed.isEmpty, !newTrimmed.isEmpty else { return }
         guard oldTrimmed.lowercased() != newTrimmed.lowercased() else { return }
 
-        var parsed = loadMutableContacts()
-
-        let oldLower = oldTrimmed.lowercased()
-        let newLower = newTrimmed.lowercased()
-
-        // Find the contact to rename.
-        guard let sourceIdx = parsed.firstIndex(where: { c in
-            c.name.lowercased() == oldLower ||
-            c.aliases.contains(where: { $0.lowercased() == oldLower })
-        }) else {
+        guard let source = peopleStore.find(nameOrAlias: oldTrimmed) else {
             AppLog.log("renameContact: no contact found matching \"\(oldTrimmed)\"", category: "vault")
             return
         }
 
-        var renamed = parsed[sourceIdx]
-        renamed = Contact(name: newTrimmed, company: renamed.company, side: renamed.side,
-                          title: renamed.title, linkedin: renamed.linkedin)
-        // Preserve aliases; drop any alias that now matches the new canonical name (avoid redundant aka).
-        let filteredAliases = parsed[sourceIdx].aliases.filter { $0.lowercased() != newLower }
-        renamed.aliases = filteredAliases
+        let newLower = newTrimmed.lowercased()
+        let sourceContact = source.asContact()
+        let renamedContact = Contact(
+            name: newTrimmed,
+            company: sourceContact.company,
+            side: sourceContact.side,
+            title: sourceContact.title,
+            linkedin: sourceContact.linkedin,
+            aliases: sourceContact.aliases.filter { $0.lowercased() != newLower }
+        )
 
-        // Remove the source entry.
-        parsed.remove(at: sourceIdx)
-
-        // Check for a collision: another contact already has newName as canonical or alias.
-        if let collisionIdx = parsed.firstIndex(where: { c in
-            c.name.lowercased() == newLower ||
-            c.aliases.contains(where: { $0.lowercased() == newLower })
+        if let collision = peopleStore.all().first(where: { record in
+            record.id != source.id &&
+            (record.name.lowercased() == newLower
+             || record.aliases.contains { $0.lowercased() == newLower })
         }) {
-            let collision = parsed[collisionIdx]
             AppLog.log("renameContact: collision -- \"\(newTrimmed)\" already exists; merging", category: "vault")
-            let merged = Self.mergeRenameCollision(renamed, collision)
-            parsed[collisionIdx] = merged
+            let merged = Self.mergeRenameCollision(renamedContact, collision.asContact())
+            peopleStore.delete(id: source.id)
+            peopleStore.delete(id: collision.id)
+            _ = peopleStore.upsert(contact: merged)
         } else {
-            parsed.append(renamed)
+            peopleStore.rename(from: oldTrimmed, to: newTrimmed)
         }
 
-        commitContacts(parsed)
+        exportContactsMarkdown()
         AppLog.log("renameContact: \"\(oldTrimmed)\" -> \"\(newTrimmed)\"", category: "vault")
         refreshAfterMutation()
     }
@@ -1673,21 +1702,8 @@ final class VaultDirectory: ObservableObject {
     /// `canonicalName` (case-insensitive match). If the alias is already present (ci),
     /// or equals the canonical name itself, the call is a no-op.
     func addAlias(_ alias: String, toCanonical canonicalName: String) {
-        let alias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-        let canonicalName = canonicalName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !alias.isEmpty, !canonicalName.isEmpty else { return }
-        guard alias.lowercased() != canonicalName.lowercased() else { return }
-
-        var parsed = loadMutableContacts()
-        guard let idx = parsed.firstIndex(where: {
-            $0.name.lowercased() == canonicalName.lowercased()
-        }) else { return }
-
-        var contact = parsed[idx]
-        if contact.aliases.contains(where: { $0.lowercased() == alias.lowercased() }) { return }
-        contact.aliases = (contact.aliases + [alias]).sorted()
-        parsed[idx] = contact
-        commitContacts(parsed)
+        peopleStore.addAlias(alias, toCanonical: canonicalName)
+        exportContactsMarkdown()
         AppLog.log("addAlias: added alias \"\(alias)\" to \"\(canonicalName)\"", category: "vault")
         refreshAfterMutation()
     }

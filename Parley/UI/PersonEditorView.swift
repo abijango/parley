@@ -35,6 +35,16 @@ struct PersonEditorView: View {
     @State private var draftCompany: String = ""
     @State private var draftSide: Side = .other
     @State private var draftLinkedin: String = ""
+    @State private var draftOriginKind: PersonOrigin.Kind = .other
+    @State private var draftOriginDate: Date = Date()
+    @State private var draftOriginHasDate = false
+    @State private var draftOriginNote: String = ""
+    @State private var pastRoles: [PersonRole] = []
+    @State private var showAddPreviousRole = false
+    @State private var prevRoleTitle: String = ""
+    @State private var prevRoleCompany: String = ""
+    @State private var prevRoleSide: Side = .other
+    @State private var prevRoleEndedAt: Date = Date()
 
     /// Company autocomplete dropdown visible
     @State private var showCompletions = false
@@ -55,47 +65,56 @@ struct PersonEditorView: View {
     private func loadDraft() {
         draftName = person.displayName
         if let contact = person.contact {
-            // Strip a trailing ", <company>" from the stored title (upsertPerson bakes it in).
-            draftTitle = Self.strippedTitle(contact.title, company: contact.company)
+            draftTitle = PersonTitleFormatting.strippedTitle(contact.title, company: contact.company)
             draftCompany = contact.company ?? ""
             draftSide = contact.side
             draftLinkedin = contact.linkedin ?? ""
         } else {
-            // Voiceprint-only: pre-fill name only.
             draftTitle = ""
             draftCompany = ""
             draftSide = .other
             draftLinkedin = ""
         }
-    }
-
-    /// Strip trailing ", <company>" from a stored title string.
-    /// upsertPerson stores title as "Senior Engineer, Vanguard"; the editor should show "Senior Engineer".
-    /// Also handles the bare-company case: when title == company (e.g. title = "Acme", company = "Acme"),
-    /// which happens when a contact has no title and upsertPerson falls back to storing just the company name.
-    static func strippedTitle(_ raw: String?, company: String?) -> String {
-        guard let raw = raw, let co = company, !co.isEmpty else { return raw ?? "" }
-        // Bare-company case: title IS the company name (no title was set).
-        // Must check this before the suffix strip so "Acme" doesn't pass through
-        // and get re-baked as "Acme, Acme" on the next save.
-        if raw.caseInsensitiveCompare(co) == .orderedSame {
-            return ""
+        if let record = vault.personRecord(for: person.displayName) {
+            pastRoles = record.roles.filter { $0.endedAt != nil }
+            if let origin = record.origin {
+                draftOriginKind = origin.kind
+                draftOriginHasDate = origin.date != nil
+                draftOriginDate = origin.date ?? Date()
+                draftOriginNote = origin.note
+            } else {
+                draftOriginKind = .other
+                draftOriginHasDate = false
+                draftOriginNote = ""
+            }
+        } else {
+            pastRoles = []
+            draftOriginKind = .other
+            draftOriginHasDate = false
+            draftOriginNote = ""
         }
-        let suffix = ", \(co)"
-        if raw.lowercased().hasSuffix(suffix.lowercased()) {
-            return String(raw.dropLast(suffix.count)).trimmingCharacters(in: .whitespaces)
-        }
-        return raw
     }
 
     // MARK: - Derived
 
     private var isDirty: Bool {
         draftName.trimmingCharacters(in: .whitespaces) != person.displayName
-        || draftTitle.trimmingCharacters(in: .whitespaces) != Self.strippedTitle(person.contact?.title, company: person.contact?.company)
+        || draftTitle.trimmingCharacters(in: .whitespaces) != PersonTitleFormatting.strippedTitle(person.contact?.title, company: person.contact?.company)
         || draftCompany.trimmingCharacters(in: .whitespaces) != (person.contact?.company ?? "")
         || draftSide != (person.contact?.side ?? .other)
         || draftLinkedin.trimmingCharacters(in: .whitespaces) != (person.contact?.linkedin ?? "")
+        || originIsDirty
+    }
+
+    private var originIsDirty: Bool {
+        let existing = vault.personRecord(for: person.displayName)?.origin
+        let note = draftOriginNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasOrigin = draftOriginKind != .other || draftOriginHasDate || !note.isEmpty
+        guard let existing else { return hasOrigin }
+        if draftOriginKind != existing.kind { return true }
+        if (existing.date != nil) != draftOriginHasDate { return true }
+        if note != existing.note { return true }
+        return false
     }
 
     private var nameIsValid: Bool {
@@ -236,7 +255,126 @@ struct PersonEditorView: View {
                 TextField("https://linkedin.com/in/...", text: $draftLinkedin)
                     .textFieldStyle(.roundedBorder)
             }
+
+            originSection
+            roleHistorySection
         }
+    }
+
+    private var originSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+            Text("Origin")
+                .font(Theme.Typography.sectionHeader)
+
+            editorRow(label: "Kind") {
+                Picker("Kind", selection: $draftOriginKind) {
+                    ForEach(PersonOrigin.Kind.allCases, id: \.self) { kind in
+                        Text(kind.label.capitalized).tag(kind)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 240)
+            }
+
+            Toggle("Known since date", isOn: $draftOriginHasDate)
+                .font(Theme.Typography.caption)
+
+            if draftOriginHasDate {
+                editorRow(label: "Date") {
+                    DatePicker("", selection: $draftOriginDate, displayedComponents: .date)
+                        .labelsHidden()
+                }
+            }
+
+            editorRow(label: "Note") {
+                TextField("How you know them", text: $draftOriginNote)
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
+    @ViewBuilder private var roleHistorySection: some View {
+        if !isVoiceprintOnly {
+            VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+                HStack {
+                    Text("Role history")
+                        .font(Theme.Typography.sectionHeader)
+                    Spacer()
+                    Button("Started a new role") { startNewRole() }
+                        .font(Theme.Typography.caption)
+                        .disabled(!nameIsValid)
+                }
+
+                if pastRoles.isEmpty {
+                    Text("No previous roles recorded.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(pastRoles) { role in
+                        roleHistoryRow(role)
+                    }
+                }
+
+                if showAddPreviousRole {
+                    addPreviousRoleFields
+                } else {
+                    Button("Add previous role") { showAddPreviousRole = true }
+                        .font(Theme.Typography.caption)
+                }
+            }
+        }
+    }
+
+    private func roleHistoryRow(_ role: PersonRole) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+            Text([role.title, role.company].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
+                .font(Theme.Typography.caption)
+            if let ended = role.endedAt {
+                Text("Ended \(ended.formatted(date: .abbreviated, time: .omitted))")
+                    .font(Theme.Typography.captionSecondary)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, Theme.Spacing.xxSmall)
+    }
+
+    private var addPreviousRoleFields: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+            editorRow(label: "Title") {
+                TextField("Past title", text: $prevRoleTitle)
+                    .textFieldStyle(.roundedBorder)
+            }
+            editorRow(label: "Company") {
+                TextField("Past company", text: $prevRoleCompany)
+                    .textFieldStyle(.roundedBorder)
+            }
+            editorRow(label: "Side") {
+                Picker("Side", selection: $prevRoleSide) {
+                    Text("Internal").tag(Side.internalTeam)
+                    Text("Customer").tag(Side.customer)
+                    Text("Other").tag(Side.other)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 240)
+            }
+            editorRow(label: "Ended") {
+                DatePicker("", selection: $prevRoleEndedAt, displayedComponents: .date)
+                    .labelsHidden()
+            }
+            HStack {
+                Button("Add") { addPreviousRole() }
+                    .font(Theme.Typography.caption)
+                Button("Cancel") {
+                    showAddPreviousRole = false
+                    prevRoleTitle = ""
+                    prevRoleCompany = ""
+                }
+                .font(Theme.Typography.caption)
+            }
+        }
+        .padding(Theme.Spacing.small)
+        .background(Theme.Radius.rect(Theme.Radius.small).fill(.quaternary.opacity(Theme.Opacity.surface)))
     }
 
     private func editorRow<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -526,21 +664,65 @@ struct PersonEditorView: View {
         showCompletions = false
 
         if nameChanged {
-            // Step 1: fan-out rename across both stores.
             RecordingController.renamePerson(
                 from: originalName, to: newName,
                 vault: vault, voiceprints: voiceprintStore)
-            // Step 2: apply the remaining field edits on the renamed contact.
             vault.upsertPerson(name: newName, title: newTitle,
                                company: snappedCompany, linkedin: newLinkedin,
                                side: resolvedSide, clearLinkedinIfEmpty: true)
+            persistOrigin(forName: newName)
         } else {
             vault.upsertPerson(name: originalName, title: newTitle,
                                company: snappedCompany, linkedin: newLinkedin,
                                side: resolvedSide, clearLinkedinIfEmpty: true)
+            persistOrigin(forName: originalName)
         }
 
         onSave(newName)
+    }
+
+    private func persistOrigin(forName name: String) {
+        guard let record = vault.personRecord(for: name) else { return }
+        let note = draftOriginNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasOrigin = draftOriginKind != .other || draftOriginHasDate || !note.isEmpty
+        if hasOrigin {
+            vault.setOrigin(for: record.id, origin: PersonOrigin(
+                kind: draftOriginKind,
+                date: draftOriginHasDate ? draftOriginDate : nil,
+                meetingId: nil,
+                note: note
+            ))
+        } else if record.origin != nil {
+            vault.setOrigin(for: record.id, origin: nil)
+        }
+    }
+
+    private func startNewRole() {
+        guard let record = vault.personRecord(for: draftName.trimmingCharacters(in: .whitespaces)) else {
+            commitSave()
+            return
+        }
+        let snapped = snapCompanyCasing(draftCompany.trimmingCharacters(in: .whitespaces))
+        let side: Side = snapped.isEmpty ? .other : draftSide
+        vault.startNewRole(for: record.id, title: draftTitle, company: snapped, side: side)
+        loadDraft()
+    }
+
+    private func addPreviousRole() {
+        guard let record = vault.personRecord(for: draftName.trimmingCharacters(in: .whitespaces)) else { return }
+        let snapped = snapCompanyCasing(prevRoleCompany.trimmingCharacters(in: .whitespaces))
+        vault.addPreviousRole(
+            for: record.id,
+            title: prevRoleTitle,
+            company: snapped,
+            side: prevRoleSide,
+            startedAt: nil,
+            endedAt: prevRoleEndedAt
+        )
+        showAddPreviousRole = false
+        prevRoleTitle = ""
+        prevRoleCompany = ""
+        loadDraft()
     }
 
     /// Return `company` with casing snapped to the vault's existing spelling,

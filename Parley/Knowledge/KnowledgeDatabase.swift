@@ -120,7 +120,69 @@ final class KnowledgeDatabase: @unchecked Sendable {
         _ = sqlite3_exec(db, "ALTER TABLE summary_runs ADD COLUMN pipeline TEXT NOT NULL DEFAULT 'v2';", nil, nil, nil)
         _ = sqlite3_exec(db, "ALTER TABLE summary_runs ADD COLUMN writer_metrics_json TEXT NOT NULL DEFAULT '';", nil, nil, nil)
         _ = sqlite3_exec(db, "ALTER TABLE summary_runs ADD COLUMN checker_metrics_json TEXT NOT NULL DEFAULT '';", nil, nil, nil)
-        setMeta(key: "schema_version", value: "3")
+        _ = sqlite3_exec(db, "ALTER TABLE people ADD COLUMN notes TEXT NOT NULL DEFAULT '';", nil, nil, nil)
+        let rolesSQL = """
+        CREATE TABLE IF NOT EXISTS person_roles (
+            id TEXT PRIMARY KEY,
+            person_id TEXT NOT NULL,
+            company TEXT,
+            title TEXT,
+            team TEXT,
+            side TEXT NOT NULL,
+            started_at REAL,
+            ended_at REAL,
+            sort_index INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_person_roles_person_ended
+            ON person_roles(person_id, ended_at);
+        CREATE TABLE IF NOT EXISTS person_origins (
+            person_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            occurred_at REAL,
+            meeting_id TEXT,
+            note TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE
+        );
+        """
+        _ = sqlite3_exec(db, rolesSQL, nil, nil, nil)
+        backfillRolesFromLegacyPeople(db)
+        setMeta(key: "schema_version", value: "4")
+    }
+
+    private func backfillRolesFromLegacyPeople(_ db: OpaquePointer) {
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, """
+            SELECT p.id, p.company, p.title, p.side
+            FROM people p
+            WHERE (p.title IS NOT NULL OR p.company IS NOT NULL)
+              AND NOT EXISTS (SELECT 1 FROM person_roles r WHERE r.person_id = p.id);
+            """, -1, &stmt, nil) == SQLITE_OK else { return }
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let personId = KnowledgeSQL.text(stmt, 0)
+            let company = KnowledgeSQL.optionalText(stmt, 1)
+            let rawTitle = KnowledgeSQL.optionalText(stmt, 2)
+            let side = Side(rawValue: KnowledgeSQL.text(stmt, 3)) ?? .other
+            let stripped = PersonTitleFormatting.strippedTitle(rawTitle, company: company)
+            let title: String? = stripped.isEmpty ? nil : stripped
+            guard company != nil || title != nil else { continue }
+
+            var insert: OpaquePointer?
+            defer { sqlite3_finalize(insert) }
+            guard sqlite3_prepare_v2(db, """
+                INSERT INTO person_roles(
+                    id, person_id, company, title, team, side, started_at, ended_at, sort_index
+                ) VALUES (?, ?, ?, ?, NULL, ?, NULL, NULL, 0);
+                """, -1, &insert, nil) == SQLITE_OK else { continue }
+            KnowledgeSQL.bind(insert, 1, UUID().uuidString)
+            KnowledgeSQL.bind(insert, 2, personId)
+            KnowledgeSQL.bindOptional(insert, 3, company)
+            KnowledgeSQL.bindOptional(insert, 4, title)
+            KnowledgeSQL.bind(insert, 5, side.rawValue)
+            sqlite3_step(insert)
+        }
     }
 
     func setMeta(key: String, value: String) {

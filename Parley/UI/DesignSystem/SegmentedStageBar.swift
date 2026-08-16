@@ -303,7 +303,7 @@ private struct IndeterminateFill: View {
             SegmentedStageBar(
                 segments: makeSegments(4, fraction: nil),
                 style: .regular,
-                statusLabel: "Summarizing with Composer 2.5 → Cursor Grok 4.5",
+                statusLabel: "Summarizing with Composer 2.5 → Cursor Grok 4.6 Fast",
                 sublabel: "Writer is drafting…")
 
             SegmentedStageBar(

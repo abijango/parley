@@ -53,7 +53,9 @@ final class RenamePersonTests: XCTestCase {
         let rolodexURL = tmpDir.appendingPathComponent("Rolodex.md")
         try rolodex.write(to: rolodexURL, atomically: true, encoding: .utf8)
 
-        let vault = VaultDirectory()
+        let db = KnowledgeDatabase.openTemporary()
+        let store = PeopleStore(database: db)
+        let vault = VaultDirectory(peopleStore: store)
         vault.refresh(waitForCompletion: true)
 
         // Use a temp file for the voiceprint store so it does not touch the real one.
