@@ -27,9 +27,9 @@ packages:
     from: "2.4.0"           # SwiftUI GitHub-flavored markdown renderer
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio.git
-    from: "0.15.5"          # native Parakeet ASR + diarization + speaker embeddings (Apache-2.0).
-                            # 0.15.5: unified Parakeet ASR, Sortformer v3 diar fixes, resumable
-                            # ModelHub downloads, custom vocabulary hooks, streaming seam fixes.
+    from: "0.15.6"          # native Parakeet ASR + diarization + speaker embeddings (Apache-2.0).
+                            # 0.15.6: Unified transcribeWithTimings, Unified vocab boosting,
+                            # streaming trailing-word/seam fixes, download brick fixes.
   MLXExamples:
     url: https://github.com/ml-explore/mlx-swift-examples.git
     from: "2.29.1"          # MLXLLM + MLXLMCommon: local LLM summaries on the GPU (offline)
