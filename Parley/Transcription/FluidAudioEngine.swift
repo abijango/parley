@@ -60,9 +60,6 @@ final class FluidAudioEngine: TranscriptionEngine {
     private var nemotronAsr: StreamingNemotronMultilingualAsrManager?
     private var unifiedAsr: StreamingUnifiedAsrManager?
     private var usesUnifiedRoute = false
-    /// Cached vocabulary + CTC models for the offline TDT re-pass (non-unified).
-    private var sessionVocabulary: CustomVocabularyContext?
-    private var sessionCtcModels: CtcModels?
 
     /// The same mixed audio fed to ASR, buffered for the diarizer (drained in chunks).
     private let diarRing = AudioRingBuffer(capacity: 16_000 * 60)
@@ -452,8 +449,6 @@ final class FluidAudioEngine: TranscriptionEngine {
         let nemotron = nemotronAsr
         unifiedAsr = nil
         nemotronAsr = nil
-        sessionVocabulary = nil
-        sessionCtcModels = nil
         await Task.detached {
             if let unified {
                 _ = try? await unified.finish()
@@ -747,18 +742,17 @@ final class FluidAudioEngine: TranscriptionEngine {
         let useUnified = profile == .parakeetUnified
         let version: AsrModelVersion = profile == .parakeetV2 ? .v2 : .v3
         let gpuEncoder = settings.fluidGpuEncoder
-        var vocab = sessionVocabulary
-        var ctc = sessionCtcModels
-        if vocab == nil, !useUnified, settings.boostAttendeeNames {
-            let terms = FluidVocabularyBuilder.build(
-                attendees: sessionAttendees,
-                meetingTitle: sessionMeetingTitle,
-                enabled: true)
-            if let loaded = await FluidVocabularyBuilder.loadContext(terms: terms) {
-                vocab = loaded.0
-                ctc = loaded.1
-                AppLog.log("FluidAudio offline vocabulary: \(loaded.0.terms.count) term(s)", category: "record")
-            }
+        var vocab: CustomVocabularyContext?
+        var ctc: CtcModels?
+        let terms = FluidVocabularyBuilder.build(
+            attendees: sessionAttendees,
+            meetingTitle: sessionMeetingTitle,
+            enabled: settings.boostAttendeeNames)
+        if FluidVocabularyPolicy.shouldLoad(enabled: settings.boostAttendeeNames, terms: terms),
+           let loaded = await FluidVocabularyBuilder.loadContext(terms: terms) {
+            vocab = loaded.0
+            ctc = loaded.1
+            AppLog.log("FluidAudio offline vocabulary: \(loaded.0.terms.count) term(s)", category: "record")
         }
         let vocabSnapshot = vocab
         let ctcSnapshot = ctc
@@ -794,7 +788,8 @@ final class FluidAudioEngine: TranscriptionEngine {
             let tokens: [TokTiming]?
             if doAsr {
                 if useUnified {
-                    tokens = await Self.offlineTranscribeUnified(samples: samples)
+                    tokens = await Self.offlineTranscribeUnified(
+                        samples: samples, vocabulary: vocabSnapshot, ctcModels: ctcSnapshot)
                 } else {
                     tokens = await Self.offlineTranscribe(
                         samples: samples, version: version, gpuEncoder: gpuEncoder,
@@ -852,8 +847,8 @@ final class FluidAudioEngine: TranscriptionEngine {
     private struct TokTiming: Sendable { let text: String; let start: TimeInterval; let end: TimeInterval }
     private struct OfflinePassResult: Sendable { let segs: [Seg]?; let tokens: [TokTiming]? }
 
-    /// Batch Parakeet transcription — TDT v3 (multilingual path) with optional
-    /// vocabulary rescoring. Returns token-level timings, or nil on failure.
+    /// Batch Parakeet TDT. `AsrManager` has no `configureVocabularyBoosting`;
+    /// `VocabularyBoostingSession` is the library's post-pass for this engine.
     nonisolated private static func offlineTranscribe(
         samples: [Float],
         version: AsrModelVersion,
@@ -867,60 +862,81 @@ final class FluidAudioEngine: TranscriptionEngine {
                 version: version, encoderComputeUnits: encoderUnits)
             let mgr = AsrManager(config: .default)
             try await mgr.loadModels(models)
-            var state = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
-            var result = try await mgr.transcribe(samples, decoderState: &state)
-            await mgr.cleanup()
-
-            var timings = result.tokenTimings
-            if let vocab = vocabulary, let ctc = ctcModels,
-               let tokenTimings = timings, !tokenTimings.isEmpty {
-                let rescored = await FluidVocabularyRescorer.apply(
-                    transcript: result.text,
-                    tokenTimings: tokenTimings,
-                    samples: samples,
-                    vocabulary: vocab,
-                    ctcModels: ctc)
-                if rescored.modified {
-                    AppLog.log("FluidAudio offline vocabulary: applied rescore", category: "record")
-                    let spanStart = tokenTimings.first?.startTime ?? 0
-                    let spanEnd = tokenTimings.last?.endTime
-                        ?? TimeInterval(samples.count) / 16_000
-                    return Self.wordToks(rescored.text, start: spanStart, end: spanEnd).map {
-                        TokTiming(text: $0.text, start: $0.start, end: $0.end)
-                    }
+            var boosting: VocabularyBoostingSession?
+            if let vocabulary, let ctcModels {
+                do {
+                    boosting = try await VocabularyBoostingSession(
+                        vocabulary: vocabulary, ctcModels: ctcModels)
+                } catch {
+                    AppLog.log(
+                        "FluidAudio offline vocabulary: \(error.localizedDescription)",
+                        category: "record")
                 }
             }
+            var state = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
+            let result = try await mgr.transcribe(samples, decoderState: &state)
+            await mgr.cleanup()
 
-            if let timings = result.tokenTimings, !timings.isEmpty {
-                return timings.map { TokTiming(text: $0.token, start: $0.startTime, end: $0.endTime) }
+            var text = result.text
+            let timings = result.tokenTimings ?? []
+            if let boosting, !timings.isEmpty,
+               let rescored = await boosting.rescore(
+                text: text, tokenTimings: timings, audioSamples: samples)
+            {
+                text = rescored.text
+                let applied = rescored.replacements
+                    .filter(\.shouldReplace)
+                    .compactMap(\.replacementWord)
+                if !applied.isEmpty {
+                    AppLog.log(
+                        "FluidAudio offline vocabulary: applied \(applied.joined(separator: ", "))",
+                        category: "record")
+                }
             }
-            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-            return [TokTiming(text: text, start: 0, end: TimeInterval(samples.count) / 16_000)]
+            return Self.tokTimings(
+                transcript: text,
+                timings: timings,
+                clipDuration: TimeInterval(samples.count) / 16_000)
         } catch {
             AppLog.log("finalizeDiarization: offline ASR re-pass failed: \(error.localizedDescription)", category: "record")
             return nil
         }
     }
 
-    /// Parakeet Unified offline batch (15 s windows). No per-token API — spread text
-    /// evenly across the clip duration for diarization attribution.
-    nonisolated private static func offlineTranscribeUnified(samples: [Float]) async -> [TokTiming]? {
+    /// Parakeet Unified offline batch (15 s windows) with native emission timings.
+    nonisolated private static func offlineTranscribeUnified(
+        samples: [Float],
+        vocabulary: CustomVocabularyContext?,
+        ctcModels: CtcModels?
+    ) async -> [TokTiming]? {
         do {
             let mgr = UnifiedAsrManager()
             try await mgr.loadModels()
-            let text = try await mgr.transcribe(samples)
-            await mgr.cleanup()
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            let duration = TimeInterval(samples.count) / 16_000
-            return Self.wordToks(trimmed, start: 0, end: duration).map {
-                TokTiming(text: $0.text, start: $0.start, end: $0.end)
+            if let vocabulary, let ctcModels {
+                try await mgr.configureVocabularyBoosting(vocabulary: vocabulary, ctcModels: ctcModels)
             }
+            let result = try await mgr.transcribeWithTimings(samples)
+            await mgr.cleanup()
+            return Self.tokTimings(
+                transcript: result.text,
+                timings: result.tokenTimings,
+                clipDuration: TimeInterval(samples.count) / 16_000)
         } catch {
             AppLog.log("finalizeDiarization: unified offline ASR failed: \(error.localizedDescription)", category: "record")
             return nil
         }
+    }
+
+    nonisolated private static func tokTimings(
+        transcript: String,
+        timings: [TokenTiming],
+        clipDuration: TimeInterval
+    ) -> [TokTiming]? {
+        let resolved = FluidOfflineTimings.resolve(
+            transcript: transcript, timings: timings, clipDuration: clipDuration)
+        let words = FluidOfflineTimings.words(from: resolved)
+        guard !words.isEmpty else { return nil }
+        return words.map { TokTiming(text: $0.text, start: $0.start, end: $0.end) }
     }
 
     /// Replace the streaming ASR units with the offline transcript. Tokens are split

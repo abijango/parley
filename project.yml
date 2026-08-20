@@ -99,6 +99,7 @@ targets:
       - path: ParleyTests
     dependencies:
       - target: Parley
+      - package: FluidAudio
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.naufalmir.parley.tests   # TODO(app-name)
