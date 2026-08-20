@@ -37,7 +37,7 @@ final class ModelManager: ObservableObject {
     private static let repoSubpath = "models/argmaxinc/whisperkit-coreml"
     /// Set while a compute-graph load is in flight; if it's still set at next
     /// launch, the previous load crashed (e.g. a corrupt MPSGraph cache) → recover.
-    private static let loadInProgressKey = "parley.modelLoadInProgress"
+    static let loadInProgressKey = "parley.modelLoadInProgress"
 
     init() {
         refreshDownloadedModels()
@@ -65,6 +65,10 @@ final class ModelManager: ObservableObject {
     /// (likely corrupt) cache so this load starts clean instead of crash-looping.
     static func recoverFromCrashedLoadIfNeeded() {
         guard UserDefaults.standard.bool(forKey: loadInProgressKey) else { return }
+        if AppInfo.isXCTestHost {
+            markCompiledLoadFinished()
+            return
+        }
         AppLog.log("Previous model load didn't finish (likely a crash) — clearing compiled cache to recover", category: "model")
         clearCompiledCache()
         markCompiledLoadFinished()
@@ -73,6 +77,7 @@ final class ModelManager: ObservableObject {
     /// Shared with FluidAudio ANE warmup. A crash mid-specialize corrupts the same
     /// `e5bundlecache`, so both loaders must set this sentinel.
     static func markCompiledLoadInProgress() {
+        if AppInfo.isXCTestHost { return }
         UserDefaults.standard.set(true, forKey: loadInProgressKey)
     }
 

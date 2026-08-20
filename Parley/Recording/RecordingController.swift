@@ -484,6 +484,10 @@ final class RecordingController: ObservableObject {
     func launchWarmup() {
         guard !didWarmup else { return }
         didWarmup = true
+        if AppInfo.isXCTestHost {
+            ModelManager.noteGracefulShutdown()
+            return
+        }
         let engineDesc: String = switch settings.transcriptionEngine {
         case .fluidAudio: "FluidAudio (Parakeet \(settings.parakeetVersion.rawValue))"
         case .speechAnalyzer: "SpeechAnalyzer + FluidAudio (\(settings.speechLocale))"
