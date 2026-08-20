@@ -3,7 +3,7 @@ import Foundation
 /// Which track a transcript segment came from. Because we capture the mic and
 /// the system/app audio as two separate streams, the source track *is* the
 /// speaker label — no ML diarization required.
-enum SpeakerTrack: String, Codable {
+enum SpeakerTrack: String, Codable, Sendable {
     case me = "Me"
     case remote = "Remote"
 
@@ -12,7 +12,7 @@ enum SpeakerTrack: String, Codable {
 
 /// One transcribed segment, timed against the shared recording clock (seconds
 /// since record-start) so segments from both tracks sort into one timeline.
-struct Segment: Identifiable, Codable, Equatable {
+struct Segment: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     let track: SpeakerTrack
     /// Seconds since record-start (shared clock), NOT the per-pipeline clock.

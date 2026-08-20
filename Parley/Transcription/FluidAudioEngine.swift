@@ -448,18 +448,22 @@ final class FluidAudioEngine: TranscriptionEngine {
         mixerTask?.cancel()
         diarTask?.cancel()
         loadTask = nil; mixerTask = nil; diarTask = nil
-        if let unified = unifiedAsr {
-            _ = try? await unified.finish()
-            await unified.cleanup()
-            unifiedAsr = nil
-        }
-        if let nemotron = nemotronAsr {
-            _ = try? await nemotron.finish()
-            await nemotron.cleanup()
-            nemotronAsr = nil
-        }
+        let unified = unifiedAsr
+        let nemotron = nemotronAsr
+        unifiedAsr = nil
+        nemotronAsr = nil
         sessionVocabulary = nil
         sessionCtcModels = nil
+        await Task.detached {
+            if let unified {
+                _ = try? await unified.finish()
+                await unified.cleanup()
+            }
+            if let nemotron {
+                _ = try? await nemotron.finish()
+                await nemotron.cleanup()
+            }
+        }.value
     }
 
     // MARK: - Consume updates + feed mixed audio

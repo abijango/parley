@@ -22,7 +22,7 @@ struct TranscriptMeta {
 /// properties) followed by a human-readable header and the speaker-labeled,
 /// timestamped transcript body the downstream `process-meeting-transcript` skill expects.
 enum TranscriptWriter {
-    struct Result {
+    struct Result: Sendable {
         let url: URL
     }
 

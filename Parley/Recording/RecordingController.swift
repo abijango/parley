@@ -148,6 +148,7 @@ final class RecordingController: ObservableObject {
     lazy var mergeService = MergeService(store: store, vault: vault, offline: offlineService)
     let callDetector = CallDetector()
     let metadataResolver = MeetingMetadataResolver()
+    private(set) lazy var admission = MeetingAdmission(meeting: meeting)
 
     private let settings = AppSettings.shared
 
@@ -156,6 +157,10 @@ final class RecordingController: ObservableObject {
     private let systemRing = AudioRingBuffer(capacity: 16_000 * 30)
     private var micCapture: MicCapture?
     private var systemCapture: SystemAudioCapture?
+    /// Capture teardown still running from the last `stop()`. `stop()` clears the two
+    /// properties above immediately, so without this handle the quit path would find
+    /// nothing to wait on and let the process exit mid-flush.
+    private var captureTeardown: Task<Void, Never>?
     private var sessionDirectory: URL?
     private var recordingStartDate: Date?
     private var meterTimer: Timer?
@@ -201,7 +206,7 @@ final class RecordingController: ObservableObject {
             // WhisperKit ASR + SpeakerKit diarization + voiceprints.
             let wsk = WhisperKitSpeakerKitEngine(models: models, settings: settings, voiceprints: voiceprints,
                                                  identificationThreshold: settings.identificationThreshold)
-            wsk.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
+            wsk.onSpeakerIdentified = { [weak self] name in self?.admission.addRecognized(name) }
             engine = wsk
         case .fluidAudio:
             let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
@@ -210,12 +215,12 @@ final class RecordingController: ObservableObject {
             fluid.sessionAttendees = meeting.attendees
             fluid.sessionMeetingTitle = meeting.meetingTitle
             // Auto-add a recognized person to the attendees list (above threshold).
-            fluid.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
+            fluid.onSpeakerIdentified = { [weak self] name in self?.admission.addRecognized(name) }
             engine = fluid
         case .speechAnalyzer:
             let speech = SpeechAnalyzerEngine(settings: settings, voiceprints: voiceprints,
                                               identificationThreshold: settings.identificationThreshold)
-            speech.onSpeakerIdentified = { [weak self] name in self?.addAttendeeIfAbsent(name) }
+            speech.onSpeakerIdentified = { [weak self] name in self?.admission.addRecognized(name) }
             engine = speech
         }
         wireSegmentPublishing(to: engine)
@@ -268,7 +273,7 @@ final class RecordingController: ObservableObject {
             byID.removeValue(forKey: id)
         }
         wordCountBySegmentID = byID
-        live.liveWordCount = total
+        if live.liveWordCount != total { live.liveWordCount = total }
     }
 
     private func resetSegmentPublishState() {
@@ -345,7 +350,7 @@ final class RecordingController: ObservableObject {
             pendingSpeakerReview?.attendees = OfflineProcessingService.merge(
                 pendingSpeakerReview?.attendees ?? "", with: [name])
         } else {
-            addAttendeeIfAbsent(name)
+            admission.addRecognized(name)
         }
     }
 
@@ -437,37 +442,11 @@ final class RecordingController: ObservableObject {
 
     /// Append a name to the comma-separated attendees list if not already present.
     private func addAttendeeIfAbsent(_ rawName: String) {
-        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        let current = TranscriptWriter.splitAttendees(meeting.attendees)
-        guard !current.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) else { return }
-        meeting.attendees = current.isEmpty ? name : meeting.attendees + ", " + name
+        admission.addRecognized(rawName)
     }
 
     // MARK: Meeting-metadata discovery (title/attendee suggestions)
 
-    /// Union a roster snapshot into the suggestions, stamping `firstSeen` (the
-    /// join timestamp) only on first sighting; entries never disappear (someone
-    /// leaving the call keeps their chip).
-    private func mergeRoster(_ roster: [RosterEntry]) {
-        for entry in roster {
-            let name = entry.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { continue }
-            if let idx = meeting.suggestedAttendees.firstIndex(where: {
-                $0.name.caseInsensitiveCompare(name) == .orderedSame
-            }) {
-                if meeting.suggestedAttendees[idx].role == nil, let role = entry.role {
-                    meeting.suggestedAttendees[idx].role = role
-                }
-            } else {
-                AppLog.log("Roster: \(name)\(entry.role.map { " (\($0))" } ?? "") joined", category: "detect")
-                meeting.suggestedAttendees.append(SuggestedAttendee(name: name, role: entry.role, firstSeen: Date()))
-            }
-        }
-    }
-
-    /// Called by the Title field on focused (user) edits — from then on,
-    /// discovery offers instead of overwriting.
     func userEditedTitle() {
         meeting.titleWasUserEdited = true
         meeting.titleSource = "user"
@@ -483,26 +462,19 @@ final class RecordingController: ObservableObject {
     }
 
     func acceptSuggestion(_ name: String) {
-        guard let idx = meeting.suggestedAttendees.firstIndex(where: {
-            $0.name.caseInsensitiveCompare(name) == .orderedSame
-        }) else { return }
-        meeting.suggestedAttendees[idx].accepted = true
-        meeting.suggestedAttendees[idx].dismissed = false
-        addAttendeeIfAbsent(meeting.suggestedAttendees[idx].name)
+        admission.admitUncertain(name)
         scheduleMetadataSync()
     }
 
     func acceptAllSuggestions() {
         for s in meeting.suggestedAttendees where !s.accepted && !s.dismissed {
-            acceptSuggestion(s.name)
+            admission.admitUncertain(s.name)
         }
+        scheduleMetadataSync()
     }
 
     func dismissSuggestion(_ name: String) {
-        guard let idx = meeting.suggestedAttendees.firstIndex(where: {
-            $0.name.caseInsensitiveCompare(name) == .orderedSame
-        }) else { return }
-        meeting.suggestedAttendees[idx].dismissed = true
+        admission.dismissUncertain(name)
     }
 
     private var didWarmup = false
@@ -525,6 +497,7 @@ final class RecordingController: ObservableObject {
         preloadModel()
         scheduleIdleUnload()   // if nothing happens for a while, free the model's RAM
         startCallDetection()
+        AppSettings.shared.seedWebexKnownAppIfNeeded()
         Task {
             let micGranted = await PermissionManager.requestMicrophone()          // mic prompt
             micDenied = !micGranted
@@ -573,20 +546,15 @@ final class RecordingController: ObservableObject {
             AppLog.log("Call detection disabled in settings", category: "detect")
             return
         }
-        metadataResolver.onUpdate = { [weak self] meta in
+        metadataResolver.onUpdate = { [weak self] reading in
             guard let self else { return }
-            if let title = meta.title {
-                self.meeting.setDiscoveredTitle(title, source: meta.titleSource ?? "")
-                // Auto-fill only while the title is still an untouched default;
-                // after a manual edit, the chip UI offers it instead.
-                if !self.meeting.titleWasUserEdited, self.meeting.isDefaultTitle(self.meeting.meetingTitle) {
-                    AppLog.log("Discovered title (\(meta.titleSource ?? "?")): \(title)", category: "detect")
-                    self.meeting.meetingTitle = title
-                    self.meeting.titleSource = meta.titleSource
-                    self.scheduleMetadataSync()
-                }
+            if let title = reading.title {
+                self.meeting.offerTitle(title)
+                AppLog.log("Discovered title (\(title.provenance)): \(title.title)", category: "detect")
+                self.scheduleMetadataSync()
             }
-            self.mergeRoster(meta.roster)
+            self.admission.ingest(reading)
+            self.scheduleMetadataSync()
         }
         callDetector.onCallStart = { [weak self] call in
             guard let self else { return }
@@ -602,6 +570,7 @@ final class RecordingController: ObservableObject {
             self.preloadModel()
             // New call context: reset the last call's discoveries, start fresh.
             self.meeting.resetDiscovery()
+            self.admission.reset()
             self.metadataResolver.start(for: call)
             // If the app crashed mid-call and that same call is the one now live,
             // resume INTO that note rather than starting a competing new recording
@@ -688,6 +657,7 @@ final class RecordingController: ObservableObject {
             if !metadataResolver.isPolling { metadataResolver.start(for: call) }
         } else {
             meeting.resetDiscovery()
+            admission.reset()
             metadataResolver.stop()
         }
         engine = makeEngine()
@@ -745,6 +715,7 @@ final class RecordingController: ObservableObject {
         meeting.destinationPath = m.filing
         meeting.manualNotes = m.manualNotes
         meeting.attachments = m.attachments ?? []
+        admission.restoreSuggestions(m.suggestedAttendees)
         lastResult = nil
         lastTranscriptURL = nil
         engine = makeEngine()
@@ -812,8 +783,14 @@ final class RecordingController: ObservableObject {
                 category: "record"
             )
         } catch {
-            mic.stop()
-            system.stop()
+            // Off the main actor for the same reason as `stop()`: a start that failed
+            // because CoreAudio is wedged would otherwise block here too. Whichever of
+            // the two never came up ignores this (their `stop()` no-ops when not
+            // running), and `SystemAudioCapture.start()` already self-cleans on throw.
+            Task.detached {
+                await mic.stop()
+                await system.stop()
+            }
             AppLog.log("Capture failed to start: \(error.localizedDescription)", category: "record")
             live.state = .error(error.localizedDescription)
             startedByDetection = false
@@ -965,13 +942,26 @@ final class RecordingController: ObservableObject {
         // Freeze discovery; suggestions stay for the preview/speaker-assignment UI.
         metadataResolver.enterPreviewMode()
 
-        micCapture?.stop()
-        systemCapture?.stop()
+        // Capture teardown runs off the main actor. Both `MicCapture.stop()` and
+        // `SystemAudioCapture.stop()` block inside CoreAudio while the audio device
+        // reconfigures — which is exactly what a call ending triggers — and on
+        // 2026-08-12 that parked the main thread for 57 seconds mid-stop.
+        let mic = micCapture
+        let system = systemCapture
         micCapture = nil
         systemCapture = nil
-        // Only now — `MicCapture.stop()` does a `rebuildQueue.sync` from this thread, the
-        // one named main-thread block candidate in the codebase. Keeping the watchdog
-        // armed across teardown is the whole point of having it.
+        // Detached on purpose. A main-actor `Task` would resume on the main actor
+        // between the two awaits, and `teardownForQuit()` blocks the main thread while
+        // draining this — the two together would deadlock until the timeout.
+        let captureTeardown = Task.detached {
+            await mic?.stop()
+            await system?.stop()
+        }
+        self.captureTeardown = captureTeardown
+        // Safe to disarm here: the watchdog was guarding the `rebuildQueue.sync` that
+        // used to run on this thread, and that block is gone. Disarming now rather than
+        // after the teardown above also means a recording the user starts while the old
+        // one is still tearing down keeps its own watchdog.
         MainActorWatchdog.shared.stop()
 
         // Tear down the engine off the main actor; finalize() reads the
@@ -983,12 +973,20 @@ final class RecordingController: ObservableObject {
         let engine = self.engine
         Task { await engine?.stop() }
 
-        finalize()
+        // finalize() still runs NOW, synchronously. It snapshots session identity from
+        // live properties, so deferring it behind the teardown would let a recording
+        // started in the meantime redirect this session's output — the data-loss bug the
+        // snapshot comment inside it guards against. Only the offline enqueue waits.
+        finalize(captureTeardown: captureTeardown)
     }
 
-    /// Writes the transcript to the vault and, if enabled, runs Claude to
-    /// produce the polished note. Runs off the main thread; never blocks quit.
-    private func finalize() {
+    /// Snapshots session identity, writes the transcript off the main actor, then
+    /// presents enrichment / stamps the manifest on the main actor. Never blocks quit.
+    ///
+    /// - Parameter captureTeardown: in-flight audio teardown, awaited before the
+    ///   offline pass is enqueued. That pass reads `mic.caf`, and the archive is not
+    ///   flushed until `MicCapture.stop()` completes.
+    private func finalize(captureTeardown: Task<Void, Never>? = nil) {
         // Include the trailing unconfirmed tail — on stop it's final.
         let segments = engine?.finalTimeline() ?? []
         AppLog.log("Recording stopped — \(segments.count) segments (confirmed + tail)", category: "record")
@@ -1001,7 +999,7 @@ final class RecordingController: ObservableObject {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        vault.addPeople(attendeeNames)
+        vault.addPeopleInBackground(attendeeNames)
 
         let date = recordingStartDate ?? Date()
         let folder = AppPaths.unprocessedURL
@@ -1028,35 +1026,34 @@ final class RecordingController: ObservableObject {
         // write leaves the manifest `.active`, which the Recovery sheet catches.
         stopHeartbeat()
 
+        let enrichRows = enrichmentRows(forAttendees: attendeeNames)
+        let destinationLeaf = destination.split(separator: "/").last.map(String.init) ?? ""
+
         Task {
             do {
-                let result = try TranscriptWriter.write(
-                    title: title, date: date, attendees: attendees, destination: destination,
-                    segments: segments,
-                    manualNotes: manual.isEmpty ? nil : manual,
-                    attachments: attachments,
-                    audioPath: audioPath,
-                    folderURL: folder,
-                    vaultURL: vaultURL
-                )
-                AppLog.log("Transcript written: \(result.url.path)\(segments.isEmpty ? " (no speech — saved for the record + audio link)" : "")", category: "record")
-                if let p = partialPath { try? FileManager.default.removeItem(at: p) }
-                if let dir = sessionDir {
-                    try? FileManager.default.removeItem(at: dir.appendingPathComponent("segments.jsonl"))
-                }
+                let result = try await Task.detached {
+                    let written = try TranscriptWriter.write(
+                        title: title, date: date, attendees: attendees, destination: destination,
+                        segments: segments,
+                        manualNotes: manual.isEmpty ? nil : manual,
+                        attachments: attachments,
+                        audioPath: audioPath,
+                        folderURL: folder,
+                        vaultURL: vaultURL
+                    )
+                    if let p = partialPath { try? FileManager.default.removeItem(at: p) }
+                    if let dir = sessionDir {
+                        try? FileManager.default.removeItem(at: dir.appendingPathComponent("segments.jsonl"))
+                    }
+                    return written
+                }.value
+                AppLog.log("Transcript written: \(result.url.path)\(segments.isEmpty ? " (no speech transcribed)" : "")", category: "record")
                 lastTranscriptURL = result.url
                 lastResult = segments.isEmpty
                     ? "Saved (no speech transcribed): \(result.url.lastPathComponent)"
                     : "Transcript saved: \(result.url.lastPathComponent)"
                 notes.reset()
                 store.refresh()
-                // B: offer a one-time enrichment sheet for attendees with no known
-                // company. On the non-speaker path this also defers the summary so
-                // E-annotation reflects whatever the user fills in. On the speaker path
-                // it is best-effort rolodex enrichment only (the summary is queued via
-                // the offline service independently).
-                let destinationLeaf = destination.split(separator: "/").last.map(String.init) ?? ""
-                let enrichRows = enrichmentRows(forAttendees: attendeeNames)
                 if !enrichRows.isEmpty {
                     let runSummary = autoSummarize && !segments.isEmpty && !isSpeakerEngine
                     pendingEnrichment = AttendeeEnrichment(
@@ -1065,17 +1062,9 @@ final class RecordingController: ObservableObject {
                         destinationDefault: destinationLeaf,
                         runSummaryOnFinish: runSummary)
                     autoPresentEnrichment = true
-                    // Non-speaker summary is deferred to finishEnrichment(); speaker path
-                    // does not summarize here regardless.
-                } else {
-                    // No unenriched attendees: preserve today's behavior exactly.
-                    if autoSummarize && !segments.isEmpty && !isSpeakerEngine {
-                        maybeAutoRunClaude()
-                    }
+                } else if autoSummarize && !segments.isEmpty && !isSpeakerEngine {
+                    maybeAutoRunClaude()
                 }
-                // Transcript write succeeded — stamp the manifest finalized NOW, before
-                // the offline enqueue. `setOfflineStatus` does a read-modify-write on the
-                // manifest, so the `.finalized` stamp must be on disk first.
                 stampFinalizedManifest(
                     directory: sessionDir,
                     manifest: sessionManifest,
@@ -1084,12 +1073,10 @@ final class RecordingController: ObservableObject {
                     filing: destination,
                     manualNotes: manual,
                     attachments: attachments)
-                // Hand the finalized session to the idle-gated offline queue: ASR re-pass
-                // + speaker detect + compaction, run when nothing is recording. The job is
-                // a self-contained snapshot, so it's safe even if a new recording starts.
                 if isSpeakerEngine, let dir = sessionDir, !segments.isEmpty {
                     SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: result.url.path,
                                                   presentReviewWhenDone: false, in: dir)
+                    await captureTeardown?.value
                     offlineService.enqueue(OfflineJob(
                         sessionDir: dir, transcriptURL: result.url, title: title,
                         attendees: attendees, filing: destination,
@@ -1099,15 +1086,9 @@ final class RecordingController: ObservableObject {
                             stored: sessionManifest?.fluidAsrProfile, settings: settings)))
                     offlineService.runNextIfIdle()
                 }
-                // The transcript is on disk — the Record view is settled and eligible for
-                // auto-clear regardless of engine (the offline pass is decoupled now and
-                // runs on a background queue against the saved file).
                 clearArmable = true
                 armClearIfReady()
             } catch {
-                // Write failed — leave the manifest `.active` (heartbeat is already stopped,
-                // so no spurious heartbeat will overwrite state) so the Recovery sheet catches
-                // this session on next launch. Do NOT stamp `.finalized` here.
                 AppLog.log("Finalize failed: \(error.localizedDescription)", category: "record")
                 lastResult = "Finalize failed: \(error.localizedDescription)"
             }
@@ -1541,36 +1522,24 @@ final class RecordingController: ObservableObject {
     /// - Parameter save: when `true`, persists non-empty company rows to the
     ///   rolodex. When `false` (Skip all / Escape dismiss), upserts are skipped
     ///   but the deferred non-speaker summary still fires so it is never lost.
-    func finishEnrichment(save: Bool) {
+    func finishEnrichment(save: Bool, rows: [AttendeeEnrichment.Row]? = nil) {
         let e = pendingEnrichment
         pendingEnrichment = nil
         autoPresentEnrichment = false
         if save {
-            for row in e?.rows ?? [] where !row.company.trimmingCharacters(in: .whitespaces).isEmpty {
-                vault.upsertPerson(
-                    name: row.name,
-                    title: row.title,
-                    company: row.company,
-                    linkedin: row.linkedin)
+            let filled = (rows ?? e?.rows ?? []).filter {
+                !$0.company.trimmingCharacters(in: .whitespaces).isEmpty
             }
+            vault.upsertPeople(filled.map {
+                (name: $0.name, title: $0.title, company: $0.company, linkedin: $0.linkedin)
+            })
         }
-        // Always fire the deferred summary (if any) — Skip must not lose the summary.
         if e?.runSummaryOnFinish == true { maybeAutoRunClaude(forTranscriptURL: e?.transcriptURL) }
         armClearIfReady()
     }
 
-    /// Record that `detected` (e.g. a Teams display name) is an alias for an existing
-    /// canonical contact. Writes the alias line to the rolodex, then removes the
-    /// enrichment row whose name equals `detected` -- the person is now known, so no
-    /// manual company fill is needed. If that empties the row set, finishes enrichment
-    /// (saving any remaining filled rows) so the deferred summary fires correctly.
     func linkAttendeeToExisting(detected: String, canonicalName: String) {
         vault.addAlias(detected, toCanonical: canonicalName)
-        guard pendingEnrichment != nil else { return }
-        pendingEnrichment!.rows.removeAll { $0.name == detected }
-        if pendingEnrichment!.rows.isEmpty {
-            finishEnrichment(save: true)
-        }
     }
 
     /// Write confirmed inferred affiliations back to the rolodex (promotes attendees out
@@ -1665,6 +1634,7 @@ final class RecordingController: ObservableObject {
         autoPresentSpeakerReview = false
         clearArmable = false
         meeting.resetDiscovery()
+        admission.reset()
         notes.reset()
         AppLog.log("Auto-cleared Record view for the next meeting", category: "record")
     }
@@ -1908,7 +1878,10 @@ final class RecordingController: ObservableObject {
             manualNotes: meeting.manualNotes,
             attachments: meeting.attachments.isEmpty ? nil : meeting.attachments,
             titleSource: meeting.titleSource,
-            suggestedAttendees: meeting.suggestedAttendees.isEmpty ? nil : meeting.suggestedAttendees,
+            suggestedAttendees: {
+                let rows = meeting.roster.persistedSuggestions()
+                return rows.isEmpty ? nil : rows
+            }(),
             releaseLivePointers: false)
     }
 
@@ -2130,9 +2103,39 @@ final class RecordingController: ObservableObject {
         if lastTranscriptURL == transcriptURL { lastTranscriptURL = moved }
     }
 
+    /// Quit path. `applicationWillTerminate` cannot await, so everything here is a
+    /// bounded synchronous wait: give CoreAudio a few seconds, then let quit proceed.
+    /// The trade is deliberate — a truncated archive tail (and an aggregate device the
+    /// next launch sweeps up) beats a quit that hangs indefinitely on `coreaudiod`.
+    ///
+    /// Two cases, and both need covering: quitting while still recording (the captures
+    /// are live, so `stopBlocking` does the work), and quitting just after a stop, where
+    /// `stop()` has already cleared the captures and teardown is in flight — the calls
+    /// below no-op and `captureTeardown` is what there is to wait on.
     func teardownForQuit() {
-        micCapture?.stop()
-        systemCapture?.stop()
+        micCapture?.stopBlocking()
+        systemCapture?.stopBlocking()
+        if let captureTeardown {
+            Self.drainOnQuit(captureTeardown)
+            self.captureTeardown = nil
+        }
+    }
+
+    /// Blocks the calling thread until `task` finishes or `timeout` elapses. Safe only
+    /// because `captureTeardown` is a *detached* task: a main-actor task would need the
+    /// thread we are blocking here in order to make progress.
+    private static func drainOnQuit(_ task: Task<Void, Never>, timeout: TimeInterval = 5) {
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            await task.value
+            done.signal()
+        }
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            AppLog.log(
+                "quit: capture teardown still running after \(Int(timeout))s — quitting without flushing the tail",
+                category: "audio"
+            )
+        }
     }
 
     // MARK: Helpers

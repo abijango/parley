@@ -19,15 +19,49 @@ import os
 /// Recovery keeps writing into the same `mic.caf` file (AudioMix overlays by
 /// sample index from 0, so a continuation file won't be mixed in). The outage
 /// gap is silence-padded in the archive so subsequent audio stays sample-aligned.
-final class MicCapture {
+///
+/// `@unchecked Sendable`: every field crossing a thread boundary is already behind
+/// an explicit lock (`stateLock`, `tapLock`, `modeLock`) or confined to
+/// `rebuildQueue` — the class has always been used concurrently by the tap, the
+/// watchdog and the caller.
+final class MicCapture: @unchecked Sendable {
     // MARK: - Engine & state (rebuildable)
 
     private var engine = AVAudioEngine()
 
     /// True after `start()` and false after `stop()`. Guards rebuilds.
-    private var isRunning = false
+    /// Written by the caller's thread (`start`/`stop`) and read on `rebuildQueue`
+    /// (watchdog + rebuild), so it goes through `stateLock` rather than being a
+    /// bare cross-thread `Bool`.
+    private var _isRunning = false
+    private var stateLock = os_unfair_lock()
     /// Guards against overlapping rebuild attempts (set on `rebuildQueue`).
     private var isRebuilding = false
+
+    private var isRunning: Bool {
+        get {
+            os_unfair_lock_lock(&stateLock)
+            defer { os_unfair_lock_unlock(&stateLock) }
+            return _isRunning
+        }
+        set {
+            os_unfair_lock_lock(&stateLock)
+            _isRunning = newValue
+            os_unfair_lock_unlock(&stateLock)
+        }
+    }
+
+    /// Atomically clears `isRunning`, returning true only to the caller that won
+    /// the race. Quit tears down twice — the menu's Quit button, then
+    /// `applicationWillTerminate` — and with teardown now asynchronous a plain
+    /// check-then-set would let both callers through.
+    private func beginStop() -> Bool {
+        os_unfair_lock_lock(&stateLock)
+        defer { os_unfair_lock_unlock(&stateLock) }
+        guard _isRunning else { return false }
+        _isRunning = false
+        return true
+    }
 
     // MARK: - Serialization
 
@@ -119,21 +153,58 @@ final class MicCapture {
         )
     }
 
-    func stop() {
-        guard isRunning else { return }
-        // Set isRunning = false first so any queued rebuild bails out.
-        isRunning = false
+    /// Stops capture and flushes the archive.
+    ///
+    /// Teardown is serialized on `rebuildQueue`, so it queues behind any in-flight
+    /// `rebuildEngine()` — and a rebuild can sit inside CoreAudio for tens of
+    /// seconds while the audio device reconfigures (a Teams call ending does
+    /// exactly that). This is `async` for that reason: awaiting it leaves the main
+    /// actor free instead of parking the whole UI on `coreaudiod`.
+    ///
+    /// Callers that go on to read `mic.caf` — the offline ASR pass does — must
+    /// await this first. The archive isn't complete until the flush below runs.
+    func stop() async {
+        guard beginStop() else { return }
 
         stopWatchdog()
         stopObserver()
 
-        // Serialize teardown with any in-flight rebuild.
-        rebuildQueue.sync {
-            tearDownEngine()
+        await withCheckedContinuation { continuation in
+            rebuildQueue.async { [self] in
+                performTeardownAndFlush()
+                continuation.resume()
+            }
         }
+    }
 
-        // Flush any staged frames that haven't been written to disk yet.
-        // Must happen after teardown (tap is gone, no concurrent writes).
+    /// Synchronous stop for `applicationWillTerminate`, which has no way to await.
+    /// Waits up to `timeout` for teardown, then proceeds regardless so quit is
+    /// never hostage to a wedged `coreaudiod`. Giving up can truncate the tail of
+    /// `mic.caf`; a bounded, logged loss beats an unbounded hang.
+    func stopBlocking(timeout: TimeInterval = 5) {
+        guard beginStop() else { return }
+
+        stopWatchdog()
+        stopObserver()
+
+        let done = DispatchSemaphore(value: 0)
+        rebuildQueue.async { [self] in
+            performTeardownAndFlush()
+            done.signal()
+        }
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            AppLog.log(
+                "mic stop: teardown still blocked after \(Int(timeout))s — quitting without flushing the tail",
+                category: "audio"
+            )
+        }
+    }
+
+    /// Runs on `rebuildQueue`. Order matters: the archiver flushes only once the
+    /// tap is gone, since the tap appends from a real-time thread and finalizing
+    /// underneath it races.
+    private func performTeardownAndFlush() {
+        tearDownEngine()
         archiver?.finalize()
     }
 
@@ -243,39 +314,55 @@ final class MicCapture {
         isRebuilding = true
         defer { isRebuilding = false }
 
-        let outageStart = Date()
-
-        // 1. Measure outage from the last known buffer arrival.
-        os_unfair_lock_lock(&tapLock)
-        let lastBuffer = lastBufferDate
-        os_unfair_lock_unlock(&tapLock)
-        let outageSeconds = max(0, outageStart.timeIntervalSince(lastBuffer))
-
-        // 2. Tear down the current engine (stop, remove tap).
+        // 1. Tear down the current engine (stop, remove tap).
         tearDownEngine()
 
-        // 3. Build a fresh engine.
+        // 2. Build a fresh engine.
         let freshEngine = AVAudioEngine()
         engine = freshEngine
 
-        // 4. Read the new input format.
+        // 3. Read the new input format. This is a synchronous IPC into
+        //    `coreaudiod`, and when the audio device is mid-reconfiguration it can
+        //    block for tens of seconds — 57s was observed on 2026-08-12. Treat
+        //    everything below as running at an unknown later time.
         let format = freshEngine.inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0 else {
             AppLog.log("mic rebuild: input unavailable (rate=0) — watchdog will retry", category: "audio")
             return
         }
 
-        // 5. Build new capture resources.
+        // 4. Build new capture resources.
         let newResampler = AudioResampler(inputFormat: format)
 
-        // 6. Update the archiver's converter and pad the silence gap.
+        // 5. Update the archiver's converter and pad the silence gap.
         //    Must happen AFTER teardown (no concurrent tap writes) and BEFORE
         //    the new tap starts writing.
+        //
+        //    Measure the outage HERE rather than on entry: step 3 may have blocked
+        //    for a minute, and padding a figure sampled before it leaves `mic.caf`
+        //    short by however long CoreAudio stalled — which desynchronizes it from
+        //    `system.caf` for the rest of the recording.
+        os_unfair_lock_lock(&tapLock)
+        let outageSeconds = max(0, Date().timeIntervalSince(lastBufferDate))
+        os_unfair_lock_unlock(&tapLock)
+
         if let archiver {
             archiver.updateSourceFormat(format)
             if outageSeconds > 0 {
                 archiver.appendSilence(seconds: outageSeconds)
             }
+        }
+
+        // 6. If a stop landed while step 3 was blocked, quit now — but only after
+        //    the padding above, so the archive stays wall-clock aligned. Bailing any
+        //    earlier would drop the padding on exactly the path that needs it most.
+        //    `stop()`'s own teardown is already queued behind us on `rebuildQueue`.
+        guard isRunning else {
+            AppLog.log(
+                "mic rebuild: stopped while CoreAudio was blocked — padded \(String(format: "%.2f", outageSeconds))s and abandoned the rebuild",
+                category: "audio"
+            )
+            return
         }
 
         // 7. Swap resampler reference under the lock, then install new tap.

@@ -7,7 +7,7 @@ struct MainWindowView: View {
     @EnvironmentObject private var recording: RecordingController
     @ObservedObject private var store = RecordingController.shared.store
     @ObservedObject private var summaryService = RecordingController.shared.summaryService
-    @ObservedObject private var offline = RecordingController.shared.offlineService
+    private let offline = RecordingController.shared.offlineService
     @State private var selection: SidebarSection? = .record
     @State private var showingRecovery = false
     @AppStorage("parley.sidebarCollapsed") private var sidebarCollapsed = false
@@ -96,8 +96,8 @@ struct MainWindowView: View {
             refreshHistoryBadge()
         }
         .onChange(of: store.items) { refreshHistoryBadge() }
-        .onReceive(offline.objectWillChange) { _ in refreshHistoryBadge() }
-        .onReceive(summaryService.objectWillChange) { _ in refreshHistoryBadge() }
+        .onReceive(offline.$jobs) { _ in refreshHistoryBadge() }
+        .onChange(of: summaryService.runningID) { refreshHistoryBadge() }
     }
 
     private func refreshHistoryBadge() {
@@ -201,8 +201,6 @@ struct RecordDetailView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var models: ModelManager
     @EnvironmentObject private var vault: VaultDirectory
-    /// Observed so the offline-queue strip republishes as jobs come and go.
-    @ObservedObject private var offline = RecordingController.shared.offlineService
     @ObservedObject private var summaryService = RecordingController.shared.summaryService
     @State private var apps: [CapturableApp] = []
     @State private var mode: WindowMode = .live
@@ -233,6 +231,12 @@ struct RecordDetailView: View {
         mode == .live && !recording.isRecording && live.segments.isEmpty
     }
 
+    private func showPreviewIfSettled() {
+        guard recording.lastTranscriptURL != nil, !recording.isRecording else { return }
+        guard recording.pendingEnrichment == nil else { return }
+        mode = .preview
+    }
+
     enum WindowMode: String, CaseIterable, Identifiable {
         case live = "Live", preview = "Preview"
         var id: String { rawValue }
@@ -253,12 +257,7 @@ struct RecordDetailView: View {
                 inspector
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            offlinePassBar
-                // Scope the offline-queue animation to this bar only. Previously it sat
-                // on the whole VStack, so the footer's text swap (word count →
-                // "Transcript saved") rode the same transaction and crossfaded the two
-                // on top of each other. Confining it here keeps the footer swap instant.
-                .animation(Theme.Motion.gentle, value: offlineActiveCount)
+            OfflinePassBar()
             footer
         }
         .frame(minWidth: 480, minHeight: 520)
@@ -274,9 +273,8 @@ struct RecordDetailView: View {
         // Auto-switch to the rendered note when a recording finishes writing it —
         // but never while a (new) recording is already live, so a back-to-back
         // auto-started call isn't yanked to the previous call's preview.
-        .onChange(of: recording.lastTranscriptURL) {
-            if recording.lastTranscriptURL != nil, !recording.isRecording { mode = .preview }
-        }
+        .onChange(of: recording.lastTranscriptURL) { showPreviewIfSettled() }
+        .onChange(of: recording.pendingEnrichment?.id) { showPreviewIfSettled() }
         // Any recording start (manual OR auto-detected) shows the live transcript.
         // Auto-record used to leave the window on whatever it was (often the prior
         // call's Preview), so live text appeared to be "missing" until you switched tabs.
@@ -344,6 +342,7 @@ struct RecordDetailView: View {
                         && !settings.liveTranscriptEnabled,
                     hidesEmptyState: isPreRecordIdle
                 )
+                .equatable()
                 .overlay {
                     // Scoped to the message that actually animates. Previously this
                     // animation sat on the whole live VStack, so flipping isPreRecordIdle
@@ -765,13 +764,15 @@ struct RecordDetailView: View {
                            placeholder: "Add attendees",
                            onCreateNew: { name in pendingPerson = PendingPerson(name: name) })
                     .onChange(of: meeting.attendees) {
+                        recording.admission.tokenFieldChanged(
+                            to: TranscriptWriter.splitAttendees(meeting.attendees))
                         recording.scheduleMetadataSync()
                         recording.userInteracted()
                     }
                 if !attendeesBinding.wrappedValue.isEmpty {
                     Button("Clear all attendees") { meeting.attendees = "" }
                         .buttonStyle(.chip)
-                        .help("Remove every attendee (call suggestions below are kept)")
+                        .help("Remove every attendee. In-call people you remove stay excluded for this session.")
                 }
                 SuggestionChips(meeting: meeting, recording: recording)
             }
@@ -866,42 +867,6 @@ struct RecordDetailView: View {
     }
 
     // MARK: Footer
-
-    /// Count of offline jobs queued or running in the background (across all sessions).
-    private var offlineActiveCount: Int {
-        offline.jobs.values.filter { $0 == .queued || $0 == .running }.count
-    }
-
-    /// A strip under the transcript showing the post-stop pipeline as a segmented
-    /// stage bar: the running job's live per-stage progress, or a queued (dim) bar
-    /// while a job waits for idle, plus how many more recordings are behind it.
-    @ViewBuilder private var offlinePassBar: some View {
-        if offlineActiveCount > 0 {
-            let running = offline.runningProgress.flatMap {
-                StageBarModel.fuse(offlineState: .running, offlineProgress: $0,
-                                   summaryRunning: false, summaryQueued: false,
-                                   summaryFailed: nil, summaryPaused: false, summaryActivity: nil)
-            }
-            let model = running ?? StageBarModel.fuse(offlineState: .queued, offlineProgress: nil,
-                                                      summaryRunning: false, summaryQueued: false,
-                                                      summaryFailed: nil, summaryPaused: false,
-                                                      summaryActivity: nil)
-            if let model {
-                HStack(alignment: .top, spacing: Theme.Spacing.medium) {
-                    SegmentedStageBar(segments: model.segments,
-                                      statusLabel: model.statusLabel, sublabel: model.sublabel)
-                    if running != nil, offline.queuedCount > 0 {
-                        Text("+\(offline.queuedCount) queued")
-                            .font(Theme.Typography.captionSecondary)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
-                .background(.quaternary.opacity(Theme.Opacity.surface))
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-    }
 
     private var footer: some View {
         HStack(spacing: Theme.Spacing.medium) {
@@ -1006,5 +971,44 @@ private struct RecordLevelMeters: View {
             InputLevelBar(label: "Remote", level: remoteLevel)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+private struct OfflinePassBar: View {
+    @ObservedObject private var offline = RecordingController.shared.offlineService
+
+    private var activeCount: Int {
+        offline.jobs.values.filter { $0 == .queued || $0 == .running }.count
+    }
+
+    var body: some View {
+        Group {
+            if activeCount > 0 {
+                let running = offline.runningProgress.flatMap {
+                    StageBarModel.fuse(offlineState: .running, offlineProgress: $0,
+                                       summaryRunning: false, summaryQueued: false,
+                                       summaryFailed: nil, summaryPaused: false, summaryActivity: nil)
+                }
+                let model = running ?? StageBarModel.fuse(offlineState: .queued, offlineProgress: nil,
+                                                          summaryRunning: false, summaryQueued: false,
+                                                          summaryFailed: nil, summaryPaused: false,
+                                                          summaryActivity: nil)
+                if let model {
+                    HStack(alignment: .top, spacing: Theme.Spacing.medium) {
+                        SegmentedStageBar(segments: model.segments,
+                                          statusLabel: model.statusLabel, sublabel: model.sublabel)
+                        if running != nil, offline.queuedCount > 0 {
+                            Text("+\(offline.queuedCount) queued")
+                                .font(Theme.Typography.captionSecondary)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
+                    .background(.quaternary.opacity(Theme.Opacity.surface))
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+        }
+        .animation(Theme.Motion.gentle, value: activeCount)
     }
 }

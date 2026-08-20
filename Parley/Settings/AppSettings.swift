@@ -311,10 +311,25 @@ final class AppSettings: ObservableObject {
             .filter { !$0.isEmpty })
     }
 
+    /// One-time: existing installs already have AppStorage without Webex. Seed it
+    /// once; the user can still remove the line afterwards.
+    func seedWebexKnownAppIfNeeded() {
+        let key = "parley.seededWebexBundle"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        if !conferencingBundleIDs.contains("cisco-systems.spark") {
+            let trimmed = conferencingBundleIDsRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+            conferencingBundleIDsRaw = trimmed.isEmpty
+                ? "cisco-systems.spark\n"
+                : trimmed + "\ncisco-systems.spark\n"
+        }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
     static let defaultConferencingBundleIDs = """
     com.microsoft.teams2
     com.microsoft.teams
     us.zoom.xos
+    cisco-systems.spark
     com.google.Chrome
     com.apple.Safari
     com.microsoft.edgemac

@@ -68,12 +68,20 @@ final class MeetingParsersTests: XCTestCase {
             node("AXStaticText", value: "Organizer", depth: 22),
             node("AXButton", desc: "Share invite", depth: 4),                     // outside the outline
         ]
+        let roster = MeetingParsers.teamsRoster(nodes)
+        XCTAssertEqual(roster?.inMeeting.map(\.name.value), ["Naufal Mir", "Oleksii Brodnikov"])
+        XCTAssertEqual(roster?.othersInvited.map(\.name.value), ["Tetyana Nykologorska", "Olga Ditmarova"])
+        XCTAssertEqual(roster?.othersInvited.last?.role, .organizer)
+        XCTAssertEqual(roster?.othersInvited.first?.inviteResponse, .tentative)
         XCTAssertEqual(MeetingParsers.teamsAttendees(nodes), [
             RosterEntry(name: "Naufal Mir", role: nil),
             RosterEntry(name: "Oleksii Brodnikov", role: nil),
-            RosterEntry(name: "Tetyana Nykologorska", role: nil),
-            RosterEntry(name: "Olga Ditmarova", role: "Organizer"),
         ])
+    }
+
+    func testTeamsRosterNilWhenPeoplePaneClosed() {
+        let nodes = [node("AXButton", desc: "Share invite", depth: 4)]
+        XCTAssertNil(MeetingParsers.teamsRoster(nodes))
     }
 
     // Legacy Teams format (pre-2026): "Name, Has context menu, Role, …" still parses.
@@ -108,11 +116,8 @@ final class MeetingParsersTests: XCTestCase {
             node("AXStaticText", value: "Guest Person", depth: 5),
         ]
         let entries = MeetingParsers.zoomAttendees(nodes)
-        XCTAssertEqual(entries, [
-            RosterEntry(name: "Naufal Mir", role: nil),          // speaker tile
-            RosterEntry(name: "Naufal Mir", role: "Host"),       // panel row
-            RosterEntry(name: "Guest Person", role: nil),
-        ])
+        XCTAssertEqual(Set(entries.map(\.name)), ["Naufal Mir", "Guest Person"])
+        XCTAssertEqual(entries.first { $0.name == "Naufal Mir" }?.role, "Host")
     }
 
     // MARK: Outlook-web calendar (Teams Calendar tab)

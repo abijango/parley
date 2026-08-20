@@ -17,11 +17,23 @@ final class MeetingSessionState: ObservableObject {
     private(set) var discoveredTitleSource: String?
     var titleSource: String?
     var titleWasUserEdited = false
+    var roster = MeetingRoster()
+    private var bestTitleAuthority: TitleAuthority?
 
     func resetDiscovery() {
         suggestedAttendees = []
         discoveredTitle = nil
         discoveredTitleSource = nil
+        titleWasUserEdited = false
+        bestTitleAuthority = nil
+        roster.reset()
+    }
+
+    func offerTitle(_ candidate: TitleCandidate) {
+        if let best = bestTitleAuthority, candidate.authority < best { return }
+        bestTitleAuthority = candidate.authority
+        setDiscoveredTitle(candidate.title, source: candidate.provenance)
+        applyDiscoveredTitleIfAllowed(candidate.title, source: candidate.provenance)
     }
 
     func setDiscoveredTitle(_ title: String, source: String) {

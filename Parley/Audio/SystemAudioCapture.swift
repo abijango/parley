@@ -3,6 +3,7 @@ import AVFoundation
 import CoreAudio
 import AudioToolbox
 import OSLog
+import os   // os_unfair_lock
 
 /// Selects what non-microphone audio to capture.
 enum SystemCaptureTarget {
@@ -33,7 +34,11 @@ enum SystemAudioCaptureError: Error, LocalizedError {
 /// (macOS 14.4+) → the "Remote" track. Avoids ScreenCaptureKit (and its Screen
 /// Recording permission). The first tap creation triggers the
 /// `NSAudioCaptureUsageDescription` prompt; there is no pre-check API.
-final class SystemAudioCapture {
+/// `@unchecked Sendable`: `_isRunning` is behind `stateLock`, the capture
+/// resources are confined to `ioQueue` until `teardownQueue` takes over (after
+/// `AudioDeviceStop` has drained the IO proc), and the object ids are only touched
+/// during start/teardown.
+final class SystemAudioCapture: @unchecked Sendable {
     private let ringBuffer: AudioRingBuffer
     private let archiveURL: URL?
     private let log = Logger(subsystem: AppInfo.name, category: "SystemAudioCapture")
@@ -45,7 +50,16 @@ final class SystemAudioCapture {
     private var resampler: AudioResampler?
     private var archiver: AudioArchiver?
     private let ioQueue = DispatchQueue(label: "\(AppInfo.name).systemAudioIO", qos: .userInitiated)
-    private var isRunning = false
+    /// Teardown runs here, never on `ioQueue` (`AudioDeviceStop` waits for the IO
+    /// proc to drain) and never on the main actor — every call in `teardown()` is
+    /// an IPC into `coreaudiod`, which can stall for tens of seconds while the
+    /// audio device reconfigures.
+    private let teardownQueue = DispatchQueue(label: "\(AppInfo.name).systemAudioTeardown")
+
+    /// Written by `start`/`stop`, read under `stateLock` so the double-teardown on
+    /// quit resolves to exactly one winner.
+    private var _isRunning = false
+    private var stateLock = os_unfair_lock()
 
     let meter = LevelMeter()
     var level: Float { meter.level }
@@ -157,10 +171,62 @@ final class SystemAudioCapture {
         }
     }
 
-    func stop() {
-        guard isRunning else { return }
-        teardown()
-        isRunning = false
+    private var isRunning: Bool {
+        get {
+            os_unfair_lock_lock(&stateLock)
+            defer { os_unfair_lock_unlock(&stateLock) }
+            return _isRunning
+        }
+        set {
+            os_unfair_lock_lock(&stateLock)
+            _isRunning = newValue
+            os_unfair_lock_unlock(&stateLock)
+        }
+    }
+
+    /// Atomically clears `isRunning`, returning true only to the caller that won
+    /// the race — quit tears down twice (menu button, then
+    /// `applicationWillTerminate`) and teardown is no longer synchronous.
+    private func beginStop() -> Bool {
+        os_unfair_lock_lock(&stateLock)
+        defer { os_unfair_lock_unlock(&stateLock) }
+        guard _isRunning else { return false }
+        _isRunning = false
+        return true
+    }
+
+    /// Stops capture, destroys the tap and aggregate device, and flushes the
+    /// archive. `async` because `teardown()` is four IPCs into `coreaudiod`, which
+    /// can stall for tens of seconds while the audio device reconfigures; awaiting
+    /// keeps the main actor live. Callers that read `system.caf` must await this.
+    func stop() async {
+        guard beginStop() else { return }
+        await withCheckedContinuation { continuation in
+            teardownQueue.async { [self] in
+                teardown()
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Synchronous stop for `applicationWillTerminate`, which cannot await. Waits
+    /// up to `timeout`, then proceeds so quit isn't hostage to a wedged
+    /// `coreaudiod`. Note the cost of giving up here is higher than for the mic:
+    /// an un-destroyed aggregate device leaks system-wide, which is why
+    /// `cleanupLeakedAggregates()` sweeps for it at the next launch.
+    func stopBlocking(timeout: TimeInterval = 5) {
+        guard beginStop() else { return }
+        let done = DispatchSemaphore(value: 0)
+        teardownQueue.async { [self] in
+            teardown()
+            done.signal()
+        }
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            AppLog.log(
+                "System audio: teardown still blocked after \(Int(timeout))s — quitting; next launch will sweep any leaked aggregate",
+                category: "audio"
+            )
+        }
     }
 
     // MARK: Tap creation

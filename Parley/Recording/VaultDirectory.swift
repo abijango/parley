@@ -35,7 +35,7 @@ struct CustomerReconciliation {
 }
 
 /// Which side of a meeting a person is on.
-enum Side: String, Equatable, CaseIterable, Codable {
+enum Side: String, Equatable, CaseIterable, Codable, Sendable {
     case internalTeam = "internal"
     case customer     = "customer"
     case other        = "other"
@@ -54,7 +54,7 @@ enum Side: String, Equatable, CaseIterable, Codable {
 ///   Stored sorted for determinism. Default empty.
 /// - `displayRole` is a legacy alias for title that returns "" when nil — kept for backward
 ///   compatibility with callers that expect a non-optional String.
-struct Contact: Equatable {
+struct Contact: Equatable, Sendable {
     let name: String
     let company: String?
     let side: Side
@@ -1484,6 +1484,28 @@ final class VaultDirectory: ObservableObject {
         refreshAfterMutation()
     }
 
+    /// Same mutation as `addPeople`, but the SQLite inserts run off the main actor.
+    /// Markdown export hops back so it cannot race `upsertPeople` on the contacts file.
+    func addPeopleInBackground(_ rawNames: [String]) {
+        let store = peopleStore
+        Task.detached { [weak self] in
+            var added = 0
+            for name in rawNames.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                where !name.isEmpty {
+                if store.find(nameOrAlias: name) != nil { continue }
+                _ = store.upsert(contact: Contact(name: name, company: nil, side: .other,
+                                                  title: nil, linkedin: nil))
+                added += 1
+            }
+            guard added > 0 else { return }
+            await MainActor.run {
+                self?.exportContactsMarkdown()
+                self?.refreshAfterMutation()
+                AppLog.log("Added \(added) contacts under \(VaultDirectory.otherSection)", category: "vault")
+            }
+        }
+    }
+
     /// Adds a single rich contact. Delegates to upsertPerson for dedup safety.
     func addPerson(name rawName: String, title rawTitle: String, company rawCompany: String, linkedin rawLink: String) {
         upsertPerson(name: rawName, title: rawTitle, company: rawCompany, linkedin: rawLink)
@@ -1541,6 +1563,34 @@ final class VaultDirectory: ObservableObject {
                       clearLinkedinIfEmpty: Bool = false) {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
+        persistPerson(name: rawName, title: rawTitle, company: rawCompany, linkedin: rawLink,
+                      side: explicitSide, clearLinkedinIfEmpty: clearLinkedinIfEmpty)
+        exportContactsMarkdown()
+        let companyTrimmed = rawCompany.trimmingCharacters(in: .whitespaces)
+        let section = companyTrimmed.isEmpty ? Self.otherSection : companyTrimmed
+        AppLog.log("Upserted contact \(name) under \(section)", category: "vault")
+        refreshAfterMutation()
+    }
+
+    /// One markdown export + index publish after many store upserts.
+    func upsertPeople(_ people: [(name: String, title: String, company: String, linkedin: String)]) {
+        let filled = people.filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !filled.isEmpty else { return }
+        for person in filled {
+            persistPerson(name: person.name, title: person.title,
+                          company: person.company, linkedin: person.linkedin)
+        }
+        exportContactsMarkdown()
+        AppLog.log("Upserted \(filled.count) contact(s)", category: "vault")
+        refreshAfterMutation()
+    }
+
+    private func persistPerson(name rawName: String, title rawTitle: String,
+                               company rawCompany: String, linkedin rawLink: String,
+                               side explicitSide: Side? = nil,
+                               clearLinkedinIfEmpty: Bool = false) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
         let titleTrimmed = rawTitle.trimmingCharacters(in: .whitespaces)
         let companyTrimmed = rawCompany.trimmingCharacters(in: .whitespaces)
         let linkTrimmed = rawLink.trimmingCharacters(in: .whitespaces)
@@ -1586,11 +1636,6 @@ final class VaultDirectory: ObservableObject {
             )
             _ = peopleStore.upsert(contact: contact)
         }
-
-        exportContactsMarkdown()
-        let section = company ?? Self.otherSection
-        AppLog.log("Upserted contact \(name) under \(section)", category: "vault")
-        refreshAfterMutation()
     }
 
     /// Rename a contact in place, preserving all fields (aliases, company, side, title, linkedin).

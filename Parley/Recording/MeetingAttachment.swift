@@ -3,8 +3,8 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// One image attachment associated with a meeting (screenshot, whiteboard photo, etc.).
-struct MeetingAttachment: Codable, Equatable, Identifiable {
-    enum Source: String, Codable { case paste, file, screenshot }
+struct MeetingAttachment: Codable, Equatable, Identifiable, Sendable {
+    enum Source: String, Codable, Sendable { case paste, file, screenshot }
 
     let id: UUID
     var filename: String

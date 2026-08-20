@@ -153,6 +153,9 @@ final class CallDetector: ObservableObject {
     }
 
     static func displayName(_ bundleID: String) -> String {
+        if let fromRegistry = MeetingSourceRegistry.displayName(for: bundleID) {
+            return fromRegistry
+        }
         let map: [String: String] = [
             "com.microsoft.teams2": "Microsoft Teams", "com.microsoft.teams": "Microsoft Teams",
             "us.zoom.xos": "Zoom", "com.google.chrome": "Chrome", "com.apple.safari": "Safari",

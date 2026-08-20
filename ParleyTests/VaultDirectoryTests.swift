@@ -42,6 +42,49 @@ final class VaultDirectoryTests: XCTestCase {
     /// call body(vault), then restore original settings.
     @MainActor
     private func withTempVault(rolodex text: String, body: @MainActor (VaultDirectory, URL) throws -> Void) throws {
+        try withTempVaultSession(rolodex: text, body: body)
+    }
+
+    @MainActor
+    private func withTempVaultAsync(rolodex text: String,
+                                    body: @MainActor (VaultDirectory, URL) async throws -> Void) async throws {
+        try await withTempVaultSession(rolodex: text) { vault, url in
+            try await body(vault, url)
+        }
+    }
+
+    @MainActor
+    private func withTempVaultSession(rolodex text: String,
+                                      body: @MainActor (VaultDirectory, URL) async throws -> Void) async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VDTest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // Save originals and redirect
+        let origVaultPath = AppSettings.shared.vaultPath
+        let origContactsFileName = AppSettings.shared.contactsFileName
+        AppSettings.shared.vaultPath = tmpDir.path
+        AppSettings.shared.contactsFileName = "Rolodex.md"
+        defer {
+            AppSettings.shared.vaultPath = origVaultPath
+            AppSettings.shared.contactsFileName = origContactsFileName
+        }
+
+        // Write the fixture
+        let rolodexURL = tmpDir.appendingPathComponent("Rolodex.md")
+        try text.write(to: rolodexURL, atomically: true, encoding: .utf8)
+
+        let db = KnowledgeDatabase.openTemporary()
+        let store = PeopleStore(database: db)
+        let vault = VaultDirectory(peopleStore: store)
+        vault.refresh(waitForCompletion: true)
+        try await body(vault, rolodexURL)
+    }
+
+    @MainActor
+    private func withTempVaultSession(rolodex text: String,
+                                      body: @MainActor (VaultDirectory, URL) throws -> Void) throws {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("VDTest-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -447,6 +490,50 @@ final class VaultDirectoryTests: XCTestCase {
             let countAfter = VaultDirectory.parseContacts(try String(contentsOf: rolodexURL, encoding: .utf8)).count
             XCTAssertEqual(countBefore, countAfter,
                            "addPeople must not duplicate names already in the rolodex")
+        }
+    }
+
+    @MainActor
+    func testUpsertPeopleWritesBothContacts() throws {
+        try withTempVault(rolodex: "") { vault, rolodexURL in
+            vault.upsertPeople([
+                (name: "Ada Hall", title: "PM", company: "Acme", linkedin: ""),
+                (name: "Ben Hall", title: "Eng", company: "Acme", linkedin: ""),
+            ])
+            let contacts = VaultDirectory.parseContacts(try String(contentsOf: rolodexURL, encoding: .utf8))
+            XCTAssertNotNil(contacts.first { $0.name == "Ada Hall" })
+            XCTAssertNotNil(contacts.first { $0.name == "Ben Hall" })
+            XCTAssertEqual(contacts.first { $0.name == "Ada Hall" }?.company, "Acme")
+        }
+    }
+
+    @MainActor
+    func testAddPeopleInBackgroundAddsNamesUnderOther() async throws {
+        try await withTempVaultAsync(rolodex: "## Intellias\n- **Alice** - Engineer\n") { vault, rolodexURL in
+            vault.addPeopleInBackground(["Zed Background"])
+            let deadline = Date().addingTimeInterval(3)
+            while Date() < deadline {
+                if (try? String(contentsOf: rolodexURL, encoding: .utf8))?
+                    .contains("Zed Background") == true {
+                    return
+                }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            XCTFail("addPeopleInBackground did not write Zed Background within 3s")
+        }
+    }
+
+    @MainActor
+    func testAddPeopleInBackgroundDoesNotClobberExistingRichContact() async throws {
+        try await withTempVaultAsync(rolodex: "") { vault, rolodexURL in
+            vault.upsertPerson(name: "Ada Hall", title: "PM", company: "Acme",
+                               linkedin: "https://linkedin.com/in/ada")
+            vault.addPeopleInBackground(["Ada Hall"])
+            try await Task.sleep(nanoseconds: 400_000_000)
+            let ada = VaultDirectory.parseContacts(try String(contentsOf: rolodexURL, encoding: .utf8))
+                .first { $0.name == "Ada Hall" }
+            XCTAssertEqual(ada?.company, "Acme")
+            XCTAssertEqual(ada?.linkedin, "https://linkedin.com/in/ada")
         }
     }
 

@@ -1,10 +1,21 @@
 import Foundation
 
-/// A person discovered in a meeting roster (name + optional role), before the
-/// resolver stamps it with a first-seen time.
+/// Legacy flat roster row. Prefer `MeetingParsers.teamsRoster` / `zoomRosterSnapshot`,
+/// which carry presence. Kept so older tests and call sites compile during the cutover.
 struct RosterEntry: Equatable {
     let name: String
     let role: String?   // "Organizer" / "Host" / …
+}
+
+struct ParsedPerson: Equatable {
+    let name: DisplayName
+    let role: MeetingRole?
+    let inviteResponse: InviteResponse?
+}
+
+struct ParsedTeamsRoster: Equatable {
+    let inMeeting: [ParsedPerson]
+    let othersInvited: [ParsedPerson]
 }
 
 /// Pure parsing of conferencing-app AX trees into meeting metadata — no AX
@@ -70,55 +81,76 @@ enum MeetingParsers {
 
     // MARK: Teams roster (People pane open)
 
-    /// Rows under `AXOutline desc="Attendees"`. The clean display name is each
-    /// row's first non-empty `AXStaticText` value; the row title carries the name
-    /// glued to status badges ("Oleksii Brodnikov, Unmuted") with the role, if any,
-    /// as a later badge or a sibling static text ("Organizer"). Section-header rows
-    /// ("In this meeting, 3 total", "Others invited, 2 total") carry an "N total"
-    /// count and are skipped.
-    ///
-    /// New Teams (2026) dropped the old "Has context menu" delimiter that used to
-    /// mark the name boundary, so we read the name from the static text instead and
-    /// fall back to the leading title segment. Tolerant of the old format too.
-    static func teamsAttendees(_ nodes: [AXNode]) -> [RosterEntry] {
+    /// Rows under `AXOutline desc="Attendees"`, split by section. `nil` when the
+    /// outline is absent (People pane closed) — that is *not* an empty meeting.
+    static func teamsRoster(_ nodes: [AXNode]) -> ParsedTeamsRoster? {
         let roles: Set<String> = ["Organizer", "Co-organizer", "Presenter", "Attendee", "Guest", "External", "Host"]
+        guard nodes.contains(where: { $0.role == "AXOutline" && $0.desc == "Attendees" }) else {
+            return nil
+        }
         let slice = subtree(of: nodes, anchor: { $0.role == "AXOutline" && $0.desc == "Attendees" })
-        var entries: [RosterEntry] = []
+        var inMeeting: [ParsedPerson] = []
+        var invited: [ParsedPerson] = []
         var seen = Set<String>()
+        var sectionIsInvited = false
         var i = slice.startIndex
         while i < slice.endIndex {
             let row = nodes[i]
             guard row.role == "AXRow" else { i += 1; continue }
             let rowDepth = row.depth
             let title = row.title ?? row.desc ?? ""
-            // Section header ("In this meeting, 3 total" / "Others invited, 2 total").
-            if title.range(of: #"\d+\s+total"#, options: .regularExpression) != nil { i += 1; continue }
+            if title.range(of: #"\d+\s+total"#, options: .regularExpression) != nil {
+                let lower = title.lowercased()
+                if lower.contains("others invited") {
+                    sectionIsInvited = true
+                } else if lower.contains("in this meeting") {
+                    sectionIsInvited = false
+                }
+                i += 1
+                continue
+            }
 
-            // The row's own subtree: depth strictly greater, up to the next sibling.
             var j = i + 1
             var name: String?
-            var role: String?
+            var roleRaw: String?
+            var responseRaw: String?
             while j < slice.endIndex, nodes[j].depth > rowDepth {
                 let d = nodes[j]
                 if d.role == "AXStaticText", let v = d.value, !v.isEmpty {
                     if name == nil { name = v }
-                    else if role == nil, roles.contains(v) { role = v }
+                    else if roleRaw == nil, roles.contains(v) { roleRaw = v }
+                    else if responseRaw == nil, InviteResponse.parse(v) != nil { responseRaw = v }
                 }
                 j += 1
             }
-            // Fallbacks from the title when a row carries no usable static text
-            // (older trees, or the legacy "Name, Has context menu, …" format).
             let parts = title.components(separatedBy: ", ").filter { $0 != "Has context menu" }
             if name == nil { name = parts.first }
-            if role == nil { role = parts.dropFirst().first(where: roles.contains) }
-
-            if let nm = name.map({ normalizeDisplayName(stripStatusBadges($0)) }),
-               !nm.isEmpty, seen.insert(nm.lowercased()).inserted {
-                entries.append(RosterEntry(name: nm, role: role))
+            if roleRaw == nil { roleRaw = parts.dropFirst().first(where: roles.contains) }
+            if responseRaw == nil {
+                responseRaw = parts.dropFirst().first { InviteResponse.parse($0) != nil }
             }
-            i = j   // skip past this row's subtree
+
+            if let raw = name, let display = DisplayName(raw: raw),
+               seen.insert(display.key).inserted {
+                let person = ParsedPerson(
+                    name: display,
+                    role: MeetingRole.parse(roleRaw),
+                    inviteResponse: InviteResponse.parse(responseRaw ?? ""))
+                if sectionIsInvited {
+                    invited.append(person)
+                } else {
+                    inMeeting.append(person)
+                }
+            }
+            i = j
         }
-        return entries
+        return ParsedTeamsRoster(inMeeting: inMeeting, othersInvited: invited)
+    }
+
+    /// Present-only names from the in-meeting section. Invite rows are excluded.
+    static func teamsAttendees(_ nodes: [AXNode]) -> [RosterEntry] {
+        guard let roster = teamsRoster(nodes) else { return [] }
+        return roster.inMeeting.map { RosterEntry(name: $0.name.value, role: $0.role?.display) }
     }
 
     // MARK: Zoom roster
@@ -129,28 +161,74 @@ enum MeetingParsers {
     /// - Participants panel: statics under `AXOutline desc="Participants list"`,
     ///   `"Naufal Mir (Host, me)"`.
     static func zoomAttendees(_ nodes: [AXNode]) -> [RosterEntry] {
-        var entries: [RosterEntry] = []
+        snapshotPeople(zoomRosterParts(nodes).people).map {
+            RosterEntry(name: $0.name.value, role: $0.role?.display)
+        }
+    }
 
+    /// Panel present → complete in-call list. Tiles only → sightings. Neither → nil (unreadable).
+    static func zoomRosterSnapshot(_ nodes: [AXNode], at date: Date, isFirstSighting: Bool) -> RosterSnapshot? {
+        let parts = zoomRosterParts(nodes)
+        if parts.hasPanel {
+            return RosterSnapshot(
+                observedAt: date, coverage: .complete, isFirstSighting: isFirstSighting,
+                participants: snapshotPeople(parts.people).map {
+                    Participant(name: $0.name, presence: .inCall(.listedInCall), role: $0.role)
+                })
+        }
+        if !parts.tilePeople.isEmpty {
+            return RosterSnapshot(
+                observedAt: date, coverage: .sightings, isFirstSighting: isFirstSighting,
+                participants: snapshotPeople(parts.tilePeople).map {
+                    Participant(name: $0.name, presence: .inCall(.participantTile), role: $0.role)
+                })
+        }
+        return nil
+    }
+
+    private struct ZoomRosterParts {
+        var hasPanel = false
+        var tilePeople: [ParsedPerson] = []
+        var people: [ParsedPerson] = []
+    }
+
+    private static func zoomRosterParts(_ nodes: [AXNode]) -> ZoomRosterParts {
+        var parts = ZoomRosterParts()
+
+        func add(_ raw: String, role: MeetingRole?, into bucket: inout [ParsedPerson], seen: inout Set<String>) {
+            guard let name = DisplayName(raw: raw), seen.insert(name.key).inserted else { return }
+            bucket.append(ParsedPerson(name: name, role: role, inviteResponse: nil))
+        }
+
+        var tileSeen = Set<String>()
         for node in nodes where node.role == "AXTabGroup" {
             guard let desc = node.desc,
                   let range = desc.range(of: ", Computer audio") else { continue }
-            entries.append(RosterEntry(name: String(desc[..<range.lowerBound]), role: nil))
+            add(String(desc[..<range.lowerBound]), role: nil, into: &parts.tilePeople, seen: &tileSeen)
         }
 
-        for node in subtree(of: nodes, anchor: { $0.role == "AXOutline" && $0.desc == "Participants list" })
-        where node.role == "AXStaticText" {
+        let panel = subtree(of: nodes, anchor: { $0.role == "AXOutline" && $0.desc == "Participants list" })
+        parts.hasPanel = nodes.contains { $0.role == "AXOutline" && $0.desc == "Participants list" }
+        var panelSeen = Set<String>()
+        for node in panel where node.role == "AXStaticText" {
             guard let value = node.value else { continue }
             if let parenIdx = value.range(of: " (", options: .backwards), value.hasSuffix(")") {
                 let name = String(value[..<parenIdx.lowerBound])
                 let inParens = value[parenIdx.upperBound...].dropLast()
                 let role = inParens.components(separatedBy: ", ")
                     .first { $0 == "Host" || $0 == "Co-host" }
-                entries.append(RosterEntry(name: name, role: role))
+                add(name, role: MeetingRole.parse(role), into: &parts.people, seen: &panelSeen)
             } else {
-                entries.append(RosterEntry(name: value, role: nil))
+                add(value, role: nil, into: &parts.people, seen: &panelSeen)
             }
         }
-        return entries
+        if parts.people.isEmpty { parts.people = parts.tilePeople }
+        return parts
+    }
+
+    private static func snapshotPeople(_ people: [ParsedPerson]) -> [ParsedPerson] {
+        var seen = Set<String>()
+        return people.filter { seen.insert($0.name.key).inserted }
     }
 
     // MARK: Calendar lookups

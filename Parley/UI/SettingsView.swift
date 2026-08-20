@@ -373,7 +373,7 @@ struct SettingsView: View {
                         .disabled(!settings.callDetectionEnabled)
                 }
                 SettingRow("Suggest meeting title & attendees",
-                           description: "Reads the meeting window via Accessibility to discover the title and who joined; suggestions appear next to the recording's metadata fields.") {
+                           description: "Reads the meeting window via Accessibility. In-call people are added automatically; invite-list names are not. Rooms and devices stay as chips.") {
                     Toggle("", isOn: $settings.metadataDiscoveryEnabled).labelsHidden()
                         .disabled(!settings.callDetectionEnabled)
                 }

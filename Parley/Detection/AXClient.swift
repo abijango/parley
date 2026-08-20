@@ -51,6 +51,12 @@ enum AXClient {
         attribute(element, kAXTitleAttribute) as? String
     }
 
+    /// Bound a wedged conferencing app so it cannot pin `parley.meeting-ax` forever.
+    static func setMessagingTimeout(pid: pid_t, seconds: Float = 2.0) {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, seconds)
+    }
+
     /// Bounded depth-first flatten of an element's subtree. Caps make a worst-
     /// case Electron walk (whole-calendar DOM) finite; parse failures upstream
     /// degrade gracefully, so truncation is acceptable.
