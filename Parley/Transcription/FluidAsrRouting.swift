@@ -79,6 +79,87 @@ enum FluidAsrRouting {
     }
 }
 
+/// Vocabulary boosting is independent of ASR profile. Unified skipped it on 0.15.5
+/// because the library had no API; 0.15.6 does.
+enum FluidVocabularyPolicy {
+    static func shouldLoad(enabled: Bool, terms: [CustomVocabularyTerm]) -> Bool {
+        enabled && !terms.isEmpty
+    }
+}
+
+/// Maps a batch transcript plus raw RNNT emissions onto words `applyOfflineUnits` can use.
+///
+/// FluidAudio 0.15.6 may rescore display text while leaving emission timings on the
+/// original pieces. Native timings win when the two still spell the same words.
+/// Same word count after a rescore keeps emission spans and takes the new strings.
+/// Otherwise words are spread across the emission envelope, not the whole clip.
+enum FluidOfflineTimings {
+    struct Word: Equatable, Sendable {
+        let text: String
+        let start: TimeInterval
+        let end: TimeInterval
+    }
+
+    enum Resolved: Equatable, Sendable {
+        case native([Word])
+        case spread(text: String, start: TimeInterval, end: TimeInterval)
+    }
+
+    static func resolve(
+        transcript: String,
+        timings: [TokenTiming],
+        clipDuration: TimeInterval
+    ) -> Resolved {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if timings.isEmpty {
+            return .spread(text: trimmed, start: 0, end: clipDuration)
+        }
+        if reconstruct(timings.map(\.token)) == trimmed {
+            return .native(timings.map {
+                Word(text: $0.token, start: $0.startTime, end: $0.endTime)
+            })
+        }
+        let groups = buildWordTimings(from: timings)
+        let display = trimmed.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
+        if display.count == groups.count, !groups.isEmpty {
+            return .native(zip(display, groups).map { word, timed in
+                Word(text: "\u{2581}" + word, start: timed.startTime, end: timed.endTime)
+            })
+        }
+        let start = groups.first?.startTime ?? timings[0].startTime
+        let end = groups.last?.endTime ?? timings[timings.count - 1].endTime
+        return .spread(text: trimmed, start: start, end: end)
+    }
+
+    static func words(from resolved: Resolved) -> [Word] {
+        switch resolved {
+        case .native(let words):
+            return words
+        case .spread(let text, let start, let end):
+            return evenSpread(text: text, start: start, end: end)
+        }
+    }
+
+    nonisolated private static func reconstruct(_ tokens: [String]) -> String {
+        tokens.joined()
+            .replacingOccurrences(of: "\u{2581}", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func evenSpread(
+        text: String, start: TimeInterval, end: TimeInterval
+    ) -> [Word] {
+        let parts = text.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
+        guard !parts.isEmpty else { return [] }
+        let step = max(0, end - start) / Double(parts.count)
+        return parts.enumerated().map { i, w in
+            let s = start + step * Double(i)
+            let e = i == parts.count - 1 ? end : start + step * Double(i + 1)
+            return Word(text: "\u{2581}" + w, start: s, end: e)
+        }
+    }
+}
+
 /// Builds a `CustomVocabularyContext` from meeting metadata for offline rescoring.
 enum FluidVocabularyBuilder {
     /// Attendee names + title tokens (when boosting is enabled and terms exist).

@@ -63,6 +63,27 @@ do {
     exit(2)
 }
 
+// ───────────────────────────── ASR (Parakeet Unified offline) ─────────────────────────────
+line("\n[1c/3] ASR — Parakeet Unified 0.6B offline (transcribeWithTimings)")
+do {
+    let offline = UnifiedAsrManager()
+    try await offline.loadModels()
+    let result = try await offline.transcribeWithTimings(samples)
+    line("  text: \"\(result.text.prefix(120))\"")
+    if result.tokenTimings.isEmpty {
+        line("  token timings: NONE returned")
+    } else {
+        line(String(format: "  token timings: %d; range %.2f–%.2fs",
+                    result.tokenTimings.count,
+                    result.tokenTimings.first!.startTime,
+                    result.tokenTimings.last!.endTime))
+    }
+    await offline.cleanup()
+} catch {
+    FileHandle.standardError.write(Data("  Unified offline FAILED: \(error)\n".utf8))
+    exit(2)
+}
+
 // ───────────────────────────── ASR (Parakeet TDT v3) ─────────────────────────────
 line("\n[1/2] ASR — Parakeet TDT 0.6b v3 (multilingual)")
 do {
