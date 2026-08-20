@@ -130,12 +130,17 @@ echo "==> Regenerating $PROJECT from project.yml"
 xcodegen generate
 
 echo "==> Building $SCHEME (Release), signed as \"$CERT_CN\""
+# FluidAudio 0.15.6 uses Float16 in Paraformer/TTS. That type is unavailable on
+# macOS x86_64, so a universal Release compile dies before install. Pin arm64.
 xcodebuild build \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
   -configuration Release \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED" \
+  ARCHS=arm64 \
+  ONLY_ACTIVE_ARCH=YES \
+  EXCLUDED_ARCHS=x86_64 \
   CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY="$CERT_CN" \
   DEVELOPMENT_TEAM="" \
