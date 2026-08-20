@@ -903,7 +903,6 @@ final class FluidAudioEngine: TranscriptionEngine {
         }
     }
 
-    /// Parakeet Unified offline batch (15 s windows) with native emission timings.
     nonisolated private static func offlineTranscribeUnified(
         samples: [Float],
         vocabulary: CustomVocabularyContext?,

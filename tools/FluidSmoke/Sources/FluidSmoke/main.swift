@@ -63,7 +63,6 @@ do {
     exit(2)
 }
 
-// ───────────────────────────── ASR (Parakeet Unified offline) ─────────────────────────────
 line("\n[1c/3] ASR — Parakeet Unified 0.6B offline (transcribeWithTimings)")
 do {
     let offline = UnifiedAsrManager()

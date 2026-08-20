@@ -79,20 +79,13 @@ enum FluidAsrRouting {
     }
 }
 
-/// Vocabulary boosting is independent of ASR profile. Unified skipped it on 0.15.5
-/// because the library had no API; 0.15.6 does.
 enum FluidVocabularyPolicy {
     static func shouldLoad(enabled: Bool, terms: [CustomVocabularyTerm]) -> Bool {
         enabled && !terms.isEmpty
     }
 }
 
-/// Maps a batch transcript plus raw RNNT emissions onto words `applyOfflineUnits` can use.
-///
-/// FluidAudio 0.15.6 may rescore display text while leaving emission timings on the
-/// original pieces. Native timings win when the two still spell the same words.
-/// Same word count after a rescore keeps emission spans and takes the new strings.
-/// Otherwise words are spread across the emission envelope, not the whole clip.
+/// FluidAudio may rescore display text while leaving emission timings on the original pieces.
 enum FluidOfflineTimings {
     struct Word: Equatable, Sendable {
         let text: String
@@ -114,21 +107,14 @@ enum FluidOfflineTimings {
         if timings.isEmpty {
             return .spread(text: trimmed, start: 0, end: clipDuration)
         }
-        if reconstruct(timings.map(\.token)) == trimmed {
-            return .native(timings.map {
-                Word(text: $0.token, start: $0.startTime, end: $0.endTime)
-            })
+        if let words = matchingEmissions(transcript: trimmed, timings: timings) {
+            return .native(words)
         }
         let groups = buildWordTimings(from: timings)
-        let display = trimmed.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
-        if display.count == groups.count, !groups.isEmpty {
-            return .native(zip(display, groups).map { word, timed in
-                Word(text: "\u{2581}" + word, start: timed.startTime, end: timed.endTime)
-            })
+        if let words = zipRescored(transcript: trimmed, groups: groups) {
+            return .native(words)
         }
-        let start = groups.first?.startTime ?? timings[0].startTime
-        let end = groups.last?.endTime ?? timings[timings.count - 1].endTime
-        return .spread(text: trimmed, start: start, end: end)
+        return envelopeSpread(transcript: trimmed, timings: timings, groups: groups)
     }
 
     static func words(from resolved: Resolved) -> [Word] {
@@ -138,6 +124,31 @@ enum FluidOfflineTimings {
         case .spread(let text, let start, let end):
             return evenSpread(text: text, start: start, end: end)
         }
+    }
+
+    nonisolated private static func matchingEmissions(
+        transcript: String, timings: [TokenTiming]
+    ) -> [Word]? {
+        guard reconstruct(timings.map(\.token)) == transcript else { return nil }
+        return timings.map { Word(text: $0.token, start: $0.startTime, end: $0.endTime) }
+    }
+
+    nonisolated private static func zipRescored(
+        transcript: String, groups: [WordTiming]
+    ) -> [Word]? {
+        let display = transcript.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
+        guard display.count == groups.count, !groups.isEmpty else { return nil }
+        return zip(display, groups).map { word, timed in
+            Word(text: "\u{2581}" + word, start: timed.startTime, end: timed.endTime)
+        }
+    }
+
+    nonisolated private static func envelopeSpread(
+        transcript: String, timings: [TokenTiming], groups: [WordTiming]
+    ) -> Resolved {
+        let start = groups.first?.startTime ?? timings[0].startTime
+        let end = groups.last?.endTime ?? timings[timings.count - 1].endTime
+        return .spread(text: transcript, start: start, end: end)
     }
 
     nonisolated private static func reconstruct(_ tokens: [String]) -> String {
