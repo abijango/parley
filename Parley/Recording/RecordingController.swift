@@ -485,7 +485,7 @@ final class RecordingController: ObservableObject {
         guard !didWarmup else { return }
         didWarmup = true
         if AppInfo.isXCTestHost {
-            ModelManager.noteGracefulShutdown()
+            ModelManager.markCompiledLoadFinished()
             return
         }
         let engineDesc: String = switch settings.transcriptionEngine {

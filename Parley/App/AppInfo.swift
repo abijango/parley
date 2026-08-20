@@ -10,6 +10,7 @@ enum AppInfo {
     /// Folder name used under ~/Library/Application Support for models, logs, etc.
     static var supportDirectoryName: String { name }
 
-    /// True when this process is an XCTest TEST_HOST of Parley.app.
-    static var isXCTestHost: Bool { NSClassFromString("XCTestCase") != nil }
+    static var isXCTestHost: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
 }
