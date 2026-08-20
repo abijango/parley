@@ -403,6 +403,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                 if let warmed = await self.modelManager?.takePrepared(matching: prepareKey) {
                     switch warmed {
                     case .unified(let unified):
+                        await self.attachUnifiedPartialCallback(unified, startElapsed: startElapsed)
                         self.unifiedAsr = unified
                         self.usesUnifiedRoute = true
                         AppLog.log("FluidAudio engine ready — Parakeet Unified streaming (preloaded)", category: "record")
@@ -419,6 +420,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                     let config = variant.unifiedConfig ?? UnifiedConfig()
                     let unified = StreamingUnifiedAsrManager(config: config)
                     try await unified.loadModels()
+                    await self.attachUnifiedPartialCallback(unified, startElapsed: startElapsed)
                     self.unifiedAsr = unified
                     AppLog.log("FluidAudio engine ready — Parakeet Unified streaming (\(config.latencyMs)ms)", category: "record")
                 } else {
@@ -474,18 +476,27 @@ final class FluidAudioEngine: TranscriptionEngine {
         let nemotron = nemotronAsr
         let unified = unifiedAsr
         let diarRing = self.diarRing
-        mixerTask = Task.detached { [weak self] in
+        mixerTask = Task.detached {
             var fedSamples = 0
             var lastLogged = 0
+            var windowPeak: Float = 0
+            var lastErrorLog = Date.distantPast
+            var tokensSinceLog = 0
             while !Task.isCancelled {
                 if let mixed = Self.mix(mic: micRing, system: systemRing), !mixed.isEmpty {
+                    for v in mixed { windowPeak = max(windowPeak, abs(v)) }
                     if useUnified, let unified {
                         if let buf = Self.makePCMBuffer(mixed) {
-                            try? await unified.appendAudio(buf)
-                            try? await unified.processBufferedAudio()
-                            let timings = await unified.consumeTokenTimings()
-                            if !timings.isEmpty {
-                                await self?.applyStreamingTokenTimings(timings)
+                            do {
+                                try await unified.appendAudio(buf)
+                                try await unified.processBufferedAudio()
+                                tokensSinceLog += await unified.consumeTokenTimings().count
+                            } catch {
+                                let now = Date()
+                                if now.timeIntervalSince(lastErrorLog) >= 5 {
+                                    lastErrorLog = now
+                                    AppLog.log("FluidAudio Unified mixer: \(error.localizedDescription)", category: "record")
+                                }
                             }
                         }
                     } else if let nemotron {
@@ -495,7 +506,11 @@ final class FluidAudioEngine: TranscriptionEngine {
                     fedSamples += mixed.count
                     if fedSamples - lastLogged >= 16_000 * 5 {
                         lastLogged = fedSamples
-                        AppLog.log("FluidAudio fed ~\(fedSamples / 16_000)s of audio to ASR", category: "record")
+                        AppLog.log(
+                            "FluidAudio fed ~\(fedSamples / 16_000)s of audio to ASR peak=\(String(format: "%.4f", windowPeak)) tokens=+\(tokensSinceLog) micRing=\(micRing.availableToRead) sysRing=\(systemRing.availableToRead)",
+                            category: "record")
+                        windowPeak = 0
+                        tokensSinceLog = 0
                     }
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
@@ -1075,31 +1090,12 @@ final class FluidAudioEngine: TranscriptionEngine {
         return pcm
     }
 
-    /// Ingest native per-token timings from Parakeet Unified streaming — replaces
-    /// the wall-clock `wordToks` approximation with real RNNT frame positions.
-    private func applyStreamingTokenTimings(_ timings: [TokenTiming]) {
-        guard !timings.isEmpty else { return }
-        var newUnits: [ASRUnit] = []
-        var cur: [Tok] = []
-        var lastEnd: TimeInterval?
-        func flush() {
-            defer { cur = [] }
-            guard !cur.isEmpty else { return }
-            let text = Self.reconstruct(cur.map(\.text))
-            guard !text.isEmpty else { return }
-            newUnits.append(ASRUnit(id: UUID(), tokens: cur, text: text, confirmed: true))
+    private func attachUnifiedPartialCallback(
+        _ unified: StreamingUnifiedAsrManager, startElapsed: TimeInterval
+    ) async {
+        await unified.setPartialTranscriptCallback { [weak self] text in
+            Task { @MainActor in self?.applyPartial(text, startElapsed: startElapsed) }
         }
-        for t in timings {
-            if let le = lastEnd, t.startTime - le > 0.8 { flush() }
-            cur.append(Tok(text: t.token, start: t.startTime, end: t.endTime))
-            lastEnd = t.endTime
-        }
-        flush()
-        guard !newUnits.isEmpty else { return }
-        confirmedUnits.append(contentsOf: newUnits)
-        volatileUnit = nil
-        invalidateDerivedCache()
-        publish(immediate: true)
     }
 
     /// Build a 16 kHz mono PCM buffer from float samples for unified streaming ASR.

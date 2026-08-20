@@ -30,6 +30,16 @@ do {
 }
 line("Decoded \(samples.count) samples (~\(String(format: "%.1f", Double(samples.count) / 16000.0))s @16kHz mono)")
 
+if CommandLine.arguments.contains("--incremental") {
+    do {
+        try await runIncrementalUnifiedProbe(samples: samples)
+    } catch {
+        FileHandle.standardError.write(Data("ERROR: incremental probe failed: \(error)\n".utf8))
+        exit(2)
+    }
+    exit(0)
+}
+
 // Captured across sections for the diarization-first attribution validation below.
 var asrTokens: [(text: String, start: Double, end: Double)] = []
 var diarSegs: [(spk: String, start: Double, end: Double)] = []
@@ -327,3 +337,54 @@ if !asrTokens.isEmpty && !diarSegs.isEmpty {
 }
 
 line("\n✅ Smoke test complete — both ASR and diarization produced output.")
+
+/// Feed 1s chunks like Parley's mixer and print tokens/partial after each tick.
+func runIncrementalUnifiedProbe(samples: [Float]) async throws {
+    let config = (StreamingModelVariant.parakeetUnified2080ms.unifiedConfig) ?? UnifiedConfig()
+    let streaming = StreamingUnifiedAsrManager(config: config)
+    try await streaming.loadModels()
+    guard let fmt = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)
+    else { return }
+    let chunk = 16_000
+    var offset = 0
+    var tick = 0
+    var totalTokens = 0
+    while offset < samples.count {
+        let n = min(chunk, samples.count - offset)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(n)) else { break }
+        buf.frameLength = AVAudioFrameCount(n)
+        samples[offset..<(offset + n)].withUnsafeBufferPointer { src in
+            if let base = src.baseAddress {
+                buf.floatChannelData![0].update(from: base, count: n)
+            }
+        }
+        do {
+            try await streaming.appendAudio(buf)
+            try await streaming.processBufferedAudio()
+        } catch {
+            line(String(format: "  t=%5.2fs process FAILED: %@", Double(offset) / 16000.0, error.localizedDescription))
+            offset += n
+            tick += 1
+            continue
+        }
+        let timings = await streaming.consumeTokenTimings()
+        let partial = await streaming.getPartialTranscript()
+        totalTokens += timings.count
+        if tick < 12 || timings.count > 0 || tick % 5 == 0 {
+            let piece = timings.prefix(6).map(\.token).joined()
+            line(String(
+                format: "  t=%5.2fs tokens=+%d (total %d) partial=%d chars  %@",
+                Double(offset + n) / 16000.0,
+                timings.count,
+                totalTokens,
+                partial.count,
+                piece.replacingOccurrences(of: "\u{2581}", with: "·")))
+        }
+        offset += n
+        tick += 1
+    }
+    let finished = try await streaming.finish()
+    line("  finish: \(finished.count) chars, \(finished.prefix(80))…")
+    await streaming.cleanup()
+}
