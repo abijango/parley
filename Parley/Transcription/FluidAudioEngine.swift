@@ -912,7 +912,14 @@ final class FluidAudioEngine: TranscriptionEngine {
             let mgr = UnifiedAsrManager()
             try await mgr.loadModels()
             if let vocabulary, let ctcModels {
-                try await mgr.configureVocabularyBoosting(vocabulary: vocabulary, ctcModels: ctcModels)
+                do {
+                    try await mgr.configureVocabularyBoosting(
+                        vocabulary: vocabulary, ctcModels: ctcModels)
+                } catch {
+                    AppLog.log(
+                        "FluidAudio offline vocabulary: \(error.localizedDescription)",
+                        category: "record")
+                }
             }
             let result = try await mgr.transcribeWithTimings(samples)
             await mgr.cleanup()
