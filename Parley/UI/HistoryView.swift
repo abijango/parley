@@ -830,13 +830,13 @@ struct HistoryView: View {
                     Button { detectSpeakers(item) } label: {
                         Label("Detect speakers", systemImage: "person.2.wave.2")
                     }
-                    .glassProminentButton().disabled(busy || isProcessingOffline(item))
+                    .glassProminentButton().disabled(isProcessingOffline(item))
                     .help("Diarize this recording and assign names")
                 } else {
                     Button { detectSpeakers(item) } label: {
                         Label("Detect speakers", systemImage: "person.2.wave.2")
                     }
-                    .glassButton().disabled(busy || isProcessingOffline(item))
+                    .glassButton().disabled(isProcessingOffline(item))
                     .help("Re-run diarization + speaker ID on this recording's audio")
                 }
             }
