@@ -331,7 +331,6 @@ struct RecordDetailView: View {
                 // every level multiplies the sizing work — see
                 // docs/LAYOUT_EXPLOSION_AUDIT.md.
                 LiveTranscriptView(
-                    segments: live.segments,
                     isRecording: recording.isRecording,
                     people: vault.people,
                     attendees: TranscriptWriter.splitAttendees(meeting.attendees),
@@ -342,7 +341,6 @@ struct RecordDetailView: View {
                         && !settings.liveTranscriptEnabled,
                     hidesEmptyState: isPreRecordIdle
                 )
-                .equatable()
                 .overlay {
                     // Scoped to the message that actually animates. Previously this
                     // animation sat on the whole live VStack, so flipping isPreRecordIdle
@@ -542,12 +540,7 @@ struct RecordDetailView: View {
                          symbol: "speaker.slash.fill",
                          actionLabel: "Open Settings", action: PermissionManager.openPrivacySettings)
         }
-        if live.micSeemsSilent {
-            StatusBanner(.danger,
-                         "Your mic has been silent while the call has audio — check the input device.",
-                         symbol: "mic.slash.fill",
-                         actionLabel: "Sound Settings", action: PermissionManager.openSoundSettings)
-        }
+        MicSilenceBanner()
         if let advisory = models.memoryAdvisory {
             StatusBanner(.warning, advisory, symbol: "memorychip")
         }
@@ -660,10 +653,7 @@ struct RecordDetailView: View {
     /// sustained-silence heuristic (`micSeemsSilent`) trips.
     @ViewBuilder private var levelMeters: some View {
         if recording.isRecording {
-            RecordLevelMeters(
-                micLevel: live.micLevel,
-                remoteLevel: live.remoteLevel,
-                micSeemsSilent: live.micSeemsSilent)
+            RecordLevelMeters()
         }
     }
 
@@ -774,7 +764,11 @@ struct RecordDetailView: View {
                         .buttonStyle(.chip)
                         .help("Remove every attendee. In-call people you remove stay excluded for this session.")
                 }
-                SuggestionChips(meeting: meeting, recording: recording)
+                SuggestionChips(
+                    meeting: meeting,
+                    onAccept: { recording.acceptSuggestion($0) },
+                    onDismiss: { recording.dismissSuggestion($0) },
+                    onAcceptAll: { recording.acceptAllSuggestions() })
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -958,19 +952,30 @@ struct RecordDetailView: View {
     }
 }
 
-/// Level meters isolated from `RecordingController` observation — parent passes
-/// scalar values so only meter ticks refresh this subtree.
+/// Level meters observe `RecordingMeterState` directly so 5 Hz ticks stay inside
+/// this subtree instead of rebuilding the record pane.
 private struct RecordLevelMeters: View {
-    let micLevel: Float
-    let remoteLevel: Float
-    let micSeemsSilent: Bool
+    @ObservedObject private var meters = RecordingController.shared.live.meters
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
-            InputLevelBar(label: "Mic", level: micLevel, warn: micSeemsSilent)
-            InputLevelBar(label: "Remote", level: remoteLevel)
+            InputLevelBar(label: "Mic", level: meters.micLevel, warn: meters.micSeemsSilent)
+            InputLevelBar(label: "Remote", level: meters.remoteLevel)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+private struct MicSilenceBanner: View {
+    @ObservedObject private var meters = RecordingController.shared.live.meters
+
+    var body: some View {
+        if meters.micSeemsSilent {
+            StatusBanner(.danger,
+                         "Your mic has been silent while the call has audio — check the input device.",
+                         symbol: "mic.slash.fill",
+                         actionLabel: "Sound Settings", action: PermissionManager.openSoundSettings)
+        }
     }
 }
 

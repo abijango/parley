@@ -109,15 +109,9 @@ final class FluidAudioEngine: TranscriptionEngine {
     private var mixerTask: Task<Void, Never>?
     private var diarTask: Task<Void, Never>?
     private var lastPublishTime = Date.distantPast
-    /// EXPERIMENT (2026-08-07), see docs/LAYOUT_EXPLOSION_AUDIT.md — was 0.2.
-    /// Every publish hands `LiveTranscriptView` a freshly-built array of *all* segments,
-    /// and the volatile tail's text changes each tick, which defeats the view's
-    /// `Equatable` short-circuit and re-lays out every realised row. At a 0.2s floor that
-    /// is up to 5 full re-layouts per second, growing with the transcript — the suspected
-    /// cause of the 3–4½ minute freeze. Raising the floor cuts the re-layout rate ~5×
-    /// without touching any view code: if the freeze onset moves out correspondingly, the
-    /// mechanism is confirmed and the structural fix (splitting the volatile tail into its
-    /// own view) is justified. Revert or tune once that lands.
+    /// Floor on how often a volatile tail publish may hop to the UI. Confirms still
+    /// pass `immediate: true`. The live table applies diffs in AppKit; this interval
+    /// exists to bound main-actor `finalTimeline()` work, not SwiftUI layout.
     private let publishMinInterval: TimeInterval = 1.0
     private var publishDeferredTask: Task<Void, Never>?
 

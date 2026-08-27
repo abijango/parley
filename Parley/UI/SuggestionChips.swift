@@ -4,7 +4,9 @@ import SwiftUI
 /// auto-added to attendees; invite-list names are not shown.
 struct SuggestionChips: View {
     @ObservedObject var meeting: MeetingSessionState
-    @ObservedObject var recording: RecordingController
+    var onAccept: (String) -> Void
+    var onDismiss: (String) -> Void
+    var onAcceptAll: () -> Void
 
     private var pending: [SuggestedAttendee] {
         meeting.suggestedAttendees.filter { !$0.accepted && !$0.dismissed }
@@ -19,7 +21,7 @@ struct SuggestionChips: View {
                 ForEach(pending) { suggestion in
                     HStack(spacing: Theme.Spacing.xSmall) {
                         Button {
-                            recording.acceptSuggestion(suggestion.name)
+                            onAccept(suggestion.name)
                         } label: {
                             HStack(spacing: Theme.Spacing.xSmall) {
                                 Image(systemName: "plus.circle.fill")
@@ -34,7 +36,7 @@ struct SuggestionChips: View {
                         .buttonStyle(.chip)
                         .help("Add to attendees")
                         Button {
-                            recording.dismissSuggestion(suggestion.name)
+                            onDismiss(suggestion.name)
                         } label: {
                             Image(systemName: "xmark")
                         }
@@ -44,7 +46,7 @@ struct SuggestionChips: View {
                     }
                 }
                 if pending.count > 1 {
-                    Button("Add all") { recording.acceptAllSuggestions() }
+                    Button("Add all") { onAcceptAll() }
                         .buttonStyle(.chip)
                 }
             }

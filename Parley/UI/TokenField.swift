@@ -15,16 +15,22 @@ struct TokenField: View {
     /// committed — the caller opens a "new contact" form instead of adding a bare token.
     var onCreateNew: (String) -> Void = { _ in }
 
+    /// Chips beyond this count collapse behind "and N more" so a large roster cannot
+    /// grow the inspector's layout cost without bound.
+    static let visibleChipLimit = 12
+
     @State private var draft = ""
     @State private var highlighted = 0
     @State private var fieldWidth: CGFloat = 0
+    @State private var showOverflow = false
     @FocusState private var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
             FlowLayout(maxWidth: fieldWidth,
                        spacing: Theme.Spacing.xSmall, rowSpacing: Theme.Spacing.xSmall) {
-                ForEach(tokens, id: \.self) { chip($0) }
+                ForEach(Self.visibleTokens(tokens), id: \.self) { chip($0) }
+                if Self.hiddenCount(tokens) > 0 { overflowChip }
                 inputField
             }
             .padding(Theme.Spacing.xSmall)
@@ -93,6 +99,28 @@ struct TokenField: View {
         .padding(.vertical, Theme.Spacing.xxSmall + 1)
         .background(Capsule().fill(Theme.Palette.accent.opacity(Theme.Opacity.tintFill)))
         .overlay(Capsule().strokeBorder(Theme.Palette.accent.opacity(0.25)))
+    }
+
+    private var overflowChip: some View {
+        Button("and \(Self.hiddenCount(tokens)) more") { showOverflow = true }
+            .font(Theme.Typography.caption.weight(.medium))
+            .foregroundStyle(Theme.Palette.accent)
+            .padding(.horizontal, Theme.Spacing.small)
+            .padding(.vertical, Theme.Spacing.xxSmall + 1)
+            .background(Capsule().fill(Theme.Palette.accent.opacity(Theme.Opacity.tintFill)))
+            .overlay(Capsule().strokeBorder(Theme.Palette.accent.opacity(0.25)))
+            .buttonStyle(.plain)
+            .popover(isPresented: $showOverflow) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+                        ForEach(Array(tokens.dropFirst(Self.visibleChipLimit)), id: \.self) { name in
+                            chip(name)
+                        }
+                    }
+                    .padding(Theme.Spacing.small)
+                }
+                .frame(width: 240, height: min(CGFloat(Self.hiddenCount(tokens)) * 32 + 16, 280))
+            }
     }
 
     private var suggestionList: some View {
@@ -170,6 +198,14 @@ struct TokenField: View {
         if tokens.contains(where: { $0.lowercased() == key }) { return .duplicate }
         if completions.contains(where: { $0.lowercased() == key }) { return .add }
         return .createNew
+    }
+
+    static func visibleTokens(_ tokens: [String], limit: Int = visibleChipLimit) -> [String] {
+        Array(tokens.prefix(limit))
+    }
+
+    static func hiddenCount(_ tokens: [String], limit: Int = visibleChipLimit) -> Int {
+        max(0, tokens.count - limit)
     }
 
     private func commit(_ rawName: String) {

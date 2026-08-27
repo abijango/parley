@@ -44,4 +44,15 @@ final class TokenFieldTests: XCTestCase {
             TokenField.classify("Nathan Bender", tokens: ["Nathan Bender"], completions: contacts),
             .duplicate)
     }
+
+    func testVisibleTokensCapsAtLimit() {
+        let names = (1...20).map { "Person \($0)" }
+        XCTAssertEqual(TokenField.visibleTokens(names).count, TokenField.visibleChipLimit)
+        XCTAssertEqual(TokenField.hiddenCount(names), 8)
+    }
+
+    func testVisibleTokensUnderLimitHidesNothing() {
+        XCTAssertEqual(TokenField.visibleTokens(["Ada", "Bob"]), ["Ada", "Bob"])
+        XCTAssertEqual(TokenField.hiddenCount(["Ada", "Bob"]), 0)
+    }
 }

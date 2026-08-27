@@ -85,4 +85,17 @@ final class MeetingRosterTests: XCTestCase {
             ]))
         XCTAssertEqual(roster.person(named: name("Late Joiner"))!.arrival, .joined(at: t1))
     }
+
+    func testTeamsSeeMoreIsNotAdmitted() {
+        var roster = MeetingRoster()
+        roster.apply(RosterSnapshot(
+            observedAt: Date(), coverage: .complete, isFirstSighting: true,
+            participants: [
+                Participant(name: name("Ada"), presence: .inCall(.listedInCall), role: nil),
+                Participant(name: name("See more"), presence: .inCall(.listedInCall), role: nil),
+            ]))
+        XCTAssertEqual(AttendeePolicy.admissions(in: roster).map(\.value), ["Ada"])
+        XCTAssertTrue(NameClassifier.isChromeLabel(name("See more")))
+        XCTAssertTrue(AttendeePolicy.uncertainChips(in: roster).isEmpty)
+    }
 }

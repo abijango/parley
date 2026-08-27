@@ -18,12 +18,20 @@ final class MeetingAdmission {
 
     func ingest(_ reading: SourceReading) {
         meeting.roster.apply(reading.roster)
+        var current = TranscriptWriter.splitAttendees(meeting.attendees)
+        var changed = false
         for name in AttendeePolicy.admissions(in: meeting.roster) {
             meeting.roster.record(.admitted(.automatic), for: name)
-            appendAttendee(name.value)
+            if !current.contains(where: { $0.caseInsensitiveCompare(name.value) == .orderedSame }) {
+                current.append(name.value)
+                changed = true
+            }
+        }
+        if changed {
+            meeting.attendees = current.joined(separator: ", ")
         }
         publishUncertainChips()
-        lastTokens = TranscriptWriter.splitAttendees(meeting.attendees)
+        lastTokens = current
     }
 
     func tokenFieldChanged(to names: [String]) {
@@ -75,7 +83,7 @@ final class MeetingAdmission {
     }
 
     private func publishUncertainChips() {
-        meeting.suggestedAttendees = AttendeePolicy.uncertainChips(in: meeting.roster).map { person in
+        let next = AttendeePolicy.uncertainChips(in: meeting.roster).map { person in
             let firstSeen: Date
             switch person.arrival {
             case .joined(let at): firstSeen = at
@@ -88,6 +96,9 @@ final class MeetingAdmission {
                 firstSeen: firstSeen,
                 accepted: false,
                 dismissed: false)
+        }
+        if meeting.suggestedAttendees != next {
+            meeting.suggestedAttendees = next
         }
     }
 }

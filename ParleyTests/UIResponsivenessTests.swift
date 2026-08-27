@@ -6,14 +6,32 @@ import XCTest
 /// that keep typing and live ASR from invalidating the whole window.
 final class UIResponsivenessTests: XCTestCase {
 
-    func testLiveTranscriptViewIsMarkedEquatableAtTheCallSite() throws {
-        let src = try Self.source("Parley/UI/MainWindowView.swift")
-        XCTAssertTrue(src.contains("LiveTranscriptView("),
+    func testLiveTranscriptLeavesSwiftUILayout() throws {
+        let main = try Self.source("Parley/UI/MainWindowView.swift")
+        XCTAssertTrue(main.contains("LiveTranscriptView("),
                       "the live pane must still exist")
-        let view = try Self.index(of: "LiveTranscriptView(", in: src)
-        let eq = try Self.index(of: ".equatable()", in: src)
-        XCTAssertLessThan(view, eq,
-                          "LiveTranscriptView.equatable() is what stops volatile ASR ticks from rebuilding the seven-stack tree")
+        XCTAssertFalse(main.contains("segments: live.segments"),
+                       "the [Segment] array must not enter RecordDetailView.body")
+        XCTAssertFalse(main.contains(".equatable()"),
+                       "Equatable no longer gates layout; the AppKit table does")
+
+        let table = try Self.source("Parley/UI/LiveTranscriptTableView.swift")
+        XCTAssertTrue(table.contains("func sizeThatFits"),
+                      "the representable must report a size independent of row count")
+        XCTAssertTrue(table.contains("proposal.width"),
+                      "sizeThatFits must return the SwiftUI proposal")
+        XCTAssertTrue(table.contains("store.$segments"),
+                      "the coordinator must observe LiveSegmentStore directly")
+        XCTAssertFalse(table.contains("NSHostingView<TranscriptRow"),
+                       "cells must stay AppKit; SwiftUI-in-table reimports the hang")
+    }
+
+    func testRecordLevelMetersObserveMeterState() throws {
+        let src = try Self.source("Parley/UI/MainWindowView.swift")
+        XCTAssertTrue(src.contains("RecordingController.shared.live.meters"),
+                      "meters must observe RecordingMeterState, not RecordingLiveState")
+        XCTAssertFalse(src.contains("micLevel: live.micLevel"),
+                       "RecordDetailView must not read meter scalars from live")
     }
 
     func testLiveWordCountPublishesOnlyOnChange() throws {

@@ -152,7 +152,15 @@ enum NameClassifier {
     }
 
     static func isLikelyPerson(_ name: DisplayName) -> Bool {
-        kind(name) == nil
+        !isChromeLabel(name) && kind(name) == nil
+    }
+
+    /// Teams / Meet chrome that the AX roster sometimes reports as a participant.
+    static func isChromeLabel(_ name: DisplayName) -> Bool {
+        switch name.value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "see more", "show more": return true
+        default: return false
+        }
     }
 }
 

@@ -834,7 +834,7 @@ final class RecordingController: ObservableObject {
     // MARK: Meters + crash-recovery autosave
 
     private func startMeterTimer() {
-        micLastActive = Date(); remoteLastActive = nil; live.micSeemsSilent = false
+        micLastActive = Date(); remoteLastActive = nil; live.meters.micSeemsSilent = false
         lastPublishedMicLevel = 0; lastPublishedRemoteLevel = 0
         meterTimer = Timer.scheduledTimer(withTimeInterval: Self.meterInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -842,11 +842,11 @@ final class RecordingController: ObservableObject {
                 let mic = self.micCapture?.level ?? 0
                 let remote = self.systemCapture?.level ?? 0
                 if abs(mic - self.lastPublishedMicLevel) > Self.meterPublishThreshold {
-                    self.live.micLevel = mic
+                    self.live.meters.micLevel = mic
                     self.lastPublishedMicLevel = mic
                 }
                 if abs(remote - self.lastPublishedRemoteLevel) > Self.meterPublishThreshold {
-                    self.live.remoteLevel = remote
+                    self.live.meters.remoteLevel = remote
                     self.lastPublishedRemoteLevel = remote
                 }
                 self.evaluateMicSilence(mic: mic, remote: remote)
@@ -865,19 +865,17 @@ final class RecordingController: ObservableObject {
         if remote >= Self.remoteActiveFloor { remoteLastActive = now }
         let remoteActiveRecently = remoteLastActive.map { now.timeIntervalSince($0) < 4 } ?? false
         let micSilentFor = micLastActive.map { now.timeIntervalSince($0) } ?? 0
-        // Assign only on change: `@Published` doesn't dedupe, so an unconditional write
-        // here published `objectWillChange` 5×/second for the whole meeting, re-running
-        // every body that observes `live` (the entire record detail tree).
+        // Assign only on change: `@Published` doesn't dedupe.
         let silent = !micDenied && remoteActiveRecently && micSilentFor >= Self.silenceGrace
-        if live.micSeemsSilent != silent { live.micSeemsSilent = silent }
+        if live.meters.micSeemsSilent != silent { live.meters.micSeemsSilent = silent }
     }
 
     private func stopTimers() {
         meterTimer?.invalidate(); meterTimer = nil
-        if live.micLevel != 0 { live.micLevel = 0 }
-        if live.remoteLevel != 0 { live.remoteLevel = 0 }
+        if live.meters.micLevel != 0 { live.meters.micLevel = 0 }
+        if live.meters.remoteLevel != 0 { live.meters.remoteLevel = 0 }
         lastPublishedMicLevel = 0; lastPublishedRemoteLevel = 0
-        if live.micSeemsSilent { live.micSeemsSilent = false }
+        if live.meters.micSeemsSilent { live.meters.micSeemsSilent = false }
         micLastActive = nil; remoteLastActive = nil
     }
 
