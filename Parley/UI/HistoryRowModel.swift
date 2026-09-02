@@ -16,8 +16,8 @@ struct HistoryRowModel: Equatable {
         case failed
     }
 
-    static func make(stage: PipelineStage) -> HistoryRowModel {
-        let (label, severity) = statusPresentation(for: stage)
+    static func make(stage: PipelineStage, isNextInQueue: Bool = false) -> HistoryRowModel {
+        let (label, severity) = statusPresentation(for: stage, isNextInQueue: isNextInQueue)
         let indicator: RowIndicatorKind? = switch stage {
         case .needsSpeakerNames: .needsSpeakerNames
         case .failed: .failed
@@ -33,11 +33,12 @@ struct HistoryRowModel: Equatable {
         )
     }
 
-    private static func statusPresentation(for stage: PipelineStage) -> (String, Theme.Severity) {
+    private static func statusPresentation(for stage: PipelineStage, isNextInQueue: Bool) -> (String, Theme.Severity) {
         switch stage {
         case .detectingSpeakers: return ("Detecting", .info)
         case .summarizing: return ("Summarizing", .info)
-        case .queuedForSpeakers, .queuedForSummary: return ("Queued", .info)
+        case .queuedForSpeakers, .queuedForSummary:
+            return (isNextInQueue ? "Next" : "Queued", .info)
         case .pausedForSpeakers: return ("Paused", .warning)
         case .heldForSpeakers, .heldForSummary: return ("Held", .warning)
         case .needsSpeakerNames: return ("Needs speakers", .warning)
@@ -133,13 +134,47 @@ final class HistoryRowIndex: ObservableObject {
             guard !Task.isCancelled, let self, let store else { return }
             let context = PipelineStage.DeriveContext.make(offline: offline, summary: summary)
             let stages = PipelineStage.deriveBatch(items: store.items, context: context, offline: offline)
-            rows = stages.mapValues { HistoryRowModel.make(stage: $0) }
+            let nextID = Self.nextQueuedItemID(items: store.items, offline: offline, summary: summary)
+            rows = Dictionary(uniqueKeysWithValues: stages.map { id, stage in
+                (id, HistoryRowModel.make(stage: stage, isNextInQueue: id == nextID))
+            })
             updateContentSearch(
                 query: latestSearchQuery,
                 searchInContents: latestSearchInContents,
                 items: store.items
             )
         }
+    }
+
+    /// Transcript item id of the queued job that will run first once the idle gate opens.
+    private static func nextQueuedItemID(
+        items: [TranscriptItem],
+        offline: OfflineProcessingService,
+        summary: SummaryService
+    ) -> String? {
+        let settings = AppSettings.shared
+        let allowHeld = settings.quietHoursEnabled && settings.isQuietHours
+
+        func itemID(forSession sessionID: String) -> String? {
+            items.first(where: {
+                MeetingFiles.sessionDir(forAudioPath: $0.meta.audio)?.lastPathComponent == sessionID
+            })?.id
+        }
+
+        for sessionID in offline.orderedQueuedIDs {
+            guard offline.jobs[sessionID] == .queued else { continue }
+            if offline.isHeld(id: sessionID) {
+                guard allowHeld else { continue }
+            }
+            if let id = itemID(forSession: sessionID) { return id }
+        }
+        for itemID in summary.queuedIDs {
+            if summary.isHeld(id: itemID) {
+                guard allowHeld else { continue }
+            }
+            return itemID
+        }
+        return nil
     }
 
     private struct ContentScanResult: Sendable {

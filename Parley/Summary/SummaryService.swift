@@ -483,9 +483,11 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             let wait = settings.summaryMinIntervalSeconds - Date().timeIntervalSince(last)
             if wait > 0 { schedulePump(after: wait); return }
         }
+        let allowHeld = settings.allowsHeldJobDrain(canDrain: true)
         guard let idx = queue.firstIndex(where: { item in
             guard let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio) else { return true }
-            return !SessionStore.isSummaryHeld(dir)
+            if !SessionStore.isSummaryHeld(dir) { return true }
+            return allowHeld
         }) else { return }
         isRunning = true
         lastSummaryStartedAt = Date()

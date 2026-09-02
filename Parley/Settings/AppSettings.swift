@@ -263,6 +263,9 @@ final class AppSettings: ObservableObject {
         static let callEndGraceSeconds = "parley.callEndGraceSeconds"
         static let autoClearSeconds = "parley.autoClearSeconds"
         static let idleDrainSeconds = "parley.idleDrainSeconds"
+        static let quietHoursEnabled = "parley.quietHoursEnabled"
+        static let quietHoursStartHour = "parley.quietHoursStartHour"
+        static let quietHoursEndHour = "parley.quietHoursEndHour"
         static let idleUnloadEnabled = "parley.idleUnloadEnabled"
         static let idleUnloadMinutes = "parley.idleUnloadMinutes"
         static let transcriptionEngine = "parley.transcriptionEngine"
@@ -301,6 +304,31 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.autoClearSeconds) var autoClearSeconds: Double = 30
     /// Seconds of continuous idle before background offline/summary queues drain.
     @AppStorage(Key.idleDrainSeconds) var idleDrainSeconds: Double = 60
+    /// During quiet hours, held queue jobs may drain after the idle wait above.
+    @AppStorage(Key.quietHoursEnabled) var quietHoursEnabled: Bool = true
+    /// Quiet-hours window start (24h clock, inclusive). Default 22:00.
+    @AppStorage(Key.quietHoursStartHour) var quietHoursStartHour: Int = 22
+    /// Quiet-hours window end (24h clock, exclusive). Default 07:00.
+    @AppStorage(Key.quietHoursEndHour) var quietHoursEndHour: Int = 7
+
+    /// True when the current time falls in the configured quiet-hours window.
+    var isQuietHours: Bool {
+        Self.isQuietHours(now: Date(), startHour: quietHoursStartHour, endHour: quietHoursEndHour)
+    }
+
+    /// Whether held jobs may drain now (quiet hours + idle gate satisfied).
+    func allowsHeldJobDrain(canDrain: Bool) -> Bool {
+        quietHoursEnabled && isQuietHours && canDrain
+    }
+
+    /// Hour-based quiet window; supports overnight spans (e.g. 22 → 7).
+    static func isQuietHours(now: Date, startHour: Int, endHour: Int) -> Bool {
+        let hour = Calendar.current.component(.hour, from: now)
+        if startHour <= endHour {
+            return hour >= startHour && hour < endHour
+        }
+        return hour >= startHour || hour < endHour
+    }
     /// Read the meeting window via Accessibility when a call is detected and
     /// suggest its title/attendees. Requires the Accessibility permission.
     @AppStorage(Key.metadataDiscoveryEnabled) var metadataDiscoveryEnabled: Bool = true

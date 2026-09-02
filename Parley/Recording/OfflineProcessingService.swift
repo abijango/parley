@@ -144,7 +144,11 @@ final class OfflineProcessingService: ObservableObject {
     /// re-entry point — it no-ops while recording, so the queue simply waits.
     func runNextIfIdle() {
         guard !isRunning, !queue.isEmpty, isIdle(), canDrain() else { return }
-        guard let idx = queue.firstIndex(where: { !SessionStore.isOfflineHeld($0.sessionDir) }) else { return }
+        let allowHeld = settings.allowsHeldJobDrain(canDrain: true)
+        guard let idx = queue.firstIndex(where: { job in
+            if !SessionStore.isOfflineHeld(job.sessionDir) { return true }
+            return allowHeld
+        }) else { return }
         isRunning = true
         let job = queue.remove(at: idx)
         jobs[job.id] = .running

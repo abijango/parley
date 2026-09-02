@@ -411,6 +411,10 @@ struct SettingsView: View {
                     }
                     .labelsHidden().fixedSize()
                 }
+                SettingRow("Quiet hours for held jobs",
+                           description: "Held speaker passes and summaries stay parked during the day. From 22:00–07:00 they may run after the idle wait above.") {
+                    Toggle("", isOn: $settings.quietHoursEnabled).labelsHidden()
+                }
             }
 
             Section("Permissions") {

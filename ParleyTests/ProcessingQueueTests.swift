@@ -152,4 +152,26 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertTrue(SessionStore.isSummaryHeld(
             URL(fileURLWithPath: first.meta.audio!).deletingLastPathComponent()))
     }
+
+    // MARK: quiet hours
+
+    func testQuietHoursOvernightWindow() {
+        let cal = Calendar.current
+        func date(hour: Int) -> Date {
+            cal.date(from: DateComponents(year: 2026, month: 9, day: 2, hour: hour))!
+        }
+        XCTAssertTrue(AppSettings.isQuietHours(now: date(hour: 22), startHour: 22, endHour: 7))
+        XCTAssertTrue(AppSettings.isQuietHours(now: date(hour: 3), startHour: 22, endHour: 7))
+        XCTAssertFalse(AppSettings.isQuietHours(now: date(hour: 12), startHour: 22, endHour: 7))
+        XCTAssertFalse(AppSettings.isQuietHours(now: date(hour: 7), startHour: 22, endHour: 7))
+    }
+
+    func testAllowsHeldJobDrainRequiresQuietHoursAndIdleGate() {
+        let settings = AppSettings.shared
+        let savedEnabled = settings.quietHoursEnabled
+        defer { settings.quietHoursEnabled = savedEnabled }
+        settings.quietHoursEnabled = true
+        // Cannot assert isQuietHours without mocking time; verify gate requires canDrain.
+        XCTAssertFalse(settings.allowsHeldJobDrain(canDrain: false))
+    }
 }
