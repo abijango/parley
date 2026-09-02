@@ -251,4 +251,54 @@ final class OfflineQueueTests: XCTestCase {
                        "Naufal Mir, Vitalii Yuryev")
         XCTAssertEqual(OfflineProcessingService.merge("", with: ["Solo"]), "Solo")
     }
+
+    @MainActor
+    func testOfflineQueueMoveAndHold() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-queue-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        func makeJob(_ id: String) throws -> OfflineJob {
+            let session = root.appendingPathComponent(id, isDirectory: true)
+            try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+            let transcript = root.appendingPathComponent("\(id).md")
+            try Data().write(to: transcript)
+            let manifest = SessionManifest(
+                id: id, title: id, attendees: "", filing: "", model: "m", computeMode: "c",
+                startedAt: Date(), lastHeartbeat: Date(), status: .finalized,
+                startedByDetection: false, callBundleID: nil, callDisplayName: nil,
+                manualNotes: "", audioTracks: ["mic.caf"])
+            SessionStore.write(manifest, to: session)
+            return OfflineJob(
+                sessionDir: session, transcriptURL: transcript, title: id,
+                attendees: "", filing: "", presentReviewWhenDone: false,
+                autoSummarize: false, engine: .fluidAudio, fluidAsrProfile: .parakeetUnified)
+        }
+
+        let summary = SummaryService(store: TranscriptStore())
+        let voiceprints = VoiceprintStore(fileURL: root.appendingPathComponent("voiceprints.json"))
+        let service = OfflineProcessingService(
+            models: ModelManager(),
+            voiceprints: voiceprints,
+            store: TranscriptStore(),
+            vault: VaultDirectory(peopleStore: PeopleStore(database: .openTemporary())),
+            summaryService: summary)
+        let first = try makeJob("offline-a")
+        let second = try makeJob("offline-b")
+        let third = try makeJob("offline-c")
+        [first, second, third].forEach(service.enqueue)
+
+        service.move(id: third.id, to: 0)
+        XCTAssertEqual(service.queuedIDs, [third.id, first.id, second.id])
+
+        service.hold(id: first.id)
+        XCTAssertTrue(service.isHeld(id: first.id))
+        XCTAssertEqual(service.jobs[first.id], .held)
+        XCTAssertTrue(SessionStore.isOfflineHeld(first.sessionDir))
+
+        service.releaseHold(id: first.id)
+        XCTAssertFalse(service.isHeld(id: first.id))
+        XCTAssertEqual(service.jobs[first.id], .queued)
+    }
 }

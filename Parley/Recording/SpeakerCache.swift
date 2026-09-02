@@ -11,6 +11,8 @@ struct SpeakerCache: Codable, Equatable {
     struct Speaker: Codable, Equatable {
         var id: String              // diarization speaker id → transcript label "Speaker {id}"
         var resolvedName: String?   // auto-identified name, if any
+        /// Voiceprint hint or unique-attendee suggestion — never auto-committed.
+        var guessedName: String?
         var talkSeconds: TimeInterval
         var sampleStart: TimeInterval
         var sampleEnd: TimeInterval

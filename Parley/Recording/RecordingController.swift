@@ -30,6 +30,15 @@ final class RecordingController: ObservableObject {
         $pendingSpeakerReview.dropFirst().receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.armClearIfReady() }
             .store(in: &cancellables)
+        offlineService.objectWillChange.receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshAppActivity() }
+            .store(in: &cancellables)
+        summaryService.objectWillChange.receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshAppActivity() }
+            .store(in: &cancellables)
+        live.$state.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshAppActivity() }
+            .store(in: &cancellables)
     }
 
     /// Live capture UI state (segments, meters, recording status).
@@ -43,6 +52,10 @@ final class RecordingController: ObservableObject {
 
     /// URL of the most recently written transcript (for "Reveal in Finder").
     @Published private(set) var lastTranscriptURL: URL?
+    /// Derived status for menu bar + Record badge.
+    @Published private(set) var appActivity: AppActivity = .idle
+    /// Seconds left in the post-idle debounce before background queues drain.
+    @Published private(set) var idleDrainRemaining: Int?
     /// Silent-mic heuristic thresholds (on the 0…1 smoothed meter scale).
     private static let micSilenceFloor: Float = 0.03    // at/under this the mic is effectively silent
     private static let remoteActiveFloor: Float = 0.06  // over this the call track has real audio
@@ -112,15 +125,15 @@ final class RecordingController: ObservableObject {
     private var clearTimer: Timer?
     private var clearToken = 0        // a new session invalidates a stale timer
     private var clearArmable = false  // true only after a live recording finishes
+    private var idleDrainTimer: Timer?
+    private var queueDrainUnlocked = false
     private var cancellables = Set<AnyCancellable>()
 
     /// The post-meeting work that should defer (and later re-arm) the auto-clear
-    /// countdown: an open speaker-review sheet, or a running Claude summary. The
-    /// offline pass no longer gates this — it runs on a background queue against an
-    /// older session's data, so it must not pin the Record view (which could otherwise
-    /// stay un-clearable indefinitely under a queue backlog).
+    /// countdown: an open speaker-review sheet. Summaries and offline passes no longer
+    /// gate clearing — they run on background queues.
     private var clearIsBusy: Bool {
-        pendingSpeakerReview != nil || pendingEnrichment != nil || summaryService.runningID != nil
+        pendingSpeakerReview != nil || pendingEnrichment != nil
     }
 
     /// Bumped whenever a saved transcript's body is rewritten (offline pass, speaker
@@ -310,9 +323,10 @@ final class RecordingController: ObservableObject {
         // Cache-backed review (no live engine): enrol the voiceprint from the persisted
         // centroid and record the assignment — the transcript is relabeled on Done.
         if let review = pendingSpeakerReview, review.cache != nil {
+            let previousAuto = review.cache?.speakers.first(where: { $0.id == speakerId })?.resolvedName
             if let c = review.cache?.speakers.first(where: { $0.id == speakerId })?.centroid, !c.isEmpty,
                let model = review.cache?.embeddingModelID {
-                enrollVoiceprint(name: name, centroid: c, model: model)
+                enrollVoiceprint(name: name, centroid: c, model: model, overridingAutoName: previousAuto)
             } else {
                 AppLog.log("Named speaker \(speakerId) as \(name) (cache) — no centroid, labeled only", category: "record")
             }
@@ -347,6 +361,7 @@ final class RecordingController: ObservableObject {
         // Add to the right attendee target: the review's own snapshot (queued/History
         // flow), or the live Record field when naming during a live meeting.
         if pendingSpeakerReview != nil {
+            pendingSpeakerReview?.assignments[speakerId] = name
             pendingSpeakerReview?.attendees = OfflineProcessingService.merge(
                 pendingSpeakerReview?.attendees ?? "", with: [name])
         } else {
@@ -358,7 +373,13 @@ final class RecordingController: ObservableObject {
     /// embedding model. Returns the voiceprint id. Shared by the live-engine and
     /// cache-backed naming paths.
     @discardableResult
-    private func enrollVoiceprint(name: String, centroid: [Float], model: String) -> UUID {
+    private func enrollVoiceprint(name: String, centroid: [Float], model: String,
+                                  overridingAutoName: String? = nil) -> UUID {
+        if let prev = overridingAutoName?.trimmingCharacters(in: .whitespacesAndNewlines), !prev.isEmpty,
+           prev.caseInsensitiveCompare(name) != .orderedSame,
+           let wrong = voiceprints.voiceprint(named: prev) {
+            voiceprints.recordCorrection(printId: wrong.id, embedding: centroid)
+        }
         // Match an existing print of the SAME name AND embedding model (different engines
         // use non-comparable embedding spaces, so keep them separate).
         if let existing = voiceprints.voiceprints.first(where: {
@@ -519,6 +540,7 @@ final class RecordingController: ObservableObject {
             store.refresh()
             offlineService.enqueuePendingFromDisk()
             summaryService.enqueuePendingFromDisk()
+            armIdleDrain()
         }
     }
 
@@ -530,10 +552,113 @@ final class RecordingController: ObservableObject {
             guard let self else { return false }
             return self.live.state == .idle && !self.isRecording
         }
+        let canDrain: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.queueDrainUnlocked || self.settings.idleDrainSeconds <= 0
+        }
         offlineService.isIdle = idle
         summaryService.isIdle = idle
+        offlineService.canDrain = canDrain
+        summaryService.canDrain = canDrain
+        let pump: () -> Void = { [weak self] in self?.pumpBackgroundQueues() }
+        offlineService.requestPump = pump
+        summaryService.requestPump = pump
         offlineService.presentReview = { [weak self] review in self?.presentQueuedReview(review) }
         summaryService.onSessionAudioDeleted = { [weak self] dir in self?.offlineService.cancel(sessionDir: dir) }
+    }
+
+    /// Start or restart the idle debounce before background queues may run.
+    func armIdleDrain() {
+        cancelIdleDrainTimerOnly()
+        guard live.state == .idle else { return }
+        let seconds = Int(settings.idleDrainSeconds)
+        if seconds <= 0 {
+            queueDrainUnlocked = true
+            idleDrainRemaining = nil
+            pumpBackgroundQueues()
+            refreshAppActivity()
+            return
+        }
+        queueDrainUnlocked = false
+        idleDrainRemaining = seconds
+        refreshAppActivity()
+        idleDrainTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard self.live.state == .idle else {
+                    self.cancelIdleDrain()
+                    return
+                }
+                guard var remaining = self.idleDrainRemaining else { return }
+                remaining -= 1
+                if remaining <= 0 {
+                    self.queueDrainUnlocked = true
+                    self.idleDrainRemaining = nil
+                    self.idleDrainTimer?.invalidate()
+                    self.idleDrainTimer = nil
+                    self.refreshAppActivity()
+                    self.pumpBackgroundQueues()
+                } else {
+                    self.idleDrainRemaining = remaining
+                    self.refreshAppActivity()
+                }
+            }
+        }
+    }
+
+    func cancelIdleDrain() {
+        cancelIdleDrainTimerOnly()
+        idleDrainRemaining = nil
+        queueDrainUnlocked = false
+        refreshAppActivity()
+    }
+
+    private func cancelIdleDrainTimerOnly() {
+        idleDrainTimer?.invalidate()
+        idleDrainTimer = nil
+    }
+
+    func pumpBackgroundQueues() {
+        guard live.state == .idle else { return }
+        guard queueDrainUnlocked || settings.idleDrainSeconds <= 0 else { return }
+        offlineService.runNextIfIdle()
+        summaryService.runNextIfIdle()
+    }
+
+    func refreshAppActivity() {
+        if live.state == .recording || live.state == .preparing || live.state == .stopping {
+            appActivity = .recording
+            return
+        }
+        if case .error = live.state {
+            appActivity = .idle
+            return
+        }
+        if let remaining = idleDrainRemaining, remaining > 0,
+           offlineService.hasWork || summaryService.hasQueuedWork {
+            appActivity = .settling(remaining: remaining)
+            return
+        }
+        if let running = summaryService.runningID,
+           let item = store.items.first(where: { $0.id == running })
+            ?? store.items.first(where: { $0.url.path == running }) {
+            appActivity = .processing(kind: .summary, detail: item.meta.title)
+            return
+        }
+        if let running = offlineService.runningID,
+           let item = store.items.first(where: { $0.meta.audio?.contains(running) == true }) {
+            appActivity = .processing(kind: .speakerPass, detail: item.meta.title)
+            return
+        }
+        if offlineService.hasWork || summaryService.hasQueuedWork {
+            if let remaining = idleDrainRemaining, remaining > 0 {
+                appActivity = .settling(remaining: remaining)
+            } else {
+                appActivity = .idle
+            }
+            return
+        }
+        appActivity = .idle
     }
 
     /// Host a speaker-review produced by the offline queue (History "Detect speakers").
@@ -813,6 +938,7 @@ final class RecordingController: ObservableObject {
         }
         offlineService.yieldToLiveRecording()
         summaryService.yieldToLiveRecording()
+        cancelIdleDrain()
         engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
 
         startMeterTimer()
@@ -1086,7 +1212,7 @@ final class RecordingController: ObservableObject {
                         engine: sessionManifest?.transcriptionEngine ?? settings.transcriptionEngine,
                         fluidAsrProfile: FluidAsrBinding.resolved(
                             stored: sessionManifest?.fluidAsrProfile, settings: settings)))
-                    offlineService.runNextIfIdle()
+                    armIdleDrain()
                 }
                 clearArmable = true
                 armClearIfReady()
@@ -1097,9 +1223,7 @@ final class RecordingController: ObservableObject {
         }
 
         live.state = .idle
-        // Now idle again — drain any work that was waiting for a live recording to end.
-        offlineService.runNextIfIdle()
-        summaryService.runNextIfIdle()
+        armIdleDrain()
         scheduleIdleUnload()   // free the model's RAM if we sit idle after this
     }
 
@@ -1168,7 +1292,8 @@ final class RecordingController: ObservableObject {
            !cache.speakers.isEmpty,
            FileManager.default.fileExists(atPath: mixed.path) {
             let summaries = cache.speakers.map {
-                CallSpeakerSummary(id: $0.id, resolvedName: $0.resolvedName, talkSeconds: $0.talkSeconds,
+                CallSpeakerSummary(id: $0.id, resolvedName: $0.resolvedName, guessedName: $0.guessedName,
+                                   talkSeconds: $0.talkSeconds,
                                    sampleStart: $0.sampleStart, sampleEnd: $0.sampleEnd, firstLine: $0.firstLine)
             }
             // Seed assignments from auto-resolved + previously-persisted names so Done
@@ -1220,7 +1345,7 @@ final class RecordingController: ObservableObject {
             engine: engine,
             fluidAsrProfile: FluidAsrBinding.resolved(
                 stored: stored?.fluidAsrProfile, settings: settings)))
-        offlineService.runNextIfIdle()
+        armIdleDrain()
         lastResult = isRecording
             ? "Speaker detection queued — runs when the current recording stops."
             : "Detecting speakers…"
@@ -1462,6 +1587,10 @@ final class RecordingController: ObservableObject {
             store.refresh()
             transcriptRevision += 1
             AppLog.log("Assigned speakers from cache: \(url.lastPathComponent)", category: "record")
+            let renames = Self.speakerRepairRenames(
+                assignments: assignments,
+                originalSpeakers: review.speakers)
+            maybeEnqueueRepair(afterRelabel: url, renames: renames)
             enqueueSummaryAfterSpeakerReview(url: url)
         } else if let review, let url = review.transcriptURL, let eng = review.engine {
             let segs = eng.finalTimeline()
@@ -1480,6 +1609,10 @@ final class RecordingController: ObservableObject {
             store.refresh()
             transcriptRevision += 1
             AppLog.log("Rewrote transcript (reviewed speakers): \(url.lastPathComponent)", category: "record")
+            let renames = Self.speakerRepairRenames(
+                assignments: review.assignments,
+                originalSpeakers: review.speakers)
+            maybeEnqueueRepair(afterRelabel: url, renames: renames)
             enqueueSummaryAfterSpeakerReview(url: url)
         } else {
             // Fallback (no decoupled context): rewrite the live transcript.
@@ -1504,7 +1637,13 @@ final class RecordingController: ObservableObject {
         // The review closed — re-arm the Record-view auto-clear (if it was deferred) and
         // pump the offline queue in case a job was waiting behind the open sheet.
         armClearIfReady()
-        offlineService.runNextIfIdle()
+        armIdleDrain()
+    }
+
+    /// Immediate reset of the Record view for the next meeting (does not wait on queues).
+    func clearForNextMeeting() {
+        clearToken += 1
+        clearForNextMeeting(token: clearToken)
     }
 
     // MARK: - Post-call enrichment (Slice B)
@@ -1638,8 +1777,12 @@ final class RecordingController: ObservableObject {
         meeting.resetDiscovery()
         admission.reset()
         notes.reset()
+        modeResetForNextMeeting?()
         AppLog.log("Auto-cleared Record view for the next meeting", category: "record")
     }
+
+    /// Optional hook for Record UI to return to the live idle hero.
+    var modeResetForNextMeeting: (() -> Void)?
 
     /// Queue a background Claude summary for the just-saved recording, if auto-summarize
     /// is on. Reads the current transcript (post-attribution) from the store so the summary
@@ -2008,7 +2151,7 @@ final class RecordingController: ObservableObject {
                         engine: m.transcriptionEngine ?? settings.transcriptionEngine,
                         fluidAsrProfile: FluidAsrBinding.resolved(
                             stored: m.fluidAsrProfile, settings: settings)))
-                    offlineService.runNextIfIdle()
+                    armIdleDrain()
                 }
             } catch {
                 lastResult = "Recovery failed: \(error.localizedDescription)"
@@ -2072,13 +2215,91 @@ final class RecordingController: ObservableObject {
     }
 
     /// Enqueue a summary when the body is fully named; otherwise log why it was skipped.
-    private func enqueueSummaryAfterSpeakerReview(url: URL) {
-        if TranscriptStore.bodyHasGenericLabels(at: url) {
-            AppLog.log("Speaker review done but summary not enqueued — generic labels remain in \(url.lastPathComponent)", category: "record")
-            return
+    /// Confirm a speaker guess from History (no review sheet) — relabel, enroll, repair.
+    func confirmSpeakerGuess(on transcript: URL, speakerId: String, name: String) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        let dir = MeetingFiles.sessionDir(forAudioPath: store.items.first(where: { $0.url == transcript })?.meta.audio)
+            ?? transcript.deletingLastPathComponent()
+        guard var cache = SpeakerCache.read(dir) else { return }
+        let previousAuto = cache.speakers.first(where: { $0.id == speakerId })?.resolvedName
+        guard let idx = cache.speakers.firstIndex(where: { $0.id == speakerId }) else { return }
+        cache.speakers[idx].resolvedName = clean
+        cache.speakers[idx].guessedName = nil
+        cache.write(to: dir)
+        if let body = try? String(contentsOf: transcript, encoding: .utf8) {
+            let relabeled = SpeakerCache.relabel(body, assignments: [speakerId: clean])
+            if relabeled != body { try? relabeled.write(to: transcript, atomically: true, encoding: .utf8) }
         }
+        let centroid = cache.speakers[idx].centroid
+        if !centroid.isEmpty {
+            enrollVoiceprint(name: clean, centroid: centroid, model: cache.embeddingModelID,
+                             overridingAutoName: previousAuto)
+        }
+        if var meta = TranscriptWriter.parseFrontmatter(transcript) {
+            var names = meta.attendees
+            if !names.contains(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
+                names.append(clean)
+                TranscriptWriter.updateFrontmatter(at: transcript) { $0.attendees = names }
+            }
+        }
+        vault.addPeople([clean])
+        store.refresh()
+        transcriptRevision += 1
+        var renames = ["Speaker \(speakerId)": clean]
+        if let previousAuto = previousAuto?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !previousAuto.isEmpty,
+           previousAuto.caseInsensitiveCompare(clean) != .orderedSame {
+            renames[previousAuto] = clean
+        }
+        maybeEnqueueRepair(afterRelabel: transcript, renames: renames)
+        if let item = store.items.first(where: { $0.url == transcript }),
+           item.summaryReadyURL == nil,
+           item.meta.note?.isEmpty != false {
+            summaryService.enqueueIfPolicyAllows(item, trigger: .speakerReviewCompleted)
+        }
+    }
+
+    private func maybeEnqueueRepair(afterRelabel url: URL, renames: [String: String]) {
+        guard !renames.isEmpty else { return }
+        store.refresh()
+        guard let item = store.items.first(where: { $0.url == url })
+            ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) else { return }
+        if let staged = item.summaryReadyURL {
+            summaryService.enqueueRepair(item, renames: renames, previousNoteURL: staged)
+        } else if let note = item.meta.note, !note.isEmpty {
+            summaryService.enqueueRepair(item, renames: renames, previousNoteURL: URL(fileURLWithPath: note))
+        }
+    }
+
+    static func speakerRepairRenames(
+        assignments: [String: String],
+        originalSpeakers: [CallSpeakerSummary]
+    ) -> [String: String] {
+        var renames: [String: String] = [:]
+        var originals: [String: String] = [:]
+        for speaker in originalSpeakers {
+            if let name = speaker.resolvedName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !name.isEmpty {
+                originals[speaker.id] = name
+            }
+        }
+        for (id, rawName) in assignments {
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            renames["Speaker \(id)"] = name
+            if let original = originals[id],
+               original.caseInsensitiveCompare(name) != .orderedSame {
+                renames[original] = name
+            }
+        }
+        return renames
+    }
+
+    private func enqueueSummaryAfterSpeakerReview(url: URL) {
         if let item = store.items.first(where: { $0.url == url })
             ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) {
+            if item.summaryReadyURL != nil || !(item.meta.note ?? "").isEmpty { return }
             summaryService.enqueueIfPolicyAllows(item, trigger: .speakerReviewCompleted)
         } else {
             AppLog.log("Speaker review done but summary not enqueued — transcript not in store: \(url.lastPathComponent)", category: "record")

@@ -7,9 +7,12 @@ import Foundation
 enum PipelineStage: Equatable {
     case detectingSpeakers      // offline pass running now
     case queuedForSpeakers      // offline pass waiting (for idle)
+    case pausedForSpeakers      // offline pass parked for live recording
+    case heldForSpeakers        // offline pass held by user
     case needsSpeakerNames      // offline done but generic "Speaker N" labels remain
     case summarizing            // Claude summary running now
     case queuedForSummary       // summary queued / awaiting bulk confirm
+    case heldForSummary         // summary held by user
     case reviewReady            // summary staged, awaiting commit
     case processed              // committed + filed
     case idleUnprocessed        // nothing in flight, no staged summary, nothing pending
@@ -74,10 +77,16 @@ extension PipelineStage {
 
         if context.runningSummaryID == item.id { return .summarizing }
         if offlineState == .running { return .detectingSpeakers }
+        if offlineState == .paused { return .pausedForSpeakers }
+        if offlineState == .held { return .heldForSpeakers }
         if offlineState == .queued { return .queuedForSpeakers }
 
         if item.summaryReadyURL != nil { return .reviewReady }
-        if context.pendingSummaryIDs.contains(item.id) { return .queuedForSummary }
+        if context.pendingSummaryIDs.contains(item.id) {
+            if let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio),
+               SessionStore.isSummaryHeld(dir) { return .heldForSummary }
+            return .queuedForSummary
+        }
         if item.hasUnnamedSpeakers, let a = item.meta.audio, !a.isEmpty { return .needsSpeakerNames }
 
         if item.isProcessed { return .processed }
@@ -106,11 +115,17 @@ extension PipelineStage {
         // 3. In-flight work.
         if summary.isSummarizing(item) { return .summarizing }
         if offlineState == .running { return .detectingSpeakers }
+        if offlineState == .paused { return .pausedForSpeakers }
+        if offlineState == .held { return .heldForSpeakers }
         if offlineState == .queued { return .queuedForSpeakers }
 
         // 4. Human gates / waiting.
         if item.summaryReadyURL != nil { return .reviewReady }
-        if summary.isPendingSummary(item) { return .queuedForSummary }
+        if summary.isPendingSummary(item) {
+            if let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio),
+               SessionStore.isSummaryHeld(dir) { return .heldForSummary }
+            return .queuedForSummary
+        }
         if item.hasUnnamedSpeakers, let a = item.meta.audio, !a.isEmpty { return .needsSpeakerNames }
 
         // 5. Terminal / idle.
@@ -121,7 +136,8 @@ extension PipelineStage {
     /// In-flight (the app is actively working on it or it's waiting to be).
     var isProcessing: Bool {
         switch self {
-        case .detectingSpeakers, .queuedForSpeakers, .summarizing, .queuedForSummary: return true
+        case .detectingSpeakers, .queuedForSpeakers, .pausedForSpeakers, .heldForSpeakers,
+             .summarizing, .queuedForSummary, .heldForSummary: return true
         default: return false
         }
     }

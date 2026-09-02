@@ -81,23 +81,32 @@ struct HistoryView: View {
         return base.filter { matchesSearch($0, query: q) }
     }
 
-    /// Items in the Processing tab, ordered to mirror the actual queues: summaries first
-    /// (the scarce Claude resource — running, then queued), then speaker detection.
+    /// Items in the Processing tab: offline queue order, then summary queue order.
     private var processingOrderedItems: [TranscriptItem] {
-        let inflight = store.items.filter { rowIndex.row(for: $0).isProcessing }
-        func rank(_ s: PipelineStage) -> Int {
-            switch s {
-            case .summarizing: return 0
-            case .queuedForSummary: return 1
-            case .detectingSpeakers: return 2
-            case .queuedForSpeakers: return 3
-            default: return 4
-            }
+        var seen = Set<String>()
+        var result: [TranscriptItem] = []
+        func appendSession(_ sessionID: String?) {
+            guard let sessionID else { return }
+            guard let item = store.items.first(where: {
+                MeetingFiles.sessionDir(forAudioPath: $0.meta.audio)?.lastPathComponent == sessionID
+            }) else { return }
+            guard !seen.contains(item.id) else { return }
+            seen.insert(item.id)
+            result.append(item)
         }
-        return inflight.sorted {
-            let (a, b) = (rank(rowIndex.stage(for: $0)), rank(rowIndex.stage(for: $1)))
-            return a != b ? a < b : $0.meta.date > $1.meta.date
+        appendSession(offline.runningID)
+        offline.orderedQueuedIDs.forEach { appendSession($0) }
+        if let running = summaryService.runningID,
+           let item = store.items.first(where: { $0.id == running }), !seen.contains(item.id) {
+            seen.insert(item.id)
+            result.append(item)
         }
+        for qid in summaryService.queuedIDs {
+            guard let item = store.items.first(where: { $0.id == qid }), !seen.contains(item.id) else { continue }
+            seen.insert(item.id)
+            result.append(item)
+        }
+        return result
     }
 
     /// Title / attendees / filing match synchronously; body match uses the async index.
@@ -117,6 +126,9 @@ struct HistoryView: View {
     @State private var attendeeDraft = ""
     /// Editable destination for the summary currently under review (seeded from meta.filing).
     @State private var reviewDestination = ""
+    @State private var headerTitleDraft = ""
+    @State private var headerFilingDraft = ""
+    @State private var headerEditItemID: String?
 
     var body: some View {
         // Resizable list/detail split (the window sidebar is a plain HStack, not a
@@ -152,7 +164,7 @@ struct HistoryView: View {
             Button("Summarize anyway") { summarize(item); pendingProcessItem = nil }
             Button("Cancel", role: .cancel) { pendingProcessItem = nil }
         } message: { _ in
-            Text("This transcript still has unnamed speakers (e.g. \"Speaker 1\"). The summary attributes actions and discussion to whoever's labelled, so it may misattribute. Detect/assign speakers first for a higher-quality note.")
+            Text("This transcript still has unnamed speakers. Detect & assign first for higher-quality attribution, or summarize now — Parley will include attendee and speaker hints.")
         }
         .sheet(item: $fileOp) { op in
             switch op {
@@ -252,9 +264,12 @@ struct HistoryView: View {
             if filteredItems.isEmpty {
                 listEmptyState
             } else {
-                List(filteredItems, selection: $selection) { item in
-                    row(item).tag(item.id)
-                        .contextMenu { rowMenu(item) }
+                List(selection: $selection) {
+                    ForEach(filteredItems) { item in
+                        row(item).tag(item.id)
+                            .contextMenu { rowMenu(item) }
+                    }
+                    .onMove(perform: filter == .processing ? moveProcessingItem : nil)
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
@@ -342,7 +357,27 @@ struct HistoryView: View {
         switch stage(item) {
         case .queuedForSummary:
             Button("Summarize now") { summaryService.prioritize(item) }
+            if summaryService.isHeld(id: item.id) {
+                Button("Release hold") { summaryService.releaseHold(id: item.id) }
+            } else {
+                Button("Hold") { summaryService.hold(id: item.id) }
+            }
             Button("Cancel summary") { summaryService.cancelQueued(item) }
+            Divider()
+        case .heldForSummary:
+            Button("Release hold") { summaryService.releaseHold(id: item.id) }
+            Button("Cancel summary") { summaryService.cancelQueued(item) }
+            Divider()
+        case .queuedForSpeakers, .pausedForSpeakers, .heldForSpeakers:
+            if let sid = sessionID(for: item) {
+                Button("Do next") { offline.prioritize(id: sid) }
+                if offline.isHeld(id: sid) {
+                    Button("Release hold") { offline.releaseHold(id: sid) }
+                } else {
+                    Button("Hold") { offline.hold(id: sid) }
+                }
+                Button("Cancel speaker pass") { offline.cancelQueued(id: sid) }
+            }
             Divider()
         case .failed(.summary), .failed(.claudeUsageLimited):
             Button("Retry summary") { summarize(item) }
@@ -352,6 +387,33 @@ struct HistoryView: View {
         default:
             EmptyView()
         }
+    }
+
+    private func sessionID(for item: TranscriptItem) -> String? {
+        MeetingFiles.sessionDir(forAudioPath: item.meta.audio)?.lastPathComponent
+    }
+
+    private func moveProcessingItem(from source: IndexSet, to destination: Int) {
+        guard filter == .processing else { return }
+        let items = processingOrderedItems
+        guard let from = source.first, from < items.count else { return }
+        let item = items[from]
+        if let sid = sessionID(for: item), offline.queuedIDs.contains(sid) {
+            let queued = Set(offline.queuedIDs)
+            guard let dest = ProcessingQueueOrder.destinationIndex(
+                movingFrom: from, to: destination, in: items,
+                belongsToQueue: { row in
+                    sessionID(for: row).map(queued.contains) == true
+                }) else { return }
+            offline.move(id: sid, to: dest)
+            return
+        }
+        guard summaryService.queuedIDs.contains(item.id) else { return }
+        let queued = Set(summaryService.queuedIDs)
+        guard let dest = ProcessingQueueOrder.destinationIndex(
+            movingFrom: from, to: destination, in: items,
+            belongsToQueue: { queued.contains($0.id) }) else { return }
+        summaryService.move(id: item.id, to: dest)
     }
 
     /// Banner above the list: the bulk-confirm prompt (highest priority) or a
@@ -664,15 +726,18 @@ struct HistoryView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
-                    Text(item.meta.title).font(Theme.Typography.screenTitle)
+                    TextField("Meeting title", text: headerTitleBinding(for: item))
+                        .textFieldStyle(.roundedBorder)
+                        .font(Theme.Typography.screenTitle)
+                        .onSubmit { persistHeaderTitle(item) }
                     metadataLine(item)
+                    DestinationField(path: headerFilingBinding(for: item),
+                                     destinations: vault.destinations,
+                                     firstRoot: settings.scanRoots.first ?? "Internal")
                 }
                 Spacer()
                 statusBadge(item)
                 Menu {
-                    Button("Rename…") { beginRename(item) }
-                    Button("Refile…") { beginRefile([item]) }
-                    Divider()
                     Button("Reveal transcript in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([item.url])
                     }
@@ -682,15 +747,16 @@ struct HistoryView: View {
                     Image(systemName: "ellipsis.circle")
                 }
                 .menuStyle(.borderlessButton).fixedSize()
-                .help("Rename, refile, or delete this meeting")
+                .help("Reveal or delete this meeting")
             }
             attendeesEditor(item)
             historyAttachmentsEditor(item)
             filesStrip(item)
+            speakerGuessBanner(item)
             if item.hasUnnamedSpeakers {
                 StatusBanner(.warning,
                              audioAvailable(item)
-                             ? "Speakers aren't assigned yet. Detect & name them so the summary attributes everything correctly."
+                             ? "Speakers aren't assigned yet. Detect & name them, or tap a suggestion below."
                              : "Speakers aren't assigned and the audio is no longer available to detect them.",
                              symbol: "person.crop.circle.badge.exclamationmark")
             }
@@ -703,6 +769,61 @@ struct HistoryView: View {
             }
         }
         .padding(Theme.Spacing.large)
+        .onAppear { seedHeaderFields(item) }
+        .onChange(of: item.id) { seedHeaderFields(item) }
+    }
+
+    private func seedHeaderFields(_ item: TranscriptItem) {
+        headerEditItemID = item.id
+        headerTitleDraft = item.meta.title
+        headerFilingDraft = item.meta.filing
+    }
+
+    private func headerTitleBinding(for item: TranscriptItem) -> Binding<String> {
+        Binding(
+            get: { headerEditItemID == item.id ? headerTitleDraft : item.meta.title },
+            set: { headerTitleDraft = $0 }
+        )
+    }
+
+    private func headerFilingBinding(for item: TranscriptItem) -> Binding<String> {
+        Binding(
+            get: { headerEditItemID == item.id ? headerFilingDraft : item.meta.filing },
+            set: { newValue in
+                headerFilingDraft = newValue
+                let url = store.refile(item, to: newValue)
+                selection = [url.path]
+            }
+        )
+    }
+
+    private func persistHeaderTitle(_ item: TranscriptItem) {
+        let trimmed = headerTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != item.meta.title else { return }
+        let url = store.rename(item, to: trimmed)
+        selection = [url.path]
+    }
+
+    @ViewBuilder private func speakerGuessBanner(_ item: TranscriptItem) -> some View {
+        if let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio),
+           let cache = SpeakerCache.read(dir) {
+            let guesses = cache.speakers.filter {
+                $0.resolvedName == nil && ($0.guessedName?.isEmpty == false)
+            }
+            if !guesses.isEmpty {
+                HStack(spacing: Theme.Spacing.xSmall) {
+                    Text("Suggestions:").font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    ForEach(guesses, id: \.id) { s in
+                        if let guess = s.guessedName {
+                            Button("\(guess)?") {
+                                recording.confirmSpeakerGuess(on: item.url, speakerId: s.id, name: guess)
+                            }
+                            .buttonStyle(.chip)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Editable attendee list for a filed/processed call. Writes straight through to the
@@ -781,14 +902,8 @@ struct HistoryView: View {
     }
 
     private func metadataLine(_ item: TranscriptItem) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-            Text(Self.dateString(item.meta.date))
-                .font(Theme.Typography.caption).foregroundStyle(.secondary)
-            if !item.meta.filing.trimmingCharacters(in: .whitespaces).isEmpty {
-                Text("Filing: \(item.meta.filing)")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
-            }
-        }
+        Text(Self.dateString(item.meta.date))
+            .font(Theme.Typography.caption).foregroundStyle(.secondary)
     }
 
     private func actionRow(_ item: TranscriptItem) -> some View {

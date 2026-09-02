@@ -262,6 +262,7 @@ final class AppSettings: ObservableObject {
         static let metadataDiscoveryEnabled = "parley.metadataDiscoveryEnabled"
         static let callEndGraceSeconds = "parley.callEndGraceSeconds"
         static let autoClearSeconds = "parley.autoClearSeconds"
+        static let idleDrainSeconds = "parley.idleDrainSeconds"
         static let idleUnloadEnabled = "parley.idleUnloadEnabled"
         static let idleUnloadMinutes = "parley.idleUnloadMinutes"
         static let transcriptionEngine = "parley.transcriptionEngine"
@@ -277,6 +278,7 @@ final class AppSettings: ObservableObject {
         static let minSpeechToIdentify = "parley.minSpeechToIdentify"
         static let liveTranscriptEnabled = "parley.liveTranscriptEnabled"
         static let summaryPromptTemplate = "parley.summaryPromptTemplate"
+        static let summaryRepairPromptTemplate = "parley.summaryRepairPromptTemplate"
         static let summaryCheckerPromptTemplate = "parley.summaryCheckerPromptTemplate"
         static let attachmentUnderstanding = "parley.attachmentUnderstanding"
         static let attachmentVisionBackend = "parley.attachmentVisionBackend"
@@ -297,6 +299,8 @@ final class AppSettings: ObservableObject {
     /// Seconds after the post-meeting pipeline completes before the Record view
     /// auto-clears itself back to a blank slate for the next call; 0 = off.
     @AppStorage(Key.autoClearSeconds) var autoClearSeconds: Double = 30
+    /// Seconds of continuous idle before background offline/summary queues drain.
+    @AppStorage(Key.idleDrainSeconds) var idleDrainSeconds: Double = 60
     /// Read the meeting window via Accessibility when a call is detected and
     /// suggest its title/attendees. Requires the Accessibility permission.
     @AppStorage(Key.metadataDiscoveryEnabled) var metadataDiscoveryEnabled: Bool = true
@@ -519,6 +523,8 @@ final class AppSettings: ObservableObject {
     /// `{{attendees}}`, `{{destination}}`. Editable in Settings → Summary.
     @AppStorage(Key.summaryPromptTemplate) var summaryPromptTemplate: String = AppSettings.defaultSummaryPrompt
 
+    @AppStorage(Key.summaryRepairPromptTemplate) var summaryRepairPromptTemplate: String = AppSettings.defaultSummaryRepairPrompt
+
     /// Instruction block for the Summary v2 checker. Unlike the writer template this
     /// takes no `{{…}}` tokens — the transcript, contacts, attendees, and draft are
     /// appended by `SummaryCheckerPromptBuilder`. Editable in Settings → Summary.
@@ -630,6 +636,31 @@ final class AppSettings: ObservableObject {
     - Output ONLY the Markdown note — no preamble, no code fences, no commentary.
     - Do NOT include a Raw Transcript section — Parley appends the raw transcript to the filed \
     note automatically.
+
+    TRANSCRIPT:
+    {{transcript}}
+    """
+
+    static let defaultSummaryRepairPrompt = """
+    You are revising an existing meeting note after the user corrected speaker names.
+
+    Keep the note's structure and any user edits intact. Fix attribution, names, and pronouns \
+    using the rename map and updated transcript. Refresh factual attribution where a generic \
+    "Speaker N" label hid who did or said what. Do NOT invent new content.
+
+    RENAME MAP (old label → new name):
+    {{rename_map}}
+
+    {{contacts}}
+    Attendees supplied: {{attendees}}
+    Filing location (context only): {{destination}}
+
+    PREVIOUS NOTE (preserve structure and edits):
+    {{previous_note}}
+
+    Strict rules:
+    - Output ONLY the revised Markdown note — no preamble.
+    - Do NOT include a Raw Transcript section — Parley appends it automatically.
 
     TRANSCRIPT:
     {{transcript}}

@@ -70,6 +70,10 @@ struct AssignSpeakersView: View {
                     Text("“\(s.firstLine)”")
                         .font(Theme.Typography.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
+                if !isNamed(s), let guess = s.guessedName ?? review.cache?.speakers.first(where: { $0.id == s.id })?.guessedName {
+                    Button("\(guess)?") { assign(s.id, guess) }
+                        .buttonStyle(.chip)
+                }
             }
             Spacer()
 

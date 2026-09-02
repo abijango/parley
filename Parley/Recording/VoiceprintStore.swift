@@ -40,6 +40,7 @@ final class VoiceprintStore: ObservableObject {
         var best: (Voiceprint, Double)?
         for vp in voiceprints
         where vp.embeddingModel == model && vp.embeddingDim == q.count {
+            if isCorrectionMatch(embedding, for: vp) { continue }
             // Best similarity over the centroid AND each enrolled sample — more
             // forgiving of cross-session variation than the averaged centroid alone
             // (the averaged centroid can dilute a match for a less-consistent voice).
@@ -161,6 +162,26 @@ final class VoiceprintStore: ObservableObject {
         voiceprints[idx].name = name
         voiceprints[idx].updatedAt = Date()
         save()
+    }
+
+    /// Record that this embedding was wrongly matched to this print — lowers future false positives.
+    func recordCorrection(printId: UUID, embedding: [Float]) {
+        guard let idx = voiceprints.firstIndex(where: { $0.id == printId }) else { return }
+        var vp = voiceprints[idx]
+        let e = Self.normalized(embedding)
+        var corrections = vp.correctionEmbeddings ?? []
+        corrections.append(e)
+        vp.correctionEmbeddings = corrections
+        vp.updatedAt = Date()
+        voiceprints[idx] = vp
+        save()
+    }
+
+    /// True when `embedding` closely matches a stored correction vector for this print.
+    private func isCorrectionMatch(_ embedding: [Float], for vp: Voiceprint) -> Bool {
+        guard let corrections = vp.correctionEmbeddings, !corrections.isEmpty else { return false }
+        let q = Self.normalized(embedding)
+        return corrections.contains { Double(Self.dot(q, Self.normalized($0))) >= 0.82 }
     }
 
     func delete(_ id: UUID) {

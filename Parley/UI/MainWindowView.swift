@@ -264,6 +264,7 @@ struct RecordDetailView: View {
         .onAppear {
             apps = ProcessLister.capturableApps()
             axTrusted = PermissionManager.accessibilityAuthorized()
+            recording.modeResetForNextMeeting = { mode = .live }
         }
         // The user grants AX in System Settings and comes back — that return is the only
         // moment the cached trust can go stale.
@@ -899,6 +900,15 @@ struct RecordDetailView: View {
                 }
                 .font(Theme.Typography.caption)
             }
+            if let url = recording.lastTranscriptURL, !recording.isRecording {
+                Button("Ready for next") {
+                    mode = .live
+                    recording.clearForNextMeeting()
+                }
+                .font(Theme.Typography.caption)
+                .glassProminentButton()
+                .controlSize(.small)
+            }
             if let url = recording.lastTranscriptURL {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -914,26 +924,38 @@ struct RecordDetailView: View {
     // MARK: Status helpers
 
     private var statusText: String {
-        switch live.state {
-        case .preparing: return "Preparing…"
-        case .recording: return "Recording"
-        case .stopping: return "Stopping…"
-        case .error: return "Error"
-        case .idle:
-            switch models.status {
-            case .downloading: return "Downloading model…"
-            case .loading(let stage, _): return stage
-            case .failed: return "Model error"
-            case .ready, .idle: return "Ready"
+        if recording.isRecording || live.state == .preparing || live.state == .stopping {
+            switch live.state {
+            case .preparing: return "Preparing…"
+            case .recording: return "Recording"
+            case .stopping: return "Stopping…"
+            case .error: return "Error"
+            case .idle: return recording.appActivity.statusText
             }
+        }
+        if case .error = live.state { return "Error" }
+        switch models.status {
+        case .downloading: return "Downloading model…"
+        case .loading(let stage, _): return stage
+        case .failed: return "Model error"
+        case .ready, .idle: return recording.appActivity.statusText
         }
     }
 
     private var statusColor: Color {
-        switch live.state {
+        if recording.isRecording || live.state == .preparing || live.state == .stopping {
+            switch live.state {
+            case .recording: return .red
+            case .preparing, .stopping: return .orange
+            case .error: return .red
+            case .idle: return .secondary
+            }
+        }
+        if case .error = live.state { return .red }
+        switch recording.appActivity {
         case .recording: return .red
-        case .preparing, .stopping: return .orange
-        case .error: return .red
+        case .settling: return .orange
+        case .processing: return .orange
         case .idle:
             switch models.status {
             case .downloading, .loading: return .orange
@@ -981,28 +1003,35 @@ private struct MicSilenceBanner: View {
 
 private struct OfflinePassBar: View {
     @ObservedObject private var offline = RecordingController.shared.offlineService
+    @ObservedObject private var recording = RecordingController.shared.live
+    @ObservedObject private var controller = RecordingController.shared
 
-    private var activeCount: Int {
-        offline.jobs.values.filter { $0 == .queued || $0 == .running }.count
+    private var waitingCount: Int {
+        offline.jobs.values.filter { $0 == .queued || $0 == .paused || $0 == .held }.count
     }
 
     var body: some View {
         Group {
-            if activeCount > 0 {
+            if controller.isRecording, waitingCount > 0 {
+                HStack(spacing: Theme.Spacing.small) {
+                    Image(systemName: "pause.circle")
+                    Text("Speaker pass paused · \(waitingCount) waiting")
+                        .font(Theme.Typography.captionSecondary)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
+                .background(.quaternary.opacity(Theme.Opacity.surface))
+            } else if offline.runningProgress != nil {
                 let running = offline.runningProgress.flatMap {
                     StageBarModel.fuse(offlineState: .running, offlineProgress: $0,
                                        summaryRunning: false, summaryQueued: false,
                                        summaryFailed: nil, summaryPaused: false, summaryActivity: nil)
                 }
-                let model = running ?? StageBarModel.fuse(offlineState: .queued, offlineProgress: nil,
-                                                          summaryRunning: false, summaryQueued: false,
-                                                          summaryFailed: nil, summaryPaused: false,
-                                                          summaryActivity: nil)
-                if let model {
+                if let model = running {
                     HStack(alignment: .top, spacing: Theme.Spacing.medium) {
                         SegmentedStageBar(segments: model.segments,
                                           statusLabel: model.statusLabel, sublabel: model.sublabel)
-                        if running != nil, offline.queuedCount > 0 {
+                        if offline.queuedCount > 0 {
                             Text("+\(offline.queuedCount) queued")
                                 .font(Theme.Typography.captionSecondary)
                                 .foregroundStyle(.tertiary)
@@ -1010,10 +1039,18 @@ private struct OfflinePassBar: View {
                     }
                     .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
                     .background(.quaternary.opacity(Theme.Opacity.surface))
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+            } else if waitingCount > 0, let remaining = controller.idleDrainRemaining {
+                HStack(spacing: Theme.Spacing.small) {
+                    Image(systemName: "clock")
+                    Text("Speaker pass in \(remaining)s")
+                        .font(Theme.Typography.captionSecondary)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
+                .background(.quaternary.opacity(Theme.Opacity.surface))
             }
         }
-        .animation(Theme.Motion.gentle, value: activeCount)
+        .animation(Theme.Motion.gentle, value: waitingCount)
     }
 }

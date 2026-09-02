@@ -7,6 +7,8 @@ final class SummaryFilingTests: XCTestCase {
     private var tmpVault: URL!
     private var origVaultPath: String!
     private var origDeleteAudio: Bool!
+    private var origSummaryPipeline: SummaryPipeline!
+    private var origSummaryBackend: SummaryBackend!
     private var sessionDirs: [URL] = []
 
     override func setUp() {
@@ -15,13 +17,19 @@ final class SummaryFilingTests: XCTestCase {
         try? FileManager.default.createDirectory(at: tmpVault, withIntermediateDirectories: true)
         origVaultPath = AppSettings.shared.vaultPath
         origDeleteAudio = AppSettings.shared.deleteAudioAfterFiling
+        origSummaryPipeline = AppSettings.shared.summaryPipeline
+        origSummaryBackend = AppSettings.shared.summaryBackend
         AppSettings.shared.vaultPath = tmpVault.path
         AppSettings.shared.deleteAudioAfterFiling = true
+        AppSettings.shared.summaryPipeline = .classic
+        AppSettings.shared.summaryBackend = .claude
     }
 
     override func tearDown() {
         AppSettings.shared.vaultPath = origVaultPath
         AppSettings.shared.deleteAudioAfterFiling = origDeleteAudio
+        AppSettings.shared.summaryPipeline = origSummaryPipeline
+        AppSettings.shared.summaryBackend = origSummaryBackend
         for dir in sessionDirs { try? FileManager.default.removeItem(at: dir) }
         try? FileManager.default.removeItem(at: tmpVault)
     }
@@ -90,6 +98,27 @@ final class SummaryFilingTests: XCTestCase {
 
         _ = service.commitGeneratedMarkdown(item, destination: "", body: "## Summary\nDone", overwriteExisting: false)
         XCTAssertFalse(service.pendingSummaryIDs.contains(item.id))
+    }
+
+    func testRepairRequeuesWhenStagingAlreadyExists() throws {
+        let (item, _) = try makeItem(title: "Repair Staged")
+        let staged = SummaryService.stagingURL(for: item.url, backend: .claude)
+        AppPaths.ensureDirectory(staged.deletingLastPathComponent())
+        try "## Summary\nAlice owns the follow-up.".write(
+            to: staged, atomically: true, encoding: .utf8)
+
+        let service = SummaryService(store: TranscriptStore())
+        service.isIdle = { false }
+        service.enqueueRepair(
+            item,
+            renames: ["Alice": "Bob"],
+            previousNoteURL: staged)
+
+        XCTAssertEqual(service.queuedIDs, [item.id])
+        XCTAssertTrue(service.pendingSummaryIDs.contains(item.id))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: staged.path),
+            "The stale staged draft must be cleared while its repair is queued")
     }
 
     func testRefilingWithDeletedAudioIsNoOp() throws {

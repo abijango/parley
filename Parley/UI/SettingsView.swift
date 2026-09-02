@@ -391,10 +391,20 @@ struct SettingsView: View {
 
             Section("After a meeting") {
                 SettingRow("Clear for the next call",
-                           description: "Once the recording and speaker pass finish, reset the title, attendees, filing, notes and transcript. Pauses during speaker review or a running summary; any edit cancels it.") {
+                           description: "Once a recording finishes, reset the title, attendees, filing, notes and transcript. Pauses only during speaker review; any edit cancels it.") {
                     Picker("", selection: $settings.autoClearSeconds) {
                         Text("Off").tag(0.0)
                         Text("15s").tag(15.0)
+                        Text("30s").tag(30.0)
+                        Text("1m").tag(60.0)
+                        Text("2m").tag(120.0)
+                    }
+                    .labelsHidden().fixedSize()
+                }
+                SettingRow("Idle before background work",
+                           description: "How long to stay idle after a call before speaker detection and summaries start. Starting a new recording cancels the wait.") {
+                    Picker("", selection: $settings.idleDrainSeconds) {
+                        Text("Off").tag(0.0)
                         Text("30s").tag(30.0)
                         Text("1m").tag(60.0)
                         Text("2m").tag(120.0)

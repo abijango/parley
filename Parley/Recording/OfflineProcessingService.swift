@@ -14,7 +14,7 @@ import Combine
 /// `isRunning` gate. The summary STAGE is delegated to `SummaryService` (not rebuilt).
 @MainActor
 final class OfflineProcessingService: ObservableObject {
-    enum JobUIState: Equatable { case queued, running, failed(String) }
+    enum JobUIState: Equatable { case queued, running, paused, held, failed(String) }
 
     /// Live per-session state, keyed by session id (= session dir name). Drives the
     /// Record-screen "processing" strip and History's per-item busy indicator.
@@ -47,9 +47,13 @@ final class OfflineProcessingService: ObservableObject {
     private let summaryService: SummaryService
     private let settings = AppSettings.shared
 
-    /// Injected by the controller so the worker never holds it: "is it safe to run now?"
+    /// Injected by the controller: "is it safe to run now?"
     /// (true only when no recording is active). The pump and the runner both gate on this.
     var isIdle: () -> Bool = { true }
+    /// Injected: idle debounce elapsed — background drain may start.
+    var canDrain: () -> Bool = { true }
+    /// Injected: pump the queues after a job finishes (respects idle debounce).
+    var requestPump: () -> Void = {}
     /// Injected: hand a finished review (History "Detect speakers") to the controller,
     /// which hosts the assign-speakers sheet.
     var presentReview: (RecordingController.SpeakerReview) -> Void = { _ in }
@@ -102,9 +106,16 @@ final class OfflineProcessingService: ObservableObject {
         SessionStore.setOfflineStatus(.pending, transcriptPath: job.transcriptURL.path,
                                       presentReviewWhenDone: job.presentReviewWhenDone, in: job.sessionDir)
         SessionStore.setTranscriptionEngine(job.engine, in: job.sessionDir)
-        jobs[job.id] = .queued
+        let held = SessionStore.isOfflineHeld(job.sessionDir)
+        jobs[job.id] = held ? .held : .queued
         queue.append(job)
     }
+
+    /// Session id of the running job, if any.
+    var runningID: String? { runningJobID }
+
+    /// All queued session ids in run order (held jobs stay in place).
+    var orderedQueuedIDs: [String] { queue.map(\.id) }
 
     /// Rebuild the queue from disk at launch: every finalized session still `.pending`/
     /// `.running` (crashed mid-pass). Re-running is safe (idempotent + coverage-guarded).
@@ -126,15 +137,16 @@ final class OfflineProcessingService: ObservableObject {
     func cancel(sessionDir: URL) {
         let id = sessionDir.lastPathComponent
         queue.removeAll { $0.id == id }
-        if jobs[id] == .queued { jobs[id] = nil }
+        if jobs[id] == .queued || jobs[id] == .held || jobs[id] == .paused { jobs[id] = nil }
     }
 
     /// Start the next job IFF idle and not already running. Safe to call from any idle
     /// re-entry point — it no-ops while recording, so the queue simply waits.
     func runNextIfIdle() {
-        guard !isRunning, !queue.isEmpty, isIdle() else { return }
+        guard !isRunning, !queue.isEmpty, isIdle(), canDrain() else { return }
+        guard let idx = queue.firstIndex(where: { !SessionStore.isOfflineHeld($0.sessionDir) }) else { return }
         isRunning = true
-        let job = queue.removeFirst()
+        let job = queue.remove(at: idx)
         jobs[job.id] = .running
         runningJobID = job.id
         runningJob = job
@@ -307,15 +319,18 @@ final class OfflineProcessingService: ObservableObject {
         // offsets, and centroid (for voiceprint enrolment); relabeling is then a text edit.
         if !speakers.isEmpty {
             let centroids = eng.centroidsByID()
-            let cache = SpeakerCache(
+            var cache = SpeakerCache(
                 embeddingModelID: eng.embeddingModelId,
                 mixedCafName: job.mixedURL.lastPathComponent,
                 speakers: speakers.map { s in
-                    SpeakerCache.Speaker(id: s.id, resolvedName: s.resolvedName,
+                    SpeakerCache.Speaker(id: s.id, resolvedName: s.resolvedName, guessedName: nil,
                                          talkSeconds: s.talkSeconds, sampleStart: s.sampleStart,
                                          sampleEnd: s.sampleEnd, firstLine: s.firstLine,
                                          centroid: centroids[s.id] ?? [])
                 })
+            SpeakerGuessResolver.applyGuesses(
+                to: &cache, attendees: mergedAttendees, voiceprints: voiceprints,
+                identificationThreshold: settings.identificationThreshold)
             cache.write(to: job.sessionDir)
         }
 
@@ -325,20 +340,9 @@ final class OfflineProcessingService: ObservableObject {
                 transcriptURL: job.transcriptURL, title: job.title,
                 filing: job.filing, attendees: mergedAttendees, autoSummarize: job.autoSummarize))
         } else {
-            // Only auto-summarize a fully-attributed transcript: every speaker resolved
-            // AND the names actually landed in the body. If the coverage guard kept a
-            // shorter existing transcript (body still has generic Me/Remote/Speaker N
-            // labels), leave it as "needs speakers" rather than summarizing mislabeled
-            // text. Routed through the policy so a bulk wave asks for one confirmation.
-            let hasUnnamed = speakers.contains { $0.resolvedName == nil }
-            let bodyAttributed = !TranscriptStore.bodyHasGenericLabels(at: job.transcriptURL)
-            if (speakers.isEmpty || !hasUnnamed), bodyAttributed {
-                store.refresh()
-                if let item = transcriptItem(for: job.transcriptURL) {
-                    summaryService.enqueueIfPolicyAllows(item, trigger: .offlinePassCompleted)
-                }
-            } else {
-                AppLog.log("Offline job \(job.id): summary not enqueued — hasUnnamed=\(hasUnnamed) bodyAttributed=\(bodyAttributed)", category: "offline")
+            store.refresh()
+            if let item = transcriptItem(for: job.transcriptURL) {
+                summaryService.enqueueIfPolicyAllows(item, trigger: .offlinePassCompleted)
             }
         }
 
@@ -355,7 +359,7 @@ final class OfflineProcessingService: ObservableObject {
         runningJob = nil
         runningTask = nil
         preemptRequested = false
-        runNextIfIdle()
+        requestPump()
     }
 
     private func shouldParkForLive() -> Bool {
@@ -372,10 +376,14 @@ final class OfflineProcessingService: ObservableObject {
         if !queue.contains(where: { $0.id == job.id }) {
             queue.insert(job, at: 0)
         }
-        jobs[job.id] = .queued
+        jobs[job.id] = .paused
         progress[job.id] = nil
         AppLog.log("Offline job \(job.id): parked for live recording", category: "offline")
         finishAndPump()
+    }
+
+    func isPaused(id: String) -> Bool {
+        jobs[id] == .paused
     }
 
     // MARK: Helpers
@@ -506,6 +514,36 @@ extension OfflineProcessingService: ProcessingQueue {
         guard let i = queue.firstIndex(where: { $0.id == id }), i > 0 else { return }
         let e = queue.remove(at: i); queue.insert(e, at: 0)
         objectWillChange.send()
+    }
+
+    func move(id: String, to index: Int) {
+        guard let i = queue.firstIndex(where: { $0.id == id }) else { return }
+        let e = queue.remove(at: i)
+        let clamped = min(max(index, 0), queue.count)
+        queue.insert(e, at: clamped)
+        objectWillChange.send()
+    }
+
+    func hold(id: String) {
+        guard let job = queue.first(where: { $0.id == id }) else { return }
+        SessionStore.setOfflineHeld(true, in: job.sessionDir)
+        jobs[id] = .held
+        objectWillChange.send()
+    }
+
+    func releaseHold(id: String) {
+        guard let job = queue.first(where: { $0.id == id }) else { return }
+        SessionStore.setOfflineHeld(false, in: job.sessionDir)
+        jobs[id] = .queued
+        objectWillChange.send()
+        requestPump()
+    }
+
+    func isHeld(id: String) -> Bool {
+        guard let job = queue.first(where: { $0.id == id }) else {
+            return jobs[id] == .held
+        }
+        return SessionStore.isOfflineHeld(job.sessionDir)
     }
 
     func cancelQueued(id: String) {

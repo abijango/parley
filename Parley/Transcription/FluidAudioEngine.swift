@@ -7,6 +7,7 @@ import FluidAudio
 struct CallSpeakerSummary: Identifiable, Equatable {
     let id: String                 // diarization speakerId
     var resolvedName: String?      // mapped person, if named/identified
+    var guessedName: String? = nil       // hint-band suggestion — not committed
     let talkSeconds: TimeInterval
     let sampleStart: TimeInterval  // best (longest) segment, for play-sample
     let sampleEnd: TimeInterval

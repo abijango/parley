@@ -38,6 +38,8 @@ struct HistoryRowModel: Equatable {
         case .detectingSpeakers: return ("Detecting", .info)
         case .summarizing: return ("Summarizing", .info)
         case .queuedForSpeakers, .queuedForSummary: return ("Queued", .info)
+        case .pausedForSpeakers: return ("Paused", .warning)
+        case .heldForSpeakers, .heldForSummary: return ("Held", .warning)
         case .needsSpeakerNames: return ("Needs speakers", .warning)
         case .reviewReady: return ("Review", .info)
         case .processed: return ("Processed", .success)

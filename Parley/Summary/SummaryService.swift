@@ -27,6 +27,13 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     /// backlog never fires silently and burns Claude usage. Debounced into a single slot.
     struct BulkConfirm: Equatable { var items: [TranscriptItem] }
 
+    /// Repair pass after a speaker rename when a summary already exists.
+    struct RepairJob: Equatable {
+        let item: TranscriptItem
+        let renames: [String: String]
+        let previousNote: String
+    }
+
     /// Per-transcript live job state, keyed by transcript path. Absent = not running
     /// (either never summarized, or already staged/committed).
     @Published private(set) var jobs: [String: JobState] = [:]
@@ -37,6 +44,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     private let store: TranscriptStore
     private var queue: [TranscriptItem] = []
+    private var repairQueue: [RepairJob] = []
     private var isRunning = false
     /// Transcript id of the summary currently being generated (nil when none) — lets the
     /// UI distinguish "summarizing now" from "queued" (both sit at `.pending` in `jobs`).
@@ -56,6 +64,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     /// background Claude subprocess never competes with an active call. Pending jobs
     /// wait in the queue and are pumped from idle re-entry points via `runNextIfIdle()`.
     var isIdle: () -> Bool = { true }
+    /// Injected: idle debounce elapsed — background drain may start.
+    var canDrain: () -> Bool = { true }
+    /// Injected: pump the queues after a job finishes (respects idle debounce).
+    var requestPump: () -> Void = {}
     /// Injected: notify when `commit` deletes a session's audio folder, so the offline
     /// queue can drop any job still pending for that (now-gone) session.
     var onSessionAudioDeleted: (URL) -> Void = { _ in }
@@ -296,6 +308,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     /// Queued (not-yet-running) summaries, in run order.
     var queuedItems: [TranscriptItem] { queue }
     var queuedIDs: [String] { queue.map(\.id) }
+    var hasQueuedWork: Bool { isRunning || !queue.isEmpty || !repairQueue.isEmpty }
 
     func prioritize(id: String) {
         guard let i = queue.firstIndex(where: { $0.id == id }), i > 0 else { return }
@@ -303,6 +316,66 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         objectWillChange.send()
     }
     func prioritize(_ item: TranscriptItem) { prioritize(id: item.id) }
+
+    func move(id: String, to index: Int) {
+        guard let i = queue.firstIndex(where: { $0.id == id }) else { return }
+        let e = queue.remove(at: i)
+        let clamped = min(max(index, 0), queue.count)
+        queue.insert(e, at: clamped)
+        objectWillChange.send()
+    }
+
+    func hold(id: String) {
+        guard let item = queue.first(where: { $0.id == id }) else { return }
+        if let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio) {
+            SessionStore.setSummaryHeld(true, in: dir)
+        }
+        objectWillChange.send()
+    }
+
+    func releaseHold(id: String) {
+        guard let item = queue.first(where: { $0.id == id }) else { return }
+        if let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio) {
+            SessionStore.setSummaryHeld(false, in: dir)
+        }
+        objectWillChange.send()
+        requestPump()
+    }
+
+    func isHeld(id: String) -> Bool {
+        guard let item = queue.first(where: { $0.id == id }),
+              let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio) else { return false }
+        return SessionStore.isSummaryHeld(dir)
+    }
+
+    /// Enqueue a repair summary after the user confirms a speaker rename.
+    func enqueueRepair(_ item: TranscriptItem, renames: [String: String], previousNoteURL: URL) {
+        guard !renames.isEmpty else { return }
+        let previousNote = (try? String(contentsOf: previousNoteURL, encoding: .utf8)) ?? ""
+        repairQueue.removeAll { $0.item.id == item.id }
+        repairQueue.append(RepairJob(item: item, renames: renames, previousNote: previousNote))
+
+        // A staged draft is the common repair source. Snapshot it above, then remove it
+        // so History returns to queued state until the repaired draft replaces it.
+        // A committed vault note is only read as prompt input and is never overwritten.
+        Self.removeAllStaging(for: item.url)
+        if !queue.contains(where: { $0.id == item.id }) {
+            queue.append(item)
+        }
+        jobs[item.id] = .pending(since: Date())
+        setSummaryStatus(.queued, for: item)
+        store.refresh()
+        runNext()
+    }
+
+    private func pendingRepair(for item: TranscriptItem) -> RepairJob? {
+        repairQueue.first { $0.item.id == item.id }
+    }
+
+    private func dequeueRepair(for item: TranscriptItem) -> RepairJob? {
+        guard let i = repairQueue.firstIndex(where: { $0.item.id == item.id }) else { return nil }
+        return repairQueue.remove(at: i)
+    }
 
     func cancelQueued(id: String) {
         guard let i = queue.firstIndex(where: { $0.id == id }) else { return }
@@ -402,7 +475,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     private func runNext() {
         guard !isRunning, !queue.isEmpty else { return }
-        guard isIdle() else { return }                 // hold while recording
+        guard isIdle(), canDrain() else { return }                 // hold while recording / settling
         guard case .normal = throttle else { return }  // hold while paused (usage limit / user)
         let settings = AppSettings.shared
         // Optional pacing: at most one summary per `summaryMinIntervalSeconds` (0 = off).
@@ -410,11 +483,15 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             let wait = settings.summaryMinIntervalSeconds - Date().timeIntervalSince(last)
             if wait > 0 { schedulePump(after: wait); return }
         }
+        guard let idx = queue.firstIndex(where: { item in
+            guard let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio) else { return true }
+            return !SessionStore.isSummaryHeld(dir)
+        }) else { return }
         isRunning = true
         lastSummaryStartedAt = Date()
-        let item = queue.removeFirst()
+        let item = queue.remove(at: idx)
         runningID = item.id
-        if settings.summaryPipeline == .v2 {
+        if settings.summaryPipeline == .v2, pendingRepair(for: item) == nil {
             runV2(item: item, settings: settings)
             return
         }
@@ -457,6 +534,13 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }()
         AppLog.log("Summary: started for \(item.url.lastPathComponent) (backend=\(backend.rawValue), model=\(modelLabel))", category: "summary")
 
+        let sessionDir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio)
+        let speakerHints = SpeakerGuessResolver.readPromptBlock(
+            sessionDir: sessionDir,
+            attendees: item.meta.attendees.joined(separator: ", "))
+        let repairJob = pendingRepair(for: item)
+        let repairTemplate = settings.summaryRepairPromptTemplate
+
         let handle = ProcessHandle()
         runningProcessHandle = handle
         preemptRequested = false
@@ -471,17 +555,36 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 understanding: attachmentUnderstanding,
                 visionBackend: visionBackend,
                 cursorBinary: cursorBinary)
-            let built = SummaryPromptBuilder.build(
-                template: summaryPromptTemplate,
-                transcriptURL: item.url,
-                attendees: item.meta.attendees.joined(separator: ", "),
-                destination: item.meta.filing,
-                contactsURL: contactsURL,
-                contactsFromDB: dbContacts,
-                peopleRecords: peopleRecords,
-                terminologyBlock: terminology.isEmpty ? nil : terminology,
-                visionDigest: vision,
-                attachmentUnderstanding: attachmentUnderstanding)
+            let built: SummaryPromptBuilder.Built
+            if let repairJob {
+                built = SummaryPromptBuilder.buildRepair(
+                    template: repairTemplate,
+                    previousNote: repairJob.previousNote,
+                    renames: repairJob.renames,
+                    transcriptURL: item.url,
+                    attendees: item.meta.attendees.joined(separator: ", "),
+                    destination: item.meta.filing,
+                    contactsURL: contactsURL,
+                    contactsFromDB: dbContacts,
+                    peopleRecords: peopleRecords,
+                    terminologyBlock: terminology.isEmpty ? nil : terminology,
+                    visionDigest: vision,
+                    attachmentUnderstanding: attachmentUnderstanding,
+                    speakerHints: speakerHints)
+            } else {
+                built = SummaryPromptBuilder.build(
+                    template: summaryPromptTemplate,
+                    transcriptURL: item.url,
+                    attendees: item.meta.attendees.joined(separator: ", "),
+                    destination: item.meta.filing,
+                    contactsURL: contactsURL,
+                    contactsFromDB: dbContacts,
+                    peopleRecords: peopleRecords,
+                    terminologyBlock: terminology.isEmpty ? nil : terminology,
+                    visionDigest: vision,
+                    attachmentUnderstanding: attachmentUnderstanding,
+                    speakerHints: speakerHints)
+            }
             let runStart = DispatchTime.now().uptimeNanoseconds
             let result: RunResult
             switch backend {
@@ -514,6 +617,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                             item: item, vault: vault)
                         AppPaths.ensureDirectory(staged.deletingLastPathComponent())
                         try body.write(to: staged, atomically: true, encoding: .utf8)
+                        if repairJob != nil {
+                            _ = self.dequeueRepair(for: item)
+                        }
                         self.jobs[item.id] = nil
                         self.setSummaryStatus(.done, for: item)
                         self.consecutiveFailures = 0
@@ -594,7 +700,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 self.isRunning = false
                 self.runningID = nil
                 self.runningActivity = nil
-                self.runNext()   // no-ops if paused (throttle guard) or idle gate closed
+                self.requestPump()
             }
         }
     }
@@ -630,6 +736,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             contacts: SummaryPromptBuilder.parseContactsList(contactsText))
         let checkerInstructions = settings.summaryCheckerPromptTemplate
         let attachmentCaptions = MeetingAttachmentStore.promptBlock(attachments: item.meta.attachments)
+        let v2SpeakerHints = SpeakerGuessResolver.readPromptBlock(
+            sessionDir: MeetingFiles.sessionDir(forAudioPath: item.meta.audio),
+            attendees: item.meta.attendees.joined(separator: ", "))
 
         let handle = ProcessHandle()
         runningProcessHandle = handle
@@ -655,7 +764,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 peopleRecords: peopleRecords,
                 terminologyBlock: terminology.isEmpty ? nil : terminology,
                 visionDigest: vision,
-                attachmentUnderstanding: attachmentUnderstanding)
+                attachmentUnderstanding: attachmentUnderstanding,
+                speakerHints: v2SpeakerHints)
 
             await MainActor.run { [weak self] in
                 self?.runningActivity = "Writer is drafting…"
@@ -786,7 +896,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 self.isRunning = false
                 self.runningID = nil
                 self.runningActivity = nil
-                self.runNext()
+                self.requestPump()
             }
         }
     }
@@ -818,7 +928,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         isRunning = false
         runningID = nil
         runningActivity = nil
-        runNext()
+        requestPump()
     }
 
     private static func noteBackendSuccess(_ backend: SummaryBackend) {

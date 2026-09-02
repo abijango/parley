@@ -22,7 +22,8 @@ enum SummaryPromptBuilder {
                       peopleRecords: [PersonRecord]? = nil,
                       terminologyBlock: String? = nil,
                       visionDigest: String? = nil,
-                      attachmentUnderstanding: AttachmentUnderstanding = .captionsOnly) -> Built {
+                      attachmentUnderstanding: AttachmentUnderstanding = .captionsOnly,
+                      speakerHints: String? = nil) -> Built {
         let transcript = readTranscript(transcriptURL)
         let dbContacts = contactsFromDB ?? peopleRecords?.map { $0.asContact() }
         let attendeeNames = attendees
@@ -57,7 +58,53 @@ enum SummaryPromptBuilder {
         if let visionDigest, !visionDigest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             prompt = injectVisionDigest(visionDigest, into: prompt)
         }
+        if let speakerHints, !speakerHints.isEmpty {
+            prompt = injectSpeakerHints(speakerHints, into: prompt)
+        }
         return Built(prompt: prompt, transcriptChars: transcript.count)
+    }
+
+    /// Repair an existing note after speaker renames — keeps structure and user edits.
+    static func buildRepair(template: String,
+                            previousNote: String,
+                            renames: [String: String],
+                            transcriptURL: URL,
+                            attendees: String,
+                            destination: String,
+                            contactsURL: URL?,
+                            contactsFromDB: [Contact]? = nil,
+                            peopleRecords: [PersonRecord]? = nil,
+                            terminologyBlock: String? = nil,
+                            visionDigest: String? = nil,
+                            attachmentUnderstanding: AttachmentUnderstanding = .captionsOnly,
+                            speakerHints: String? = nil) -> Built {
+        let renameLines = renames.map { old, new in "- \(old) → \(new)" }.sorted().joined(separator: "\n")
+        var body = template
+            .replacingOccurrences(of: "{{previous_note}}", with: previousNote)
+            .replacingOccurrences(of: "{{rename_map}}", with: renameLines.isEmpty ? "(none)" : renameLines)
+        let built = build(
+            template: body,
+            transcriptURL: transcriptURL,
+            attendees: attendees,
+            destination: destination,
+            contactsURL: contactsURL,
+            contactsFromDB: contactsFromDB,
+            peopleRecords: peopleRecords,
+            terminologyBlock: terminologyBlock,
+            visionDigest: visionDigest,
+            attachmentUnderstanding: attachmentUnderstanding,
+            speakerHints: speakerHints)
+        return built
+    }
+
+    static func injectSpeakerHints(_ block: String, into prompt: String) -> String {
+        let section = block.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = prompt.range(of: "\nTRANSCRIPT:", options: .backwards) {
+            var out = prompt
+            out.insert(contentsOf: "\n\n" + section, at: range.lowerBound)
+            return out
+        }
+        return prompt + "\n\n" + section
     }
 
     /// Injects model-analyzed attachment descriptions before TRANSCRIPT.

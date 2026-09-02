@@ -3,6 +3,7 @@ import XCTest
 
 /// Pure-logic coverage for the processing-queue / throttle work: the Claude usage-limit
 /// detector, the bulk-vs-fresh enqueue policy, and the backoff schedule.
+@MainActor
 final class ProcessingQueueTests: XCTestCase {
 
     // MARK: ClaudeUsageLimit.detect
@@ -71,5 +72,84 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertEqual(s1, 60, accuracy: 0.1)
         XCTAssertTrue(s2 > s1 && s3 > s2)
         XCTAssertEqual(SummaryService.backoffSeconds(attempt: 99), 3600, accuracy: 0.1)  // capped at 1h
+    }
+
+    // MARK: queue ordering and holds
+
+    func testMergedDestinationMapsToQueueOwnIndex() {
+        let rows = ["offline-running", "offline-a", "offline-b", "summary-a", "summary-b"]
+        let offlineQueued: Set = ["offline-a", "offline-b"]
+        let summaryQueued: Set = ["summary-a", "summary-b"]
+
+        XCTAssertEqual(
+            ProcessingQueueOrder.destinationIndex(
+                movingFrom: 2, to: 5, in: rows,
+                belongsToQueue: offlineQueued.contains),
+            1)
+        XCTAssertEqual(
+            ProcessingQueueOrder.destinationIndex(
+                movingFrom: 4, to: 0, in: rows,
+                belongsToQueue: summaryQueued.contains),
+            0)
+    }
+
+    func testSummaryQueueMoveAndHold() throws {
+        let settings = AppSettings.shared
+        let originalVault = settings.vaultPath
+        let vault = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summary-queue-\(UUID().uuidString)", isDirectory: true)
+        settings.vaultPath = vault.path
+        AppPaths.ensureVaultFolders(vault: vault)
+        var sessionDirs: [URL] = []
+        defer {
+            settings.vaultPath = originalVault
+            for dir in sessionDirs { try? FileManager.default.removeItem(at: dir) }
+            try? FileManager.default.removeItem(at: vault)
+        }
+
+        func makeItem(_ id: String) throws -> TranscriptItem {
+            let session = AppPaths.recordingsDirectory
+                .appendingPathComponent("\(id)-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+            sessionDirs.append(session)
+            let audio = session.appendingPathComponent("mic.caf")
+            try Data().write(to: audio)
+            let manifest = SessionManifest(
+                id: id, title: id, attendees: "", filing: "", model: "m", computeMode: "c",
+                startedAt: Date(), lastHeartbeat: Date(), status: .finalized,
+                startedByDetection: false, callBundleID: nil, callDisplayName: nil,
+                manualNotes: "", audioTracks: ["mic.caf"])
+            SessionStore.write(manifest, to: session)
+            let url = AppPaths.unprocessedURL(vault: vault).appendingPathComponent("\(id).md")
+            try """
+            ---
+            title: \(id)
+            date: 2026-09-02
+            status: unprocessed
+            audio: \(audio.path)
+            ---
+
+            ## Transcript
+            """.write(to: url, atomically: true, encoding: .utf8)
+            return TranscriptItem(
+                url: url,
+                meta: try XCTUnwrap(TranscriptWriter.parseFrontmatter(url)),
+                isProcessed: false)
+        }
+
+        let first = try makeItem("summary-a")
+        let second = try makeItem("summary-b")
+        let third = try makeItem("summary-c")
+        let service = SummaryService(store: TranscriptStore())
+        service.isIdle = { false }
+        [first, second, third].forEach { service.summarize($0) }
+
+        service.move(id: third.id, to: 0)
+        XCTAssertEqual(service.queuedIDs, [third.id, first.id, second.id])
+
+        service.hold(id: first.id)
+        XCTAssertTrue(service.isHeld(id: first.id))
+        XCTAssertTrue(SessionStore.isSummaryHeld(
+            URL(fileURLWithPath: first.meta.audio!).deletingLastPathComponent()))
     }
 }

@@ -67,6 +67,22 @@ final class SpeakerCacheTests: XCTestCase {
         XCTAssertEqual(cache.speakers[1].resolvedName, "Bob")
     }
 
+    @MainActor
+    func testRepairRenamesIncludeOverriddenAutoIdentity() {
+        let speakers = [
+            CallSpeakerSummary(
+                id: "1", resolvedName: "Alice", talkSeconds: 10,
+                sampleStart: 0, sampleEnd: 4, firstLine: "hi")
+        ]
+
+        let renames = RecordingController.speakerRepairRenames(
+            assignments: ["1": "Bob"],
+            originalSpeakers: speakers)
+
+        XCTAssertEqual(renames["Speaker 1"], "Bob")
+        XCTAssertEqual(renames["Alice"], "Bob")
+    }
+
     func testApplyAssignmentsRoundTripsToDisk() throws {
         var cache = SpeakerCache(
             embeddingModelID: "m", mixedCafName: "mixed.caf",

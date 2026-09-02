@@ -87,21 +87,27 @@ struct MenuBarView: View {
     }
 
     private var statusText: String {
+        if recording.isRecording { return "Recording" }
         switch live.state {
-        case .idle: return "Ready"
         case .preparing: return "Preparing…"
-        case .recording: return "Recording"
         case .stopping: return "Stopping…"
         case .error: return "Error"
+        case .recording: return "Recording"
+        case .idle: return recording.appActivity.statusText
         }
     }
 
     private var statusColor: Color {
-        switch live.state {
+        if recording.isRecording || live.state == .recording { return .red }
+        switch recording.appActivity {
         case .recording: return .red
-        case .preparing, .stopping: return .orange
-        case .error: return .red
-        case .idle: return .secondary
+        case .settling, .processing: return .orange
+        case .idle:
+            switch live.state {
+            case .preparing, .stopping: return .orange
+            case .error: return .red
+            default: return .secondary
+            }
         }
     }
 }

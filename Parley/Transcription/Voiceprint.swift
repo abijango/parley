@@ -26,6 +26,8 @@ struct Voiceprint: Codable, Identifiable, Equatable {
     /// voiceprint can be regenerated if the embedding model changes on upgrade. It
     /// lives inside the encrypted store. Optional for backward-compatible decoding.
     var audioSample: Data?
+    /// Embeddings the user rejected as matches for this identity (wrong auto-ID).
+    var correctionEmbeddings: [[Float]]?
 
     static let currentSchemaVersion = 1
 }

@@ -62,6 +62,10 @@ struct SessionManifest: Codable, Equatable {
     var presentReviewWhenDone: Bool?
     /// Background Claude-summary state for this session's transcript (nil ⇒ never queued).
     var summaryStatus: SummaryStatus?
+    /// User held this session's offline pass — stays queued but skipped while draining.
+    var offlineHeld: Bool?
+    /// User held this session's summary — stays queued but skipped while draining.
+    var summaryHeld: Bool?
     /// Engine that recorded this session. Offline passes must use this, not live Settings.
     var transcriptionEngine: TranscriptionEngineKind?
     /// Fluid ASR stack for this session (Unified / TDT v2 / TDT v3). Nil on non-Fluid
@@ -199,6 +203,26 @@ enum SessionStore {
         guard var m = read(dir) else { return }
         m.summaryStatus = status
         write(m, to: dir)
+    }
+
+    static func setOfflineHeld(_ held: Bool, in dir: URL) {
+        guard var m = read(dir) else { return }
+        m.offlineHeld = held
+        write(m, to: dir)
+    }
+
+    static func setSummaryHeld(_ held: Bool, in dir: URL) {
+        guard var m = read(dir) else { return }
+        m.summaryHeld = held
+        write(m, to: dir)
+    }
+
+    static func isOfflineHeld(_ dir: URL) -> Bool {
+        read(dir)?.offlineHeld == true
+    }
+
+    static func isSummaryHeld(_ dir: URL) -> Bool {
+        read(dir)?.summaryHeld == true
     }
 
     static func setTranscriptionEngine(_ engine: TranscriptionEngineKind, in dir: URL) {
