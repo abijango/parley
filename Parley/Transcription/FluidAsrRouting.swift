@@ -172,30 +172,154 @@ enum FluidOfflineTimings {
 }
 
 /// Builds a `CustomVocabularyContext` from meeting metadata for offline rescoring.
+///
+/// ## Why this is more careful than it looks
+///
+/// Vocabulary terms do not merely *hint* to the recogniser — the rescorer
+/// **overwrites** any span of speech whose string similarity to a term clears a
+/// threshold. FluidAudio's default threshold is 0.52, i.e. a 52% match is enough
+/// to replace what somebody actually said.
+///
+/// Multi-token terms ("Allegra Hensley") are safe: they are long and rarely
+/// resemble ordinary speech. **Single tokens are not.** Measured on a real
+/// 73-minute recording (see `docs/VOCABULARY_OVERFIRE.md`), single-token terms at
+/// the default threshold produced:
+///
+/// * `Hensley` ← "sense"        (×14 in one transcript)
+/// * `Granados` ← "grand"
+/// * `Ceylan` ← "certain"
+/// * `Steps` ← "stop" / "staff"  (from the meeting title "Cursor/SpaceX Next Steps")
+/// * `Next` ← "net"              (likewise from the title)
+/// * `Carlos` ← "you're talking about", "of revenue for us", "Fargo", "Chris"
+///
+/// The last one is the worst: it does not swap word-for-word, it eats whole
+/// phrases. "Wells Fargo" became "Wells Carlos" and "Chris" became "Carlos" —
+/// silently corrupting an account name and a person's identity.
+///
+/// So: full names keep the library default, and every single token is held to
+/// `singleTokenMinSimilarity`. That value is not a guess — 0.52 and 0.75 both
+/// still corrupted real audio; 0.85 was clean across every clip tested.
 enum FluidVocabularyBuilder {
+
+    /// Similarity a **single-token** term must clear before it may overwrite speech.
+    /// Verified empirically: 0.52 (library default) and 0.75 both corrupt; 0.85 is clean.
+    static let singleTokenMinSimilarity: Float = 0.85
+
+    /// Shortest single token allowed into the vocabulary. Short tokens collide with
+    /// far too much ordinary speech ("Mir" ← "mix", "Gleb" ← "glib").
+    static let singleTokenMinLength = 5
+
+    /// Single tokens that are ordinary English are never safe to boost, however long.
+    /// Meeting titles are the main source of these ("Next Steps", "Weekly Update").
+    static let unsafeSingleTokens: Set<String> = [
+        // meeting-title furniture
+        "next", "step", "steps", "call", "sync", "chat", "notes", "note", "intro",
+        "demo", "prep", "plan", "plans", "recap", "catch", "standup", "check",
+        "quick", "touch", "base", "kickoff", "kick", "followup", "follow", "up",
+        "meeting", "meetings", "weekly", "daily", "monthly", "update", "updates",
+        "review", "session", "discussion", "discuss", "agenda", "brief", "briefing",
+        "status", "report", "board", "team", "teams", "group", "working", "work",
+        "first", "final", "draft", "part", "round", "deep", "dive", "one", "two",
+        // generic business words that show up in titles
+        "business", "customer", "client", "project", "program", "product", "partner",
+        "partnership", "strategy", "revenue", "sales", "delivery", "training",
+        "account", "accounts", "pipeline", "commercial", "contract", "proposal",
+        // pronouns / stopwords that a fuzzy match loves
+        "and", "the", "for", "with", "from", "that", "this", "they", "them", "you",
+        "your", "our", "his", "her", "its", "are", "was", "were", "has", "have",
+    ]
+
+    /// Why a candidate was kept or dropped — surfaced in Settings so the user can
+    /// see what the recogniser is actually being told to look for.
+    enum Tier: Equatable, Sendable {
+        /// Multi-token name. Library default similarity.
+        case fullName
+        /// Single token, held to `singleTokenMinSimilarity`.
+        case strictToken
+        /// Excluded, with a human-readable reason.
+        case excluded(String)
+    }
+
+    struct Candidate: Equatable, Sendable {
+        let text: String
+        let tier: Tier
+        var isIncluded: Bool {
+            if case .excluded = tier { return false }
+            return true
+        }
+    }
+
     /// Attendee names + title tokens (when boosting is enabled and terms exist).
     static func build(attendees: String, meetingTitle: String, enabled: Bool) -> [CustomVocabularyTerm] {
+        candidates(attendees: attendees, meetingTitle: meetingTitle, enabled: enabled)
+            .compactMap { candidate in
+                switch candidate.tier {
+                case .fullName:
+                    return CustomVocabularyTerm(text: candidate.text, weight: 10)
+                case .strictToken:
+                    return CustomVocabularyTerm(
+                        text: candidate.text, weight: 10,
+                        minSimilarity: singleTokenMinSimilarity)
+                case .excluded:
+                    return nil
+                }
+            }
+    }
+
+    /// The same derivation as `build`, but keeping the rejects and the reason they
+    /// were rejected. Drives the Settings preview.
+    static func candidates(
+        attendees: String, meetingTitle: String, enabled: Bool
+    ) -> [Candidate] {
         guard enabled else { return [] }
         var seen = Set<String>()
-        var terms: [CustomVocabularyTerm] = []
-        func add(_ raw: String) {
+        var out: [Candidate] = []
+
+        func consider(_ raw: String, fromTitle: Bool) {
             let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard t.count >= 3 else { return }
+            guard !t.isEmpty else { return }
             let key = t.lowercased()
             guard seen.insert(key).inserted else { return }
-            terms.append(CustomVocabularyTerm(text: t, weight: 10))
+
+            let isMultiToken = t.contains(where: { $0.isWhitespace })
+            if isMultiToken {
+                // Full names are safe — long, and they rarely resemble real speech.
+                out.append(Candidate(text: t, tier: .fullName))
+                return
+            }
+            if t.count < singleTokenMinLength {
+                out.append(Candidate(
+                    text: t,
+                    tier: .excluded("too short — under \(singleTokenMinLength) characters it "
+                                    + "matches too much ordinary speech")))
+                return
+            }
+            if unsafeSingleTokens.contains(key) {
+                out.append(Candidate(
+                    text: t, tier: .excluded("ordinary English — boosting it would overwrite "
+                                             + "real words")))
+                return
+            }
+            if fromTitle && !(t.first?.isUppercase ?? false) {
+                out.append(Candidate(
+                    text: t, tier: .excluded("title word, not a proper noun")))
+                return
+            }
+            out.append(Candidate(text: t, tier: .strictToken))
         }
+
         for name in TranscriptWriter.splitAttendees(attendees) {
-            // Full name and each token (e.g. "Anna Krylova" → both parts).
-            add(name)
+            // Full name first, then each part (e.g. "Anna Krylova" → both parts).
+            // The parts are the dangerous ones and are gated by `consider`.
+            consider(name, fromTitle: false)
             for part in name.split(whereSeparator: { $0.isWhitespace }) {
-                add(String(part))
+                consider(String(part), fromTitle: false)
             }
         }
         for word in meetingTitle.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
-            add(String(word))
+            consider(String(word), fromTitle: true)
         }
-        return terms
+        return out
     }
 
     /// Tokenize terms with the CTC spotter models (required for offline rescoring).

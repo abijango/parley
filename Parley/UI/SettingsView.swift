@@ -112,6 +112,63 @@ struct SettingsView: View {
     }
 
     /// One consistent caption treatment for explanatory text under a control.
+    /// Shows the terms this meeting would boost, and why the rejects were rejected.
+    /// The 2026-09-14 corruption was invisible precisely because nothing surfaced
+    /// that "Steps", "Next" and "Carlos" had been handed to the recogniser.
+    @ViewBuilder
+    private var vocabularyPreview: some View {
+        let candidates = FluidVocabularyBuilder.candidates(
+            attendees: recording.meeting.attendees,
+            meetingTitle: recording.meeting.meetingTitle,
+            enabled: true)
+        if candidates.isEmpty {
+            helpText("No attendees or meeting title yet — nothing would be boosted.")
+        } else {
+            let included = candidates.filter(\.isIncluded)
+            let excluded = candidates.filter { !$0.isIncluded }
+            VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+                if included.isEmpty {
+                    Text("Nothing would be boosted for this meeting.")
+                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Boosting \(included.count) term\(included.count == 1 ? "" : "s")")
+                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    ForEach(included, id: \.text) { candidate in
+                        HStack(spacing: Theme.Spacing.small) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text(candidate.text).font(Theme.Typography.mono)
+                            if candidate.tier == .strictToken {
+                                Text("strict match only")
+                                    .font(Theme.Typography.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                if !excluded.isEmpty {
+                    Text("Held back (\(excluded.count))")
+                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                    ForEach(excluded, id: \.text) { candidate in
+                        if case .excluded(let reason) = candidate.tier {
+                            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.small) {
+                                Image(systemName: "minus.circle")
+                                    .foregroundStyle(.secondary)
+                                Text(candidate.text).font(Theme.Typography.mono)
+                                Text(reason)
+                                    .font(Theme.Typography.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.leading, Theme.Spacing.small)
+        }
+    }
+
     private func helpText(_ text: String) -> some View {
         Text(text)
             .font(Theme.Typography.caption).foregroundStyle(.secondary)
@@ -793,7 +850,10 @@ struct SettingsView: View {
                     helpText("When the live language is English, use Parakeet Unified 0.6B for streaming (~2 s latency) and a full-attention offline batch pass. Non-English sessions keep Nemotron multilingual + TDT v3.")
                     Toggle("Boost attendee names in transcript", isOn: $settings.boostAttendeeNames)
                         .disabled(recording.isRecording)
-                    helpText("Imports attendee names and meeting-title tokens into custom vocabulary for the offline batch re-pass (multilingual path only).")
+                    helpText("Imports attendee names and meeting-title tokens into custom vocabulary for the offline batch re-pass (multilingual path only). Boosting doesn't just hint — it overwrites speech that resembles a term, so short and ordinary words are held back or rejected. The list below shows exactly what this meeting would boost.")
+                    if settings.boostAttendeeNames {
+                        vocabularyPreview
+                    }
                 }
 
                 Section("Speaker separation") {

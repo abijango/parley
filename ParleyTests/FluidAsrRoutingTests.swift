@@ -33,16 +33,64 @@ final class FluidAsrRoutingTests: XCTestCase {
         XCTAssertFalse(FluidAsrRouting.usesParakeetUnified(settings: settings))
     }
 
-    func testVocabularyBuilderSkipsShortTokens() {
+    private func vocabTexts(attendees: String, title: String) -> Set<String> {
+        Set(FluidVocabularyBuilder.build(
+            attendees: attendees, meetingTitle: title, enabled: true).map(\.text))
+    }
+
+    func testVocabularyBuilderKeepsFullNamesAndLongTokens() {
+        let texts = vocabTexts(attendees: "Al, Bob Smith", title: "Q4 OKR")
+        XCTAssertTrue(texts.contains("Bob Smith"), "full names are the safe case")
+        XCTAssertTrue(texts.contains("Smith"), "distinctive surname of usable length")
+        XCTAssertFalse(texts.contains("Al"), "2 characters collides with everything")
+        XCTAssertFalse(texts.contains("Bob"), "3 characters is under the single-token floor")
+    }
+
+    /// Regression: the 2026-09-14 Cursor recording. Bare name parts overwrote
+    /// ordinary speech — "sense" became "Hensley" 14 times in one transcript.
+    func testVocabularyBuilderDoesNotBoostShortBareNames() {
+        let texts = vocabTexts(
+            attendees: "Naufal Mir, Allegra Hensley, Carlos",
+            title: "Partnership")
+        XCTAssertFalse(texts.contains("Mir"), "\"Mir\" was matching \"mix\"")
+        XCTAssertTrue(texts.contains("Naufal Mir"))
+        XCTAssertTrue(texts.contains("Allegra Hensley"))
+    }
+
+    /// Regression: a lone first name in the contacts file ate whole phrases —
+    /// "Wells Fargo" became "Wells Carlos", and "Chris" became "Carlos".
+    func testBareSingleTokenNamesAreHeldToStrictSimilarity() {
         let terms = FluidVocabularyBuilder.build(
-            attendees: "Al, Bob Smith",
-            meetingTitle: "Q4 OKR",
-            enabled: true)
-        let texts = Set(terms.map(\.text))
-        XCTAssertFalse(texts.contains("Al"))
-        XCTAssertTrue(texts.contains("Bob Smith"))
-        XCTAssertTrue(texts.contains("Bob"))
-        XCTAssertTrue(texts.contains("Smith"))
+            attendees: "Carlos Granados", meetingTitle: "Sync", enabled: true)
+        let surname = terms.first { $0.text == "Granados" }
+        let fullName = terms.first { $0.text == "Carlos Granados" }
+        XCTAssertNotNil(surname)
+        XCTAssertEqual(surname?.minSimilarity, FluidVocabularyBuilder.singleTokenMinSimilarity,
+                       "single tokens must clear the strict threshold before overwriting speech")
+        XCTAssertNotNil(fullName)
+        XCTAssertNil(fullName?.minSimilarity, "full names keep the library default")
+    }
+
+    /// Regression: the meeting title "Cursor/SpaceX Next Steps" injected "Next"
+    /// and "Steps", which then overwrote "net" and "stop"/"staff".
+    func testVocabularyBuilderRejectsOrdinaryTitleWords() {
+        let texts = vocabTexts(attendees: "Naufal Mir", title: "Cursor/SpaceX Next Steps")
+        XCTAssertFalse(texts.contains("Next"), "\"Next\" was overwriting \"net\"")
+        XCTAssertFalse(texts.contains("Steps"), "\"Steps\" was overwriting \"stop\" and \"staff\"")
+        XCTAssertTrue(texts.contains("Cursor"), "distinctive product names stay useful")
+        XCTAssertTrue(texts.contains("SpaceX"))
+    }
+
+    func testVocabularyCandidatesExplainExclusions() {
+        let candidates = FluidVocabularyBuilder.candidates(
+            attendees: "Carlos", meetingTitle: "Next Steps", enabled: true)
+        let excluded = candidates.filter { !$0.isIncluded }
+        XCTAssertFalse(excluded.isEmpty, "Settings needs a reason to show the user")
+        for candidate in excluded {
+            if case .excluded(let reason) = candidate.tier {
+                XCTAssertFalse(reason.isEmpty)
+            }
+        }
     }
 
     func testVocabularyBuilderDisabledReturnsEmpty() {
