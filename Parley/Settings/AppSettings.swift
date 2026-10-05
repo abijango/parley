@@ -126,6 +126,8 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
     case composer25 = "composer-2.5"
     case composer25Fast = "composer-2.5-fast"
     case cursorGrok46Fast = "cursor-grok-4.6-high-fast"
+    case cursorGrok47Low = "grok-4.7-low"
+    case cursorGrok47Medium = "grok-4.7-medium"
 
     var id: String { rawValue }
     var displayName: String {
@@ -136,6 +138,8 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
         case .composer25: return "Composer 2.5"
         case .composer25Fast: return "Composer 2.5 Fast"
         case .cursorGrok46Fast: return "Cursor Grok 4.6 Fast"
+        case .cursorGrok47Low: return "Cursor Grok 4.7 Low"
+        case .cursorGrok47Medium: return "Cursor Grok 4.7 Medium"
         }
     }
     var blurb: String {
@@ -149,19 +153,28 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
             return "Runs `cursor agent -p --mode ask` with model `composer-2.5-fast`."
         case .cursorGrok46Fast:
             return "Runs `cursor agent -p --mode ask` with model `cursor-grok-4.6-high-fast`."
+        case .cursorGrok47Low:
+            return "Runs `cursor agent -p --mode ask` with model `grok-4.7-low`."
+        case .cursorGrok47Medium:
+            return "Runs `cursor agent -p --mode ask` with model `grok-4.7-medium`."
         }
     }
 
     /// True when this backend is invoked via the Cursor Agent CLI.
     var isCursorAgent: Bool {
         switch self {
-        case .composer25, .composer25Fast, .cursorGrok46Fast: return true
+        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+            return true
         default: return false
         }
     }
 
     /// CLI `--model` id (same as `rawValue` for Cursor backends).
     var cursorModelID: String? { isCursorAgent ? rawValue : nil }
+
+    /// What the in-progress summary bar shows. Cursor backends use the CLI id
+    /// (`grok-4.7-medium`); the others keep their display name.
+    var statusName: String { cursorModelID ?? displayName }
 
     /// Maps persisted raw values, including retired Cursor Grok 4.5 ids.
     static func resolved(_ raw: String) -> SummaryBackend? {
@@ -176,12 +189,12 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
     /// Backends suitable for the Summary v2 writer role.
     /// Local Qwen is omitted — `SummaryService.runBackend` does not support it in v2 yet.
     static var writerBackends: [SummaryBackend] {
-        [.composer25, .composer25Fast, .claude, .grok, .cursorGrok46Fast]
+        [.composer25, .composer25Fast, .claude, .grok, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium]
     }
 
     /// Backends suitable for the Summary v2 checker role.
     static var checkerBackends: [SummaryBackend] {
-        [.cursorGrok46Fast, .composer25, .composer25Fast, .claude, .grok]
+        [.cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .composer25, .composer25Fast, .claude, .grok]
     }
 }
 
@@ -227,6 +240,26 @@ enum AttachmentUnderstanding: String, CaseIterable, Identifiable {
 @MainActor
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
+
+    private init() {
+        // Tests construct this singleton against the developer's defaults domain.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            migrateActiveCursorGrokTo47Medium()
+        }
+    }
+
+    /// One-shot. The 4.7 options were added while the saved summarizer stayed on
+    /// `cursor-grok-4.6-high-fast`, so the progress bar kept saying 4.6.
+    /// Moves that selection to `grok-4.7-medium`. Picking 4.6 again sticks.
+    private func migrateActiveCursorGrokTo47Medium() {
+        let flag = "parley.didMigrateSummaryBackendToGrok47Medium"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        let previous = SummaryBackend.cursorGrok46Fast.rawValue
+        let next = SummaryBackend.cursorGrok47Medium.rawValue
+        if summaryBackendRaw == previous { summaryBackendRaw = next }
+        if summaryCheckerBackendRaw == previous { summaryCheckerBackendRaw = next }
+        UserDefaults.standard.set(true, forKey: flag)
+    }
 
     private enum Key {
         // TODO(app-name): key prefix

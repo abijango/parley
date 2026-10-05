@@ -35,9 +35,9 @@ struct StageBarModel: Equatable {
     static func summarizeStatusLabel(settings: AppSettings = .shared) -> String {
         switch settings.summaryPipeline {
         case .v2:
-            return "Summarizing with \(settings.summaryWriterBackend.displayName) → \(settings.summaryCheckerBackend.displayName)"
+            return "Summarizing with \(settings.summaryWriterBackend.statusName) → \(settings.summaryCheckerBackend.statusName)"
         case .classic:
-            return "Summarizing with \(settings.summaryBackend.displayName)"
+            return "Summarizing with \(settings.summaryBackend.statusName)"
         }
     }
 

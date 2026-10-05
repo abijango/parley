@@ -25,6 +25,11 @@ enum SummaryPricing {
         "composer-2.5-fast": Rates(inputPerM: 3.0, outputPerM: 15.0, cacheReadPerM: 0.20),
         "cursor-grok-4.5-high": Rates(inputPerM: 2.0, outputPerM: 6.0, cacheReadPerM: 0.50),
         "cursor-grok-4.6-high-fast": Rates(inputPerM: 2.0, outputPerM: 6.0, cacheReadPerM: 0.50),
+        // Grok 4.7 standard (non-fast) list price, every effort level.
+        // https://cursor.com/docs/models-and-pricing — checked 2026-09-25.
+        // Fast is 2× and is not a summary backend. Long context (>256k input) is 2×; meeting prompts stay under that.
+        "grok-4.7-low": Rates(inputPerM: 2.0, outputPerM: 6.0, cacheReadPerM: 0.50),
+        "grok-4.7-medium": Rates(inputPerM: 2.0, outputPerM: 6.0, cacheReadPerM: 0.50),
     ]
 
     /// Returns nil for unknown models so the UI shows tokens without a bogus dollar figure.

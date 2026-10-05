@@ -53,6 +53,14 @@ final class SummaryMetricsTests: XCTestCase {
         XCTAssertFalse(line!.text.contains("$"))
     }
 
+    func testGrok47StandardListPrice() throws {
+        let m = SummaryRunMetrics(inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, model: "grok-4.7-low")
+        let cost = try XCTUnwrap(SummaryPricing.estimate(m))
+        XCTAssertEqual(cost, 2 + 6 + 0.5, accuracy: 0.0001)
+        let medium = SummaryRunMetrics(inputTokens: 1_000_000, model: "grok-4.7-medium")
+        XCTAssertEqual(try XCTUnwrap(SummaryPricing.estimate(medium)), 2, accuracy: 0.0001)
+    }
+
     func testPricingEstimateIsProportional() throws {
         let one = SummaryRunMetrics(outputTokens: 1000, model: "sonnet")
         let two = SummaryRunMetrics(outputTokens: 2000, model: "sonnet")

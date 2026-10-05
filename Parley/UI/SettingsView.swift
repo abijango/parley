@@ -20,6 +20,7 @@ struct SettingsView: View {
     @State private var pendingModelDelete: WhisperModel?
     /// AX trust has no change notification — refreshed when the Detection tab appears.
     @State private var axTrusted = PermissionManager.accessibilityAuthorized()
+    @StateObject private var groundTruthEval = SummaryGroundTruthEval()
 
     /// Settings sections — rendered as a left sidebar (Cursor / System-Settings idiom)
     /// rather than top tabs.
@@ -397,6 +398,47 @@ struct SettingsView: View {
                 HStack {
                     Spacer()
                     Button("Reset to default") { settings.summaryPromptTemplate = AppSettings.defaultSummaryPrompt }
+                }
+            }
+
+            Section("Ground truth check") {
+                helpText("Re-runs the selected summarizer on one approved meeting and scores it against the filed note. Use it when a new model ships to compare cost, speed, and how many approved facts it still captures. Fact recall is lexical: a fact counts when most of its names and numbers show up. The check does not file a note.")
+                SettingRow("Example", description: SummaryGroundTruth.rationale) {
+                    Text(SummaryGroundTruth.displayTitle)
+                        .font(Theme.Typography.body)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 280, alignment: .trailing)
+                }
+                SettingRow(settings.summaryPipeline == .v2 ? "Writer" : "Summarizer",
+                           description: settings.summaryPipeline == .v2
+                               ? "Scores the writer alone, not the checker pass."
+                               : nil) {
+                    Button(groundTruthEval.phase == .running ? "Running…" : "Run check") {
+                        let backend = settings.summaryPipeline == .v2
+                            ? settings.summaryWriterBackend
+                            : settings.summaryBackend
+                        groundTruthEval.run(backend: backend, settings: settings)
+                    }
+                    .disabled(groundTruthEval.phase == .running)
+                }
+                if case .failed(let reason) = groundTruthEval.phase {
+                    helpText(reason)
+                }
+                if let report = groundTruthEval.report {
+                    let recall = Int((report.score.recall * 100).rounded())
+                    let metricsLine = SummaryMetricsFormat.compactLine(metrics: report.metrics)?.text
+                    SettingRow(report.backendName) {
+                        Text("\(recall)% fact recall (\(report.score.matched)/\(report.score.total))")
+                            .font(Theme.Typography.body)
+                            .monospacedDigit()
+                    }
+                    if let metricsLine {
+                        helpText(metricsLine)
+                    }
+                    if !report.score.missedPreviews.isEmpty {
+                        helpText("Missed: " + report.score.missedPreviews.prefix(4).joined(separator: " · "))
+                    }
                 }
             }
 
