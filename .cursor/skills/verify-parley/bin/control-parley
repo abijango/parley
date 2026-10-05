@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# Drive Parley through System Events (JXA). Cursor already has Automation for
+# System Events; a separately compiled Swift AX binary does not inherit that trust.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+JXA="$ROOT/bin/control-parley.jxa.js"
+BUNDLE_ID="com.naufalmir.parley"
+APP_NAME="Parley"
+INSTALLED="/Applications/Parley.app"
+STATE="${PARLEY_VERIFY_STATE:-/tmp/parley-verify-state}"
+
+die() { echo "error: $*" >&2; exit "${2:-1}"; }
+have_app() { pgrep -x "$APP_NAME" >/dev/null 2>&1; }
+app_pid() { pgrep -x "$APP_NAME" | head -1; }
+
+jxa() {
+  osascript -l JavaScript "$JXA" "$@"
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  pid)
+    have_app || die "Parley is not running" 3
+    app_pid
+    ;;
+  doctor)
+    have_app || die "Parley is not running (bundle $BUNDLE_ID)" 3
+    pid="$(app_pid)"
+    path="$(ps -p "$pid" -o comm=)"
+    version="$(defaults read "$INSTALLED/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo "?")"
+    dump="$(jxa dump)"
+    rec="unknown"
+    recordings="$HOME/Library/Application Support/Parley/Recordings"
+    if [[ -d "$recordings" ]] && grep -l '"status" *: *"active"' "$recordings"/*/session.json >/dev/null 2>&1; then
+      rec="recording"
+    fi
+    if [[ "$rec" != "recording" ]] && echo "$dump" | grep -Eq 'help="Stop"|title="Stop"|value="Recording"'; then rec="recording"; fi
+    if [[ "$rec" != "recording" ]] && echo "$dump" | grep -Eq 'help="Start"|title="Start"|value="Ready to record"|value="Ready"|value="No transcript yet"|help="History"|help="Record"'; then
+      rec="idle"
+    fi
+    echo "bundle: $BUNDLE_ID"
+    echo "pid: $pid"
+    echo "path: $path"
+    echo "version: $version"
+    echo "ax: system-events"
+    echo "windows: $(echo "$dump" | awk '/^windows:/{print $2; exit}')"
+    echo "recording: $rec"
+    if [[ "$rec" == "recording" ]]; then
+      die "Parley is recording. Refuse to drive a live session." 4
+    fi
+    if [[ "$rec" == "unknown" ]]; then
+      echo "warning: could not confirm idle/recording from AX tree; inspect snapshot before clicking Start" >&2
+    fi
+    ;;
+  launch)
+    if have_app; then
+      printf 'LAUNCHED_BY_US=0\nPID=%s\n' "$(app_pid)" > "$STATE"
+      osascript -e 'tell application "Parley" to reopen' -e 'tell application "Parley" to activate' >/dev/null
+      echo "already-running pid=$(app_pid) launched-by-us=0"
+      exit 0
+    fi
+    [[ -d "$INSTALLED" ]] || die "$INSTALLED is missing. Install once with tools/localrelease.sh (do not run that during a live recording)."
+    open -a "$INSTALLED"
+    for _ in $(seq 1 50); do have_app && break; sleep 0.2; done
+    have_app || die "Parley did not start"
+    printf 'LAUNCHED_BY_US=1\nPID=%s\n' "$(app_pid)" > "$STATE"
+    osascript -e 'tell application "Parley" to reopen' -e 'tell application "Parley" to activate' >/dev/null
+    echo "started pid=$(app_pid) launched-by-us=1"
+    ;;
+  activate)
+    have_app || die "Parley is not running" 3
+    osascript -e 'tell application "Parley" to reopen' -e 'tell application "Parley" to activate' >/dev/null
+    echo "activated pid=$(app_pid)"
+    ;;
+  snapshot)
+    have_app || die "Parley is not running" 3
+    osascript -e 'tell application "Parley" to reopen' -e 'tell application "Parley" to activate' >/dev/null
+    sleep 0.3
+    path=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --path) path="$2"; shift 2 ;;
+        *) die "unknown snapshot flag $1" ;;
+      esac
+    done
+    text="$(jxa dump)"
+    if [[ -n "$path" ]]; then
+      mkdir -p "$(dirname "$path")"
+      printf '%s\n' "$text" > "$path"
+      echo "wrote $path"
+    else
+      printf '%s\n' "$text"
+    fi
+    ;;
+  click)
+    have_app || die "Parley is not running" 3
+    osascript -e 'tell application "Parley" to reopen' -e 'tell application "Parley" to activate' >/dev/null
+    sleep 0.3
+    name=""; role=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --name) name="$2"; shift 2 ;;
+        --role) role="$2"; shift 2 ;;
+        *) die "unknown click flag $1" ;;
+      esac
+    done
+    [[ -n "$name" ]] || die "click requires --name"
+    jxa click "$name" "$role"
+    ;;
+  wait)
+    have_app || die "Parley is not running" 3
+    needle=""; timeout="10"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --contains) needle="$2"; shift 2 ;;
+        --timeout) timeout="$2"; shift 2 ;;
+        *) die "unknown wait flag $1" ;;
+      esac
+    done
+    [[ -n "$needle" ]] || die "wait requires --contains"
+    deadline=$((SECONDS + timeout))
+    while (( SECONDS < deadline )); do
+      if jxa dump | grep -Fqi -- "$needle"; then
+        printf 'found %s\n' "$needle"
+        exit 0
+      fi
+      sleep 0.3
+    done
+    die "timed out waiting for $needle" 5
+    ;;
+  screenshot)
+    have_app || die "Parley is not running" 3
+    osascript -e 'tell application "Parley" to reopen' -e 'tell application "Parley" to activate' >/dev/null
+    sleep 0.4
+    path=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --path) path="$2"; shift 2 ;;
+        *) die "unknown screenshot flag $1" ;;
+      esac
+    done
+    [[ -n "$path" ]] || die "screenshot requires --path"
+    mkdir -p "$(dirname "$path")"
+    rect="$(osascript <<'EOF'
+tell application "System Events"
+  tell process "Parley"
+    set p to position of window 1
+    set s to size of window 1
+    return ((item 1 of p) as text) & "," & ((item 2 of p) as text) & "," & ((item 1 of s) as text) & "," & ((item 2 of s) as text)
+  end tell
+end tell
+EOF
+)"
+    [[ -n "$rect" ]] || die "could not read Parley window bounds"
+    /usr/sbin/screencapture -x -R "$rect" "$path"
+    [[ -s "$path" ]] || die "screencapture produced no file"
+    echo "wrote $path"
+    ;;
+  quit)
+    file="$STATE"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --only-if-launched) file="$2"; shift 2 ;;
+        *) die "unknown quit flag $1" ;;
+      esac
+    done
+    if [[ ! -f "$file" ]] || ! grep -q 'LAUNCHED_BY_US=1' "$file"; then
+      echo "left running (not launched by this verification)"
+      exit 0
+    fi
+    osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
+    for _ in $(seq 1 40); do have_app || { echo quit; exit 0; }; sleep 0.2; done
+    die "Parley did not quit"
+    ;;
+  *)
+    cat >&2 <<EOF
+control-parley — System Events (JXA) driver for the Parley macOS app.
+
+Usage:
+  control-parley doctor
+  control-parley launch
+  control-parley activate
+  control-parley snapshot [--path FILE]
+  control-parley click --name NAME [--role ROLE]
+  control-parley wait --contains TEXT [--timeout SECONDS]
+  control-parley screenshot --path FILE
+  control-parley quit --only-if-launched STATEFILE
+  control-parley pid
+EOF
+    exit 2
+    ;;
+esac
