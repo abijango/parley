@@ -667,7 +667,7 @@ struct HistoryView: View {
                 Button {
                     let confirmed = inferred.filter { !deselectedAffiliations.contains($0.name) }
                     recording.confirmInferredAffiliations(confirmed)
-                    summaryService.commit(item, destination: reviewDestination, stagedURL: reviewURL)
+                    commitAndSelectNext(item, stagedURL: reviewURL)
                 } label: {
                     Label("Commit & File", systemImage: "tray.and.arrow.down")
                 }
@@ -720,6 +720,28 @@ struct HistoryView: View {
     /// The single selected item, or nil when zero or many are selected.
     private var selectedItem: TranscriptItem? {
         selection.count == 1 ? selectedItems.first : nil
+    }
+
+    private func commitAndSelectNext(_ item: TranscriptItem, stagedURL: URL) {
+        let nextID = Self.selectionAfterRemoving(item.id, from: filteredItems.map(\.id))
+        guard summaryService.commit(
+            item,
+            destination: reviewDestination,
+            stagedURL: stagedURL
+        ) != nil else { return }
+        selection = nextID.map { [$0] } ?? []
+    }
+
+    /// Keeps keyboard-style list navigation stable when an action removes the current row:
+    /// select the row now occupying its position, or the preceding row at the end.
+    static func selectionAfterRemoving(
+        _ removedID: TranscriptItem.ID,
+        from orderedIDs: [TranscriptItem.ID]
+    ) -> TranscriptItem.ID? {
+        guard let index = orderedIDs.firstIndex(of: removedID), orderedIDs.count > 1 else {
+            return nil
+        }
+        return orderedIDs[index == orderedIDs.index(before: orderedIDs.endIndex) ? index - 1 : index + 1]
     }
 
     private func detailHeader(_ item: TranscriptItem) -> some View {
