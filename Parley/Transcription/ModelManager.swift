@@ -32,7 +32,7 @@ final class ModelManager: ObservableObject {
     /// Compute mode the loaded model was built with — changing it forces a reload.
     private var loadedCompute: ComputeMode?
     /// In-flight load, so concurrent callers (launch preload + Start) share one load.
-    private var loadingTask: Task<WhisperKit?, Never>?
+    private var loadingTask: Task<Void, Never>?
 
     private static let repoSubpath = "models/argmaxinc/whisperkit-coreml"
     /// Set while a compute-graph load is in flight; if it's still set at next
@@ -166,13 +166,16 @@ final class ModelManager: ObservableObject {
     /// immediately if already loaded, and joins an in-flight load if one exists.
     func prepare(_ model: WhisperModel) async -> WhisperKit? {
         if loadedModel == model, loadedCompute == AppSettings.shared.computeMode, let whisperKit { return whisperKit }
-        if let loadingTask { return await loadingTask.value }
+        if let loadingTask {
+            await loadingTask.value
+            return whisperKit
+        }
 
         let task = Task { await self.load(model) }
         loadingTask = task
-        let result = await task.value
+        await task.value
         loadingTask = nil
-        return result
+        return whisperKit
     }
 
     /// Releases the loaded model to reclaim memory during a long idle period.
@@ -189,7 +192,8 @@ final class ModelManager: ObservableObject {
         AppLog.log("Model unloaded (idle) to free memory — \(MemoryGuard.snapshot())", category: "model")
     }
 
-    private func load(_ model: WhisperModel) async -> WhisperKit? {
+    /// Leaves `whisperKit` set on success and nil on failure.
+    private func load(_ model: WhisperModel) async {
         AppPaths.ensureDirectory(AppPaths.modelsDirectory)
         // Release any previously loaded model first so we don't hold two in
         // memory at once (and so switching models actually frees the old one).
@@ -292,12 +296,10 @@ final class ModelManager: ObservableObject {
             status = .ready
             ModelManager.markCompiledLoadFinished()
             refreshDownloadedModels()
-            return kit
         } catch {
             ModelManager.markCompiledLoadFinished()
             AppLog.log("Model \(model.rawValue) failed after \(Self.secs(overallStart))s: \(error.localizedDescription)", category: "model")
             status = .failed(error.localizedDescription)
-            return nil
         }
     }
 

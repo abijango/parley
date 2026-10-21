@@ -891,7 +891,7 @@ struct SettingsView: View {
                                description: "If transcription crashes on load, the compiled-model cache may be corrupt. Resetting rebuilds it on the next load.") {
                         Button("Reset") {
                             ModelManager.clearCompiledCache()
-                            Task { await models.prepare(settings.model) }
+                            Task { _ = await models.prepare(settings.model) }
                         }
                         .disabled(recording.isRecording)
                     }
@@ -980,7 +980,7 @@ struct SettingsView: View {
         // the new compute units; GPU drops the ANE specialization wait).
         .onChange(of: settings.computeModeRaw) {
             guard !recording.isRecording else { return }
-            Task { await models.prepare(settings.model) }
+            Task { _ = await models.prepare(settings.model) }
         }
         .confirmationDialog(
             "Delete Whisper Turbo?",
