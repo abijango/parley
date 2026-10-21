@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // A clean quit isn't a crash: clear the model-load sentinel so a quit
             // during ANE specialization doesn't make the next launch wipe the
             // compiled-model cache (and pay a ~150s cold re-specialization).
-            ModelManager.noteGracefulShutdown()
+            FluidModelManager.noteGracefulShutdown()
             RecordingController.shared.teardownForQuit()
         }
     }

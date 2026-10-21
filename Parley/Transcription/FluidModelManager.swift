@@ -24,13 +24,15 @@ enum FluidWarmSession {
 }
 
 /// Tracks the on-disk state of the FluidAudio (Parakeet) speech model and can
-/// fetch it on demand — the FluidAudio counterpart to `ModelManager` (WhisperKit).
+/// fetch it on demand.
 ///
 /// FluidAudio downloads/compiles its own CoreML bundles under Application Support;
-/// this manager surfaces whether they're present and offers an explicit download,
-/// so Settings can show a download/ready control instead of the Whisper list.
+/// this manager surfaces whether they're present and offers an explicit download.
 @MainActor
 final class FluidModelManager: ObservableObject {
+    /// Set while a compute-graph load is in flight; if it's still set at next
+    /// launch, the previous load crashed (e.g. a corrupt MPSGraph cache) → recover.
+    static let loadInProgressKey = "parley.modelLoadInProgress"
     enum Status: Equatable {
         case unknown
         case notDownloaded
@@ -54,6 +56,43 @@ final class FluidModelManager: ObservableObject {
     private var loadingTask: Task<FluidWarmSession?, Never>?
     private var warmed: FluidWarmSession?
     private var warmedKey: FluidPrepareKey?
+
+    /// The OS-managed compiled-model cache for this app (`…/<bundleID>/com.apple.e5rt.e5bundlecache`).
+    static func compiledCacheURL() -> URL? {
+        guard let bundleID = Bundle.main.bundleIdentifier,
+              let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        return caches.appendingPathComponent(bundleID).appendingPathComponent("com.apple.e5rt.e5bundlecache")
+    }
+
+    static func clearCompiledCache() {
+        guard let url = compiledCacheURL() else { return }
+        try? FileManager.default.removeItem(at: url)
+        AppLog.log("Cleared compiled-model cache: \(url.path)", category: "model")
+    }
+
+    static func recoverFromCrashedLoadIfNeeded() {
+        guard UserDefaults.standard.bool(forKey: loadInProgressKey) else { return }
+        if AppInfo.isXCTestHost {
+            markCompiledLoadFinished()
+            return
+        }
+        AppLog.log("Previous model load didn't finish (likely a crash) — clearing compiled cache to recover", category: "model")
+        clearCompiledCache()
+        markCompiledLoadFinished()
+    }
+
+    static func markCompiledLoadInProgress() {
+        if AppInfo.isXCTestHost { return }
+        UserDefaults.standard.set(true, forKey: loadInProgressKey)
+    }
+
+    static func markCompiledLoadFinished() {
+        UserDefaults.standard.set(false, forKey: loadInProgressKey)
+    }
+
+    static func noteGracefulShutdown() {
+        markCompiledLoadFinished()
+    }
 
     /// Check whether the Parakeet v3 ASR models are already on disk.
     func refreshPresence() {
@@ -104,7 +143,7 @@ final class FluidModelManager: ObservableObject {
         await discardWarmed()
         let onDisk = AsrModels.modelsExist(at: Self.presenceProbe, version: .v3)
         status = onDisk ? .loading : .downloading
-        ModelManager.markCompiledLoadInProgress()
+        FluidModelManager.markCompiledLoadInProgress()
         AppLog.log("FluidAudio preparing streaming ASR (\(key.profile.rawValue)) — \(MemoryGuard.snapshot())", category: "model")
         do {
             let session: FluidWarmSession
@@ -123,13 +162,13 @@ final class FluidModelManager: ObservableObject {
                 session = .nemotron(nemotron)
                 AppLog.log("FluidAudio Nemotron streaming models loaded (\(key.chunkMs)ms, \(key.language))", category: "model")
             }
-            ModelManager.markCompiledLoadFinished()
+            FluidModelManager.markCompiledLoadFinished()
             warmed = session
             warmedKey = key
             status = .downloaded
             return session
         } catch {
-            ModelManager.markCompiledLoadFinished()
+            FluidModelManager.markCompiledLoadFinished()
             status = .failed(error.localizedDescription)
             AppLog.log("FluidAudio streaming prepare failed: \(error.localizedDescription)", category: "model")
             return nil

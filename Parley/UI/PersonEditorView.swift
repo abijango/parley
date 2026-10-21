@@ -53,7 +53,6 @@ struct PersonEditorView: View {
     // MARK: - Voiceprint action state
 
     @State private var vpActionStatus: String?
-    @State private var vpRebuilding = false
     @State private var vpReenrolling = false
     /// ID of the voiceprint pending delete confirmation.
     @State private var pendingDeleteVP: UUID?
@@ -144,18 +143,6 @@ struct PersonEditorView: View {
     }
 
     // MARK: - Voiceprint action helpers
-
-    /// True when this person has a retained clip but no WhisperKit (pyannote) print.
-    /// Used to show the "Rebuild WhisperKit" button.
-    private var canRebuildWhisperKit: Bool {
-        let name = person.displayName.lowercased()
-        let hasPyannote = voiceprintStore.voiceprints.contains {
-            $0.name.lowercased() == name &&
-            $0.embeddingModel == VoiceprintStore.speakerKitEmbeddingModel
-        }
-        let hasClip = person.voiceprints.contains { $0.audioSample != nil }
-        return !hasPyannote && hasClip
-    }
 
     /// True when this person has a retained clip and a FluidAudio (wespeaker) print
     /// (including stale prints, which appear as "missing" in the engine badge row since
@@ -486,7 +473,6 @@ struct PersonEditorView: View {
     private var engineStatusRow: some View {
         HStack(spacing: Theme.Spacing.medium) {
             engineStatus(label: "FluidAudio", enrolled: person.enrolledEngines.contains("FluidAudio"))
-            engineStatus(label: "WhisperKit", enrolled: person.enrolledEngines.contains("WhisperKit"))
             if person.voiceprints.isEmpty {
                 Text("Not enrolled")
                     .font(Theme.Typography.caption)
@@ -583,28 +569,15 @@ struct PersonEditorView: View {
 
     /// Rebuild / re-enroll actions shown only when relevant (clip available + missing engine).
     @ViewBuilder private var voiceprintActions: some View {
-        if canRebuildWhisperKit || canReenrollFluidAudio {
+        if canReenrollFluidAudio {
             VStack(alignment: .leading, spacing: Theme.Spacing.small) {
-                if canRebuildWhisperKit {
-                    HStack(spacing: Theme.Spacing.small) {
-                        if vpRebuilding { ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center) }
-                        Button("Rebuild WhisperKit voiceprint") {
-                            rebuildWhisperKit()
-                        }
-                        .disabled(vpRebuilding || vpReenrolling)
-                        .font(Theme.Typography.caption)
-                    }
-                    Text("Generate a WhisperKit voiceprint from the retained clip.")
-                        .font(Theme.Typography.captionSecondary)
-                        .foregroundStyle(.secondary)
-                }
                 if canReenrollFluidAudio {
                     HStack(spacing: Theme.Spacing.small) {
                         if vpReenrolling { ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .center) }
                         Button("Re-enroll FluidAudio voiceprint") {
                             reenrollFluidAudio()
                         }
-                        .disabled(vpRebuilding || vpReenrolling)
+                        .disabled(vpReenrolling)
                         .font(Theme.Typography.caption)
                     }
                     Text("Regenerate FluidAudio vectors from the retained clip (use after a model upgrade).")
@@ -734,34 +707,6 @@ struct PersonEditorView: View {
     }
 
     // MARK: - Voiceprint rebuild/re-enroll
-
-    /// Rebuild a WhisperKit (pyannote) voiceprint from the retained clip for this person.
-    /// Uses the same SpeakerKitDiarizer path as the People tab rebuild-from-clips flow,
-    /// scoped to the single voiceprint that has the clip.
-    private func rebuildWhisperKit() {
-        guard let clipVP = person.voiceprints.first(where: { $0.audioSample != nil }),
-              let samples = voiceprintStore.clipSamples(clipVP.id) else {
-            vpActionStatus = "No retained clip to rebuild from."
-            return
-        }
-        vpRebuilding = true
-        vpActionStatus = "Rebuilding WhisperKit voiceprint from clip..."
-        Task {
-            let diarizer = SpeakerKitDiarizer()
-            defer { Task { await diarizer.unload() } }
-            guard let centroid = await diarizer.embedding(forClip: samples) else {
-                vpRebuilding = false
-                vpActionStatus = "Rebuild failed -- clip too short or low quality."
-                return
-            }
-            _ = voiceprintStore.enroll(name: clipVP.name,
-                                       embedding: centroid,
-                                       model: VoiceprintStore.speakerKitEmbeddingModel)
-            vpRebuilding = false
-            vpActionStatus = "WhisperKit voiceprint rebuilt."
-            AppLog.log("PersonEditorView: rebuilt WhisperKit voiceprint for \(clipVP.name)", category: "people")
-        }
-    }
 
     /// Re-enroll a FluidAudio voiceprint from the retained clip. Handles both the
     /// "stale model" recovery case and a standard re-embed after a FluidAudio upgrade.

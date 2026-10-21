@@ -9,7 +9,7 @@ struct Person: Identifiable {
     let displayName: String       // canonical name shown in UI
     let contact: Contact?         // nil when voiceprint-only
     let voiceprints: [Voiceprint] // empty when contact-only
-    var enrolledEngines: Set<String>  // e.g. {"FluidAudio", "WhisperKit"}
+    var enrolledEngines: Set<String>  // e.g. {"FluidAudio"}
     var anchorID: UUID?           // voiceprints.first?.id; the durable identity anchor
 }
 
@@ -17,8 +17,7 @@ struct Person: Identifiable {
 /// Returns nil for unknown/legacy models.
 func engineLabel(for embeddingModel: String) -> String? {
     switch embeddingModel {
-    case "wespeaker_v2": return "FluidAudio / SpeechAnalyzer"
-    case "pyannote_v3":  return "WhisperKit"
+    case "wespeaker_v2": return "FluidAudio"
     default:             return nil
     }
 }

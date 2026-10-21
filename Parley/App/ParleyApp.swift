@@ -14,7 +14,6 @@ struct ParleyApp: App {
             MainWindowView()
                 .environmentObject(recording)
                 .environmentObject(settings)
-                .environmentObject(recording.models)
                 .environmentObject(recording.vault)
                 .environmentObject(recording.store)
         }
@@ -39,7 +38,6 @@ struct ParleyApp: App {
             SettingsView()
                 .environmentObject(recording)
                 .environmentObject(settings)
-                .environmentObject(recording.models)
                 .environmentObject(recording.vault)
                 .environmentObject(recording.callDetector)
         }

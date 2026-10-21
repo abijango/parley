@@ -90,7 +90,6 @@ final class OfflineQueueTests: XCTestCase {
         m.offlineAttempts = 1
         m.transcriptPath = "/tmp/x.md"
         m.presentReviewWhenDone = true
-        m.transcriptionEngine = .fluidAudio
         let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
         let back = try dec.decode(SessionManifest.self, from: try enc.encode(m))
@@ -98,7 +97,6 @@ final class OfflineQueueTests: XCTestCase {
         XCTAssertEqual(back.offlineAttempts, 1)
         XCTAssertEqual(back.transcriptPath, "/tmp/x.md")
         XCTAssertEqual(back.presentReviewWhenDone, true)
-        XCTAssertEqual(back.transcriptionEngine, .fluidAudio)
     }
 
     func testCancelledOfflineStatusRoundTrips() throws {
@@ -127,42 +125,18 @@ final class OfflineQueueTests: XCTestCase {
         XCTAssertNil(m.offlineStatus)
         XCTAssertNil(m.transcriptPath)
         XCTAssertNil(m.presentReviewWhenDone)
-        XCTAssertNil(m.transcriptionEngine)
     }
 
-    func testStoredEngineBeatsLiveFallback() {
-        XCTAssertEqual(OfflineEngineBinding.kind(stored: .fluidAudio, fallback: .whisperKit), .fluidAudio)
-        XCTAssertEqual(OfflineEngineBinding.kind(stored: nil, fallback: .speechAnalyzer), .speechAnalyzer)
-    }
-
-    func testJobFromManifestKeepsStoredEngine() {
-        var m = SessionManifest(
-            id: "2026-06-08-160310", title: "T", attendees: "", filing: "",
-            model: "m", computeMode: "c", startedAt: Date(timeIntervalSince1970: 1),
-            lastHeartbeat: Date(timeIntervalSince1970: 2), status: .finalized,
-            startedByDetection: false, callBundleID: nil, callDisplayName: nil,
-            manualNotes: "", audioTracks: [])
-        m.transcriptPath = "/tmp/x.md"
-        m.transcriptionEngine = .fluidAudio
-        let job = OfflineJob(dir: URL(fileURLWithPath: "/tmp/sess"), manifest: m,
-                             autoSummarize: false, fallbackEngine: .whisperKit,
-                             fallbackAsrProfile: .parakeetV3)
-        XCTAssertEqual(job?.engine, .fluidAudio)
-    }
-
-    func testJobFromLegacyManifestUsesFallbackEngine() {
-        var m = SessionManifest(
-            id: "2026-06-08-160310", title: "T", attendees: "", filing: "",
-            model: "m", computeMode: "c", startedAt: Date(timeIntervalSince1970: 1),
-            lastHeartbeat: Date(timeIntervalSince1970: 2), status: .finalized,
-            startedByDetection: false, callBundleID: nil, callDisplayName: nil,
-            manualNotes: "", audioTracks: [])
-        m.transcriptPath = "/tmp/x.md"
-        let job = OfflineJob(dir: URL(fileURLWithPath: "/tmp/sess"), manifest: m,
-                             autoSummarize: false, fallbackEngine: .speechAnalyzer,
-                             fallbackAsrProfile: .parakeetV3)
-        XCTAssertEqual(job?.engine, .speechAnalyzer)
-        XCTAssertEqual(job?.fluidAsrProfile, .parakeetV3)
+    func testLegacyManifestWithRetiredEngineFieldStillDecodes() throws {
+        let legacy = """
+        {"id":"s","title":"T","attendees":"","filing":"","model":"m","computeMode":"c",
+         "startedAt":"2026-06-08T10:00:00Z","lastHeartbeat":"2026-06-08T10:05:00Z",
+         "status":"finalized","startedByDetection":false,"manualNotes":"","audioTracks":[],
+         "transcriptionEngine":"whisperKit","transcriptPath":"/tmp/x.md"}
+        """
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let m = try dec.decode(SessionManifest.self, from: Data(legacy.utf8))
+        XCTAssertEqual(m.transcriptPath, "/tmp/x.md")
     }
 
     func testStoredAsrProfileBeatsLiveFallback() {
@@ -178,10 +152,9 @@ final class OfflineQueueTests: XCTestCase {
             startedByDetection: false, callBundleID: nil, callDisplayName: nil,
             manualNotes: "", audioTracks: [])
         m.transcriptPath = "/tmp/x.md"
-        m.transcriptionEngine = .fluidAudio
         m.fluidAsrProfile = .parakeetV2
         let job = OfflineJob(dir: URL(fileURLWithPath: "/tmp/sess"), manifest: m,
-                             autoSummarize: false, fallbackEngine: .whisperKit,
+                             autoSummarize: false,
                              fallbackAsrProfile: .parakeetUnified)
         XCTAssertEqual(job?.fluidAsrProfile, .parakeetV2)
     }
@@ -210,7 +183,7 @@ final class OfflineQueueTests: XCTestCase {
         let service = try String(
             contentsOf: root.appendingPathComponent("Parley/Recording/OfflineProcessingService.swift"),
             encoding: .utf8)
-        XCTAssertTrue(service.contains("fluid.asrProfile = job.fluidAsrProfile"))
+        XCTAssertTrue(service.contains("asrProfile = job.fluidAsrProfile"))
         XCTAssertFalse(fluid.contains("settings.parakeetVersion == .v2"))
         XCTAssertTrue(fluid.contains("asrProfile ?? FluidAsrBinding.profile"))
     }
@@ -273,13 +246,12 @@ final class OfflineQueueTests: XCTestCase {
             return OfflineJob(
                 sessionDir: session, transcriptURL: transcript, title: id,
                 attendees: "", filing: "", presentReviewWhenDone: false,
-                autoSummarize: false, engine: .fluidAudio, fluidAsrProfile: .parakeetUnified)
+                autoSummarize: false, fluidAsrProfile: .parakeetUnified)
         }
 
         let summary = SummaryService(store: TranscriptStore())
         let voiceprints = VoiceprintStore(fileURL: root.appendingPathComponent("voiceprints.json"))
         let service = OfflineProcessingService(
-            models: ModelManager(),
             voiceprints: voiceprints,
             store: TranscriptStore(),
             vault: VaultDirectory(peopleStore: PeopleStore(database: .openTemporary())),

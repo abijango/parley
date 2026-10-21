@@ -25,9 +25,7 @@ struct OfflineJob: Identifiable, Equatable {
     /// Whether to chain a Claude summary once speakers are resolved (snapshot of the
     /// auto-summarize setting at enqueue time).
     let autoSummarize: Bool
-    /// Engine that produced this session. Never read live Settings at run time.
-    let engine: TranscriptionEngineKind
-    /// Fluid ASR stack for this session. Ignored when `engine` is not FluidAudio.
+    /// Fluid ASR stack for this session.
     let fluidAsrProfile: FluidAsrProfile
     /// When this pass may start. Snapshotted at enqueue.
     let schedule: TranscriptionTiming
@@ -44,7 +42,6 @@ struct OfflineJob: Identifiable, Equatable {
     /// Build a job from a session directory + the saved manifest, resolving the standard
     /// archive paths. Returns nil if the manifest carries no transcript link to rewrite.
     init?(dir: URL, manifest: SessionManifest, autoSummarize: Bool,
-          fallbackEngine: TranscriptionEngineKind,
           fallbackAsrProfile: FluidAsrProfile) {
         guard let path = manifest.transcriptPath, !path.isEmpty else { return nil }
         self.sessionDir = dir
@@ -57,7 +54,6 @@ struct OfflineJob: Identifiable, Equatable {
         self.filing = manifest.filing
         self.presentReviewWhenDone = manifest.presentReviewWhenDone ?? false
         self.autoSummarize = autoSummarize
-        self.engine = OfflineEngineBinding.kind(stored: manifest.transcriptionEngine, fallback: fallbackEngine)
         self.fluidAsrProfile = FluidAsrBinding.profile(
             stored: manifest.fluidAsrProfile, fallback: fallbackAsrProfile)
         self.schedule = manifest.transcriptionTiming ?? .afterCall
@@ -71,7 +67,7 @@ struct OfflineJob: Identifiable, Equatable {
     /// known without re-reading the manifest.
     init(sessionDir: URL, transcriptURL: URL, title: String, attendees: String,
          filing: String, presentReviewWhenDone: Bool, autoSummarize: Bool,
-         engine: TranscriptionEngineKind, fluidAsrProfile: FluidAsrProfile,
+         fluidAsrProfile: FluidAsrProfile,
          schedule: TranscriptionTiming = .afterCall, windowStartHour: Int = 22,
          windowEndHour: Int = 7, forced: Bool = false, accurateBatch: Bool = false) {
         self.sessionDir = sessionDir
@@ -84,18 +80,11 @@ struct OfflineJob: Identifiable, Equatable {
         self.filing = filing
         self.presentReviewWhenDone = presentReviewWhenDone
         self.autoSummarize = autoSummarize
-        self.engine = engine
         self.fluidAsrProfile = fluidAsrProfile
         self.schedule = schedule
         self.windowStartHour = windowStartHour
         self.windowEndHour = windowEndHour
         self.forced = forced
         self.accurateBatch = accurateBatch
-    }
-}
-
-enum OfflineEngineBinding {
-    static func kind(stored: TranscriptionEngineKind?, fallback: TranscriptionEngineKind) -> TranscriptionEngineKind {
-        stored ?? fallback
     }
 }

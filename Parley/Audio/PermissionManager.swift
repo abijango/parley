@@ -2,11 +2,9 @@ import Foundation
 import AVFoundation
 import AppKit
 import ApplicationServices
-import Speech
 
-/// Microphone and speech-recognition permission helpers. The system-audio (tap)
-/// permission has no pre-check API — it prompts on first tap creation — so only
-/// the mic is handled proactively here alongside Speech recognition.
+/// Microphone permission helpers. The system-audio (tap) permission has no
+/// pre-check API — it prompts on first tap creation.
 enum PermissionManager {
     static func microphoneAuthorized() -> Bool {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
@@ -40,39 +38,6 @@ enum PermissionManager {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
     }
 
-    static func speechRecognitionAuthorized() -> Bool {
-        SFSpeechRecognizer.authorizationStatus() == .authorized
-    }
-
-    static func speechRecognitionDenied() -> Bool {
-        switch SFSpeechRecognizer.authorizationStatus() {
-        case .denied, .restricted: return true
-        default: return false
-        }
-    }
-
-    /// Requests Speech-framework access (shared by SpeechAnalyzer and legacy APIs).
-    @MainActor
-    static func requestSpeechRecognition() async -> Bool {
-        switch SFSpeechRecognizer.authorizationStatus() {
-        case .authorized:
-            return true
-        case .notDetermined:
-            return await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { status in
-                    continuation.resume(returning: status == .authorized)
-                }
-            }
-        default:
-            return false
-        }
-    }
-
-    /// Opens System Settings → Privacy & Security → Speech Recognition.
-    static func openSpeechRecognitionSettings() {
-        open("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
-    }
-
     /// Opens System Settings → Privacy & Security. The system-audio-capture
     /// permission (`NSAudioCaptureUsageDescription`, macOS 14.4+) has no stable
     /// dedicated deep-link anchor, so we land on the Privacy root where the user
@@ -90,22 +55,15 @@ enum PermissionManager {
 
     // MARK: Accessibility (meeting-metadata discovery)
 
-    /// Accessibility (AX) trust — used to read meeting titles/rosters from
-    /// conferencing apps. Unlike the mic, AX has NO async request API: the OS
-    /// never prompts on use; the user must flip the toggle in System Settings.
     static func accessibilityAuthorized() -> Bool {
         AXIsProcessTrusted()
     }
 
-    /// Shows the one-time system dialog that offers to open System Settings →
-    /// Accessibility (the closest thing AX has to a permission prompt).
     static func promptForAccessibility() {
-        // The value of `kAXTrustedCheckOptionPrompt`, a C global Swift 6 treats as mutable.
         let opts = ["AXTrustedCheckOptionPrompt": true]
         _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
     }
 
-    /// Opens System Settings → Privacy & Security → Accessibility.
     static func openAccessibilitySettings() {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }

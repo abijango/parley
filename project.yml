@@ -14,14 +14,6 @@ options:
   groupSortPosition: top
 
 packages:
-  # Argmax OSS SDK: provides BOTH WhisperKit (ASR) and SpeakerKit (diarization +
-  # speaker embeddings) as products of one package. The per-speaker embedding API
-  # (DiarizationResult.speakerCentroidEmbeddings / nearestSpeakerCentroid) is only
-  # on main (not the v1.0.0 tag), so we pin a validated main commit. NOTE: this
-  # upgrades WhisperKit from the old 0.18.x line to the 1.0 API.
-  ArgmaxOSS:
-    url: https://github.com/argmaxinc/argmax-oss-swift.git
-    revision: 94cf6b120cf9dde32d9dea01acc326e77371302c
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui.git
     from: "2.4.0"           # SwiftUI GitHub-flavored markdown renderer
@@ -44,10 +36,6 @@ targets:
         type: folder
         buildPhase: resources
     dependencies:
-      - package: ArgmaxOSS
-        product: WhisperKit
-      - package: ArgmaxOSS
-        product: SpeakerKit
       - package: MarkdownUI
       - package: FluidAudio
     info:
@@ -58,7 +46,6 @@ targets:
         LSMinimumSystemVersion: "26.0"
         NSMicrophoneUsageDescription: "Records your microphone so meetings can be transcribed locally."
         NSAudioCaptureUsageDescription: "Captures system and app audio so the other side of meetings can be transcribed locally."
-        NSSpeechRecognitionUsageDescription: "Transcribes meeting audio on device using Apple's Speech framework."
         NSHumanReadableCopyright: ""
         ATSApplicationFontsPath: "Fonts"   # registers bundled Geist faces at launch (Resources/Fonts)
     entitlements:

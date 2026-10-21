@@ -41,7 +41,6 @@ final class OfflineProcessingService: ObservableObject {
     private var preemptRequested = false
     private var windowTimer: Timer?
 
-    private let models: ModelManager
     private let voiceprints: VoiceprintStore
     private let store: TranscriptStore
     private let vault: VaultDirectory
@@ -61,9 +60,8 @@ final class OfflineProcessingService: ObservableObject {
 
     private static let maxAttempts = 3
 
-    init(models: ModelManager, voiceprints: VoiceprintStore,
+    init(voiceprints: VoiceprintStore,
          store: TranscriptStore, vault: VaultDirectory, summaryService: SummaryService) {
-        self.models = models
         self.voiceprints = voiceprints
         self.store = store
         self.vault = vault
@@ -111,7 +109,6 @@ final class OfflineProcessingService: ObservableObject {
                                       windowEnd: job.windowEndHour,
                                       batchMode: job.accurateBatch,
                                       asrProfile: job.fluidAsrProfile, in: job.sessionDir)
-        SessionStore.setTranscriptionEngine(job.engine, in: job.sessionDir)
         if job.forced { SessionStore.setOfflineForced(true, in: job.sessionDir) }
         let held = SessionStore.isOfflineHeld(job.sessionDir)
         jobs[job.id] = Self.uiState(for: job, held: held, now: Date())
@@ -130,7 +127,6 @@ final class OfflineProcessingService: ObservableObject {
     func enqueuePendingFromDisk() {
         for (dir, m) in SessionStore.pendingOfflineSessions() {
             guard let job = OfflineJob(dir: dir, manifest: m, autoSummarize: settings.autoRunClaude,
-                                       fallbackEngine: settings.transcriptionEngine,
                                        fallbackAsrProfile: FluidAsrBinding.profile(from: settings)) else { continue }
             enqueue(job)
         }
@@ -337,7 +333,7 @@ final class OfflineProcessingService: ObservableObject {
         if !speakers.isEmpty {
             let centroids = eng.centroidsByID()
             var cache = SpeakerCache(
-                embeddingModelID: eng.embeddingModelId,
+                embeddingModelID: VoiceprintStore.embeddingModel,
                 mixedCafName: job.mixedURL.lastPathComponent,
                 speakers: speakers.map { s in
                     SpeakerCache.Speaker(id: s.id, resolvedName: s.resolvedName, guessedName: nil,
@@ -539,34 +535,18 @@ final class OfflineProcessingService: ObservableObject {
 
     private func makeOfflineEngine(for job: OfflineJob,
                                    archives: ResolvedArchives,
-                                   onIdentified: @escaping (String) -> Void) -> SpeakerCapableEngine {
-        let eng: SpeakerCapableEngine
-        switch job.engine {
-        case .whisperKit:
-            eng = WhisperKitSpeakerKitEngine(models: models, settings: settings, voiceprints: voiceprints,
-                                             identificationThreshold: settings.identificationThreshold)
-        case .fluidAudio:
-            let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
-                                         identificationThreshold: settings.identificationThreshold)
-            fluid.sessionAttendees = job.attendees
-            fluid.sessionMeetingTitle = job.title
-            fluid.asrProfile = job.fluidAsrProfile
-            eng = fluid
-        case .speechAnalyzer:
-            eng = SpeechAnalyzerEngine(settings: settings, voiceprints: voiceprints,
-                                       identificationThreshold: settings.identificationThreshold)
-        }
+                                   onIdentified: @escaping (String) -> Void) -> FluidAudioEngine {
+        let eng = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
+                                   identificationThreshold: settings.identificationThreshold)
         eng.onSpeakerIdentified = onIdentified
+        eng.sessionAttendees = job.attendees
+        eng.sessionMeetingTitle = job.title
+        eng.asrProfile = job.fluidAsrProfile
         eng.mixedAudioURL = archives.mixed
         eng.micArchiveURL = archives.mic
         eng.systemArchiveURL = archives.system
-        eng.forceOfflineAsr = true   // no live streaming units for a saved call
-        if let fluid = eng as? FluidAudioEngine {
-            fluid.preferNeuralEngine = job.accurateBatch
-        }
-        // Clustering hint from user-accepted meeting metadata: tell the diarizer how many
-        // distinct speakers to expect so it doesn't merge two people into one cluster or
-        // split one person across several. Only meaningful with ≥ 2 attendees.
+        eng.forceOfflineAsr = true
+        eng.preferNeuralEngine = job.accurateBatch
         let attendeeCount = TranscriptWriter.splitAttendees(job.attendees).count
         eng.speakerCountHint = attendeeCount >= 2 ? attendeeCount : nil
         return eng

@@ -15,67 +15,6 @@ enum CaptureMode: String, CaseIterable, Identifiable {
     }
 }
 
-/// WhisperKit model — Turbo (large-v3) only. Raw value is the WhisperKit repo name.
-enum WhisperModel: String, CaseIterable, Identifiable {
-    case turbo = "openai_whisper-large-v3-v20240930_turbo_632MB"
-
-    var id: String { rawValue }
-    var label: String { "Turbo (large-v3)" }
-    var displayName: String { "Turbo" }
-    static let engineName = "Whisper"
-    var approxSize: String { "~0.6 GB" }
-    var blurb: String {
-        "Near-large-v3 accuracy, small & fast. Used for both live and final transcription."
-    }
-
-    /// Maps legacy stored model ids (small/medium/large) to turbo.
-    static func resolved(from raw: String) -> WhisperModel {
-        if let m = WhisperModel(rawValue: raw) { return m }
-        return .turbo
-    }
-}
-
-/// Where Whisper runs. GPU avoids the Neural Engine's per-build/per-pressure
-/// "specialization" compile (which can take minutes), at a small inference cost.
-enum ComputeMode: String, CaseIterable, Identifiable {
-    case gpu = "GPU"
-    case neuralEngine = "Neural Engine"
-    var id: String { rawValue }
-    var blurb: String {
-        switch self {
-        case .gpu: return "No specialization wait, loads fast every time. Slightly slower per token. Best when memory is tight or you rebuild often."
-        case .neuralEngine: return "Fastest inference once warm, lower power — but compiles for the ANE (~minutes) on first load / after a rebuild or memory pressure."
-        }
-    }
-}
-
-/// Which transcription engine a recording uses. Chosen in Settings; applies to
-/// the NEXT recording session (no mid-session switch).
-enum TranscriptionEngineKind: String, Codable, CaseIterable, Identifiable {
-    case whisperKit      // WhisperKit ASR + SpeakerKit diarization + speaker ID
-    case fluidAudio      // native FluidAudio stack — Parakeet ASR + diarization + speaker ID
-    case speechAnalyzer  // Apple SpeechAnalyzer ASR + FluidAudio diarization + speaker ID
-
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .whisperKit: return "WhisperKit + SpeakerKit"
-        case .fluidAudio: return "FluidAudio"
-        case .speechAnalyzer: return "SpeechAnalyzer + FluidAudio"
-        }
-    }
-    var blurb: String {
-        switch self {
-        case .whisperKit:
-            return "WhisperKit ASR for fast live text + SpeakerKit diarization & speaker ID applied at stop. Labels who spoke."
-        case .fluidAudio:
-            return "Native Parakeet ASR + on-device diarization & speaker identification. Labels who spoke."
-        case .speechAnalyzer:
-            return "Apple SpeechAnalyzer ASR + FluidAudio diarization & speaker ID. Best English accuracy on macOS 26; labels who spoke."
-        }
-    }
-}
-
 /// Parakeet ASR variant used by the FluidAudio engine. Default is v3.
 enum FluidParakeetVersion: String, CaseIterable, Identifiable {
     case v3   // Parakeet TDT 0.6b v3 — multilingual (default)
@@ -284,10 +223,6 @@ final class AppSettings: ObservableObject {
     private enum Key {
         // TODO(app-name): key prefix
         static let vaultPath = "parley.vaultPath"
-        static let model = "parley.model"
-        static let liveModel = "parley.liveModel"
-        static let speechLocale = "parley.speechLocale"
-        static let computeMode = "parley.computeMode"
         static let captureMode = "parley.captureMode"
         static let autoRunClaude = "parley.autoRunClaude"
         static let summaryBackend = "parley.summaryBackend"
@@ -320,7 +255,6 @@ final class AppSettings: ObservableObject {
         static let quietHoursEndHour = "parley.quietHoursEndHour"
         static let idleUnloadEnabled = "parley.idleUnloadEnabled"
         static let idleUnloadMinutes = "parley.idleUnloadMinutes"
-        static let transcriptionEngine = "parley.transcriptionEngine"
         static let parakeetVersion = "parley.parakeetVersion"
         static let liveStreamingTier = "parley.liveStreamingTier"
         static let liveStreamingLanguage = "parley.liveStreamingLanguage"
@@ -331,7 +265,6 @@ final class AppSettings: ObservableObject {
         static let boostAttendeeNames = "parley.boostAttendeeNames"
         static let fluidGpuEncoder = "parley.fluidGpuEncoder"
         static let minSpeechToIdentify = "parley.minSpeechToIdentify"
-        static let liveTranscriptEnabled = "parley.liveTranscriptEnabled"
         static let batchMode = "parley.batchMode"
         static let transcriptionTiming = "parley.transcriptionTiming"
         static let transcriptionWindowStartHour = "parley.transcriptionWindowStartHour"
@@ -345,8 +278,7 @@ final class AppSettings: ObservableObject {
     }
 
     // MARK: Memory
-    /// Unload the Whisper model after this many idle minutes to free RAM; it
-    /// reloads on the next call/record (fast on GPU, with capture-first catch-up).
+    /// Unload FluidAudio streaming models after this many idle minutes to free RAM.
     @AppStorage(Key.idleUnloadEnabled) var idleUnloadEnabled: Bool = true
     @AppStorage(Key.idleUnloadMinutes) var idleUnloadMinutes: Double = 5
 
@@ -439,13 +371,6 @@ final class AppSettings: ObservableObject {
 
     @AppStorage(Key.vaultPath) var vaultPath: String = "\(NSHomeDirectory())/ObsidianVault"
     @AppStorage(Key.captureMode) var captureModeRaw: String = CaptureMode.systemWide.rawValue
-    @AppStorage(Key.model) var modelRaw: String = WhisperModel.turbo.rawValue
-    /// Legacy key — always resolves to turbo (same as `model`).
-    @AppStorage(Key.liveModel) var liveModelRaw: String = WhisperModel.turbo.rawValue
-    @AppStorage(Key.computeMode) var computeModeRaw: String = ComputeMode.gpu.rawValue
-    // Default engine: WhisperKit + SpeakerKit (kept after the A/B). FluidAudio remains
-    // selectable as a secondary option. Only affects fresh installs / unset stores.
-    @AppStorage(Key.transcriptionEngine) var transcriptionEngineRaw: String = TranscriptionEngineKind.whisperKit.rawValue
     @AppStorage(Key.parakeetVersion) var parakeetVersionRaw: String = FluidParakeetVersion.v3.rawValue
     /// FluidAudio live streaming ASR: chunk-size tier (ms) + language hint. 560 ms
     /// is the lowest-latency multilingual tier; "auto" uses the full-vocab model
@@ -478,11 +403,6 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.fluidGpuEncoder) var fluidGpuEncoder: Bool = false
     /// Seconds of clean, quality-gated speech before a voice is auto-identified/named.
     @AppStorage(Key.minSpeechToIdentify) var minSpeechToIdentify: Double = 5
-    /// WhisperKit + SpeakerKit only: show a live (streaming) transcript while recording.
-    /// Off (default) = offline-only — capture audio silently and produce the full,
-    /// speaker-attributed transcript in one pass at stop. The offline pass is fast and
-    /// accurate, so live text is opt-in; turning it off removes all live-decode load.
-    @AppStorage(Key.liveTranscriptEnabled) var liveTranscriptEnabled: Bool = false
     /// Record audio only and transcribe on FluidAudio's batch model, including
     /// while the next call is recording. Off keeps the live engine and pauses
     /// the offline queue for the duration of a recording.
@@ -497,9 +417,6 @@ final class AppSettings: ObservableObject {
         get { TranscriptionTiming(rawValue: transcriptionTimingRaw) ?? .afterCall }
         set { transcriptionTimingRaw = newValue.rawValue }
     }
-    /// BCP-47 locale for SpeechAnalyzer (e.g. en-US). Validated against
-    /// `SpeechTranscriber.supportedLocales` at record time.
-    @AppStorage(Key.speechLocale) var speechLocale: String = Locale.current.identifier(.bcp47)
     /// Auto-summarize: after a recording's speakers are assigned, fire the background
     /// summary automatically (result is staged for review in History). Default on.
     /// Key name is historical (`autoRunClaude`); applies to whichever `summaryBackend` is set.
@@ -552,29 +469,6 @@ final class AppSettings: ObservableObject {
     var captureMode: CaptureMode {
         get { CaptureMode(rawValue: captureModeRaw) ?? .systemWide }
         set { captureModeRaw = newValue.rawValue }
-    }
-
-    /// Whisper Turbo model (live and final).
-    var model: WhisperModel {
-        get { WhisperModel.resolved(from: modelRaw) }
-        set { modelRaw = newValue.rawValue }
-    }
-
-    /// Same as `model` — kept for call-site compatibility.
-    var liveModel: WhisperModel {
-        get { WhisperModel.resolved(from: liveModelRaw) }
-        set { liveModelRaw = newValue.rawValue }
-    }
-
-    var computeMode: ComputeMode {
-        get { ComputeMode(rawValue: computeModeRaw) ?? .gpu }
-        set { computeModeRaw = newValue.rawValue }
-    }
-
-    /// Transcription engine for the next recording session.
-    var transcriptionEngine: TranscriptionEngineKind {
-        get { TranscriptionEngineKind(rawValue: transcriptionEngineRaw) ?? .whisperKit }
-        set { transcriptionEngineRaw = newValue.rawValue }
     }
 
     /// Parakeet ASR variant for the FluidAudio engine.

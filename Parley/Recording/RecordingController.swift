@@ -147,9 +147,7 @@ final class RecordingController: ObservableObject {
     /// file — the URL is unchanged on a rewrite, so it wouldn't reload otherwise.
     @Published private(set) var transcriptRevision = 0
 
-    let models = ModelManager()
     let fluidModels = FluidModelManager()
-    let speechAssets = SpeechAssetManager()
     let voiceprints = VoiceprintStore()
     let vault = VaultDirectory()
     let store = TranscriptStore()
@@ -158,7 +156,7 @@ final class RecordingController: ObservableObject {
     /// Background offline pass (ASR + speaker detect + compaction) for finalized
     /// recordings — serialized and idle-gated so it never competes with live recording.
     private(set) lazy var offlineService = OfflineProcessingService(
-        models: models, voiceprints: voiceprints, store: store, vault: vault, summaryService: summaryService)
+        voiceprints: voiceprints, store: store, vault: vault, summaryService: summaryService)
     /// Merge-service: combines drop/rejoin recording legs into a single note (C1 stitch / C2 re-pass).
     lazy var mergeService = MergeService(store: store, vault: vault, offline: offlineService)
     let callDetector = CallDetector()
@@ -200,10 +198,7 @@ final class RecordingController: ObservableObject {
     /// may be auto-stopped on call end; user-started recordings are not).
     private var startedByDetection = false
 
-    // Transcription — the active engine (WhisperKit or FluidAudio), chosen per
-    // session from settings. Owns the pipelines/service/merger (or its native
-    // equivalents) and reports the merged timeline back via `onSegmentsChanged`.
-    private var engine: TranscriptionEngine?
+    private var engine: FluidAudioEngine?
 
     var isRecording: Bool { live.isRecording }
 
@@ -217,51 +212,29 @@ final class RecordingController: ObservableObject {
     private static func offlineBinding(
         batchMode: Bool,
         language: String,
-        storedEngine: TranscriptionEngineKind?,
         storedProfile: FluidAsrProfile?,
-        fallbackEngine: TranscriptionEngineKind,
         fallbackProfile: FluidAsrProfile
-    ) -> (engine: TranscriptionEngineKind, profile: FluidAsrProfile, accurate: Bool) {
+    ) -> (profile: FluidAsrProfile, accurate: Bool) {
         if batchMode {
-            return (.fluidAudio, BatchModePolicy.pinnedProfile(stored: storedProfile, language: language), true)
+            return (BatchModePolicy.pinnedProfile(stored: storedProfile, language: language), true)
         }
-        return (
-            storedEngine ?? fallbackEngine,
-            FluidAsrBinding.profile(stored: storedProfile, fallback: fallbackProfile),
-            false)
+        return (FluidAsrBinding.profile(stored: storedProfile, fallback: fallbackProfile), false)
     }
 
-    private func makeEngine() -> TranscriptionEngine {
-        let engine: TranscriptionEngine
-        switch settings.transcriptionEngine {
-        case .whisperKit:
-            // WhisperKit ASR + SpeakerKit diarization + voiceprints.
-            let wsk = WhisperKitSpeakerKitEngine(models: models, settings: settings, voiceprints: voiceprints,
-                                                 identificationThreshold: settings.identificationThreshold)
-            wsk.onSpeakerIdentified = { [weak self] name in self?.admission.addRecognized(name) }
-            engine = wsk
-        case .fluidAudio:
-            let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
-                                         identificationThreshold: settings.identificationThreshold,
-                                         modelManager: fluidModels)
-            fluid.sessionAttendees = meeting.attendees
-            fluid.sessionMeetingTitle = meeting.meetingTitle
-            // Auto-add a recognized person to the attendees list (above threshold).
-            fluid.onSpeakerIdentified = { [weak self] name in self?.admission.addRecognized(name) }
-            engine = fluid
-        case .speechAnalyzer:
-            let speech = SpeechAnalyzerEngine(settings: settings, voiceprints: voiceprints,
-                                              identificationThreshold: settings.identificationThreshold)
-            speech.onSpeakerIdentified = { [weak self] name in self?.admission.addRecognized(name) }
-            engine = speech
-        }
-        wireSegmentPublishing(to: engine)
-        return engine
+    private func makeEngine() -> FluidAudioEngine {
+        let fluid = FluidAudioEngine(settings: settings, voiceprints: voiceprints,
+                                     identificationThreshold: settings.identificationThreshold,
+                                     modelManager: fluidModels)
+        fluid.sessionAttendees = meeting.attendees
+        fluid.sessionMeetingTitle = meeting.meetingTitle
+        fluid.onSpeakerIdentified = { [weak self] name in self?.admission.addRecognized(name) }
+        wireSegmentPublishing(to: fluid)
+        return fluid
     }
 
     /// Throttle UI publishes and journal only newly-confirmed segments (skip the
     /// per-tick `confirmedTimeline()` rebuild).
-    private func wireSegmentPublishing(to engine: TranscriptionEngine) {
+    private func wireSegmentPublishing(to engine: FluidAudioEngine) {
         segmentRelay?.reset()
         segmentRelay = SegmentPublishRelay { [weak self] merged in
             guard let self else { return }
@@ -362,17 +335,13 @@ final class RecordingController: ObservableObject {
 
         // Prefer the review's own engine (History "Detect speakers" runs on a transient
         // engine via the offline queue); fall back to the live engine for any other path.
-        guard let eng = pendingSpeakerReview?.engine ?? (engine as? SpeakerCapableEngine) else { return }
-        let model = eng.embeddingModelId
+        guard let eng = pendingSpeakerReview?.engine ?? engine else { return }
+        let model = VoiceprintStore.embeddingModel
         if let centroid = eng.setSpeakerName(speakerId, as: name) {
             let vpId = enrollVoiceprint(name: name, centroid: centroid, model: model)
-            // Retain a short enrollment clip for re-enrollment, AND cross-enroll the
-            // OTHER engine's space from that same clip so naming a person once makes
-            // them recognisable on both engines (off-main, best-effort).
             Task { [weak self] in
                 guard let self, let audio = await eng.repAudioSample(for: speakerId) else { return }
                 self.voiceprints.attachAudioSample(to: vpId, samples: audio)
-                await self.crossEnroll(name: name, clip: audio, activeModel: model)
             }
         } else {
             AppLog.log("Named speaker \(speakerId) as \(name) but not enough clean audio — labeled, not enrolled", category: "record")
@@ -452,34 +421,6 @@ final class RecordingController: ObservableObject {
     }
 
 
-    private func crossEnroll(name: String, clip: [Float], activeModel: String) async {
-        let targetModel = activeModel == VoiceprintStore.embeddingModel
-            ? VoiceprintStore.speakerKitEmbeddingModel    // active FluidAudio → add pyannote
-            : VoiceprintStore.embeddingModel              // active WhisperKit → add wespeaker
-        guard !voiceprints.voiceprints.contains(where: {
-            $0.name.caseInsensitiveCompare(name) == .orderedSame && $0.embeddingModel == targetModel
-        }) else { return }
-
-        let embedding: [Float]?
-        switch targetModel {
-        case VoiceprintStore.embeddingModel:
-            embedding = await FluidAudioEngine.embeddings(
-                forClip: clip, clusterThreshold: Float(settings.diarizationThreshold))?.first
-        case VoiceprintStore.speakerKitEmbeddingModel:
-            let diarizer = SpeakerKitDiarizer()
-            embedding = await diarizer.embedding(forClip: clip)
-            await diarizer.unload()
-        default:
-            embedding = nil
-        }
-        guard let embedding, !embedding.isEmpty else {
-            AppLog.log("Cross-enroll \(name) → \(targetModel): no embedding derived", category: "record")
-            return
-        }
-        _ = voiceprints.enroll(name: name, embedding: embedding, model: targetModel)
-        AppLog.log("Cross-enrolled \(name) into \(targetModel) space from rep clip", category: "record")
-    }
-
     /// Append a name to the comma-separated attendees list if not already present.
     private func addAttendeeIfAbsent(_ rawName: String) {
         admission.addRecognized(rawName)
@@ -525,18 +466,13 @@ final class RecordingController: ObservableObject {
         guard !didWarmup else { return }
         didWarmup = true
         if AppInfo.isXCTestHost {
-            ModelManager.markCompiledLoadFinished()
+            FluidModelManager.markCompiledLoadFinished()
             return
         }
-        let engineDesc: String = switch settings.transcriptionEngine {
-        case .fluidAudio: "FluidAudio (Parakeet \(settings.parakeetVersion.rawValue))"
-        case .speechAnalyzer: "SpeechAnalyzer + FluidAudio (\(settings.speechLocale))"
-        case .whisperKit: "WhisperKit (\(settings.model.rawValue))"
-        }
-        AppLog.log("Launch warmup — engine=\(engineDesc), \(MemoryGuard.snapshot()), logs at \(AppLog.fileURL.path)", category: "app")
+        AppLog.log("Launch warmup — FluidAudio (Parakeet \(settings.parakeetVersion.rawValue)), \(MemoryGuard.snapshot()), logs at \(AppLog.fileURL.path)", category: "app")
         VaultMigration.runIfNeeded(vault: settings.vaultURL)
         SystemAudioCapture.cleanupLeakedAggregates()    // destroy any aggregate device a crash left behind
-        ModelManager.recoverFromCrashedLoadIfNeeded()   // self-heal a corrupt compiled-model cache
+        FluidModelManager.recoverFromCrashedLoadIfNeeded()
         wireBackgroundQueues()    // offline + summary services gate on idle, host reviews
         preloadModel()
         scheduleIdleUnload()   // if nothing happens for a while, free the model's RAM
@@ -779,21 +715,9 @@ final class RecordingController: ObservableObject {
         callDetector.start()
     }
 
-    /// Loads (and on first run downloads) the model in the background so the
-    /// first Start is instant instead of paying cold-start latency at record time.
-    /// WhisperKit and FluidAudio both `prepare` into a shared holder. SpeechAnalyzer
-    /// only needs locale assets on disk plus Fluid diarization presence.
     func preloadModel() {
         guard !settings.batchMode else { return }
-        switch settings.transcriptionEngine {
-        case .whisperKit:
-            Task { _ = await models.prepare(settings.model) }
-        case .fluidAudio:
-            Task { _ = await fluidModels.prepare() }
-        case .speechAnalyzer:
-            speechAssets.refreshPresence(for: settings.speechLocale)
-            fluidModels.refreshPresence()
-        }
+        Task { _ = await fluidModels.prepare() }
     }
 
     // MARK: Start / stop
@@ -841,14 +765,6 @@ final class RecordingController: ObservableObject {
             return
         }
         micDenied = false
-
-        if !sessionBatchMode && settings.transcriptionEngine == .speechAnalyzer {
-            guard await PermissionManager.requestSpeechRecognition() else {
-                live.state = .error("Speech recognition access denied. Enable it in System Settings → Privacy & Security → Speech Recognition.")
-                startedByDetection = false
-                return
-            }
-        }
 
         // Capture-first: start capturing immediately and load the model in
         // PARALLEL (transcription catches up when it's ready) so a detected call
@@ -900,13 +816,6 @@ final class RecordingController: ObservableObject {
         }
         micDenied = false
 
-        if !sessionBatchMode && settings.transcriptionEngine == .speechAnalyzer {
-            guard await PermissionManager.requestSpeechRecognition() else {
-                live.state = .error("Speech recognition access denied. Enable it in System Settings → Privacy & Security → Speech Recognition.")
-                return
-            }
-        }
-
         let dir = session.dir
         sessionDirectory = dir
         let partialURL = dir.appendingPathComponent("transcript.partial.md")
@@ -952,7 +861,7 @@ final class RecordingController: ObservableObject {
             micCapture = mic
             systemCapture = system
             AppLog.log(
-                "Capture started (model loads in parallel) — capture=\(settings.captureMode.rawValue), mic=\(live.micInputMode.rawValue), model=\(settings.model.rawValue), offset=\(Int(startOffset))s",
+                "Capture started (model loads in parallel) — capture=\(settings.captureMode.rawValue), mic=\(live.micInputMode.rawValue), offset=\(Int(startOffset))s",
                 category: "record"
             )
         } catch {
@@ -975,7 +884,7 @@ final class RecordingController: ObservableObject {
         // engine loads its model in the background and holds audio until ready.
         // Speaker-capable engines build a clean mixed file from the archived tracks at
         // stop (for the offline diarization + play-sample + retained clips).
-        if let eng = engine as? SpeakerCapableEngine {
+        if let eng = engine {
             eng.mixedAudioURL = sessionDir.appendingPathComponent("mixed.caf")
             eng.micArchiveURL = micArchive
             eng.systemArchiveURL = systemArchive
@@ -1187,7 +1096,7 @@ final class RecordingController: ObservableObject {
         // redirect this session's offline job — the root cause of the data-loss bug.
         let sessionDir = sessionDirectory
         let sessionManifest = manifest
-        let isSpeakerEngine = engine is SpeakerCapableEngine
+        let isSpeakerEngine = engine != nil
         let autoSummarize = settings.autoRunClaude
         let batchMode = sessionBatchMode
         let batchLanguage = settings.liveStreamingLanguage
@@ -1260,9 +1169,7 @@ final class RecordingController: ObservableObject {
                    let dir = sessionDir {
                     let binding = Self.offlineBinding(
                         batchMode: batchMode, language: batchLanguage,
-                        storedEngine: sessionManifest?.transcriptionEngine,
                         storedProfile: sessionManifest?.fluidAsrProfile,
-                        fallbackEngine: settings.transcriptionEngine,
                         fallbackProfile: FluidAsrBinding.profile(from: settings))
                     SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: result.url.path,
                                                   presentReviewWhenDone: false, in: dir)
@@ -1274,7 +1181,7 @@ final class RecordingController: ObservableObject {
                             sessionDir: dir, transcriptURL: result.url, title: title,
                             attendees: attendees, filing: destination,
                             presentReviewWhenDone: false, autoSummarize: autoSummarize,
-                            engine: binding.engine, fluidAsrProfile: binding.profile,
+                            fluidAsrProfile: binding.profile,
                             schedule: batchTiming, windowStartHour: batchWindowStart,
                             windowEndHour: batchWindowEnd, accurateBatch: binding.accurate))
                     } else {
@@ -1308,7 +1215,7 @@ final class RecordingController: ObservableObject {
         let mixedCaf: URL?
         /// The transient engine that produced these speakers (used to enroll voiceprints
         /// + relabel on naming). Optional only for resilience; the queue always sets it.
-        let engine: SpeakerCapableEngine?
+        let engine: FluidAudioEngine?
         /// The transcript file to (guardedly) rewrite when the review is finished.
         let transcriptURL: URL?
         let title: String
@@ -1328,7 +1235,7 @@ final class RecordingController: ObservableObject {
         var assignments: [String: String] = [:]
 
         init(speakers: [CallSpeakerSummary], mixedCaf: URL?,
-             engine: SpeakerCapableEngine? = nil, transcriptURL: URL? = nil,
+             engine: FluidAudioEngine? = nil, transcriptURL: URL? = nil,
              title: String = "", filing: String = "", attendees: String = "", autoSummarize: Bool = false,
              cache: SpeakerCache? = nil, sessionDir: URL? = nil,
              assignments: [String: String] = [:]) {
@@ -1403,14 +1310,12 @@ final class RecordingController: ObservableObject {
             lastResult = "The audio for this recording was deleted — can't detect speakers."; return
         }
         let stored = SessionStore.read(dir)
-        let engine = stored?.transcriptionEngine ?? settings.transcriptionEngine
         SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: transcript.path,
                                       presentReviewWhenDone: true, in: dir)
         offlineService.enqueue(OfflineJob(
             sessionDir: dir, transcriptURL: transcript, title: title,
             attendees: attendees, filing: filing,
             presentReviewWhenDone: true, autoSummarize: false,
-            engine: engine,
             fluidAsrProfile: FluidAsrBinding.resolved(
                 stored: stored?.fluidAsrProfile, settings: settings)))
         armIdleDrain()
@@ -1982,8 +1887,6 @@ final class RecordingController: ObservableObject {
     private func scheduleIdleUnload() {
         idleUnloadTimer?.invalidate(); idleUnloadTimer = nil
         guard settings.idleUnloadEnabled else { return }
-        let engine = settings.transcriptionEngine
-        guard engine == .whisperKit || engine == .fluidAudio else { return }
         let interval = max(60, settings.idleUnloadMinutes * 60)
         idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -1994,12 +1897,7 @@ final class RecordingController: ObservableObject {
                     return
                 }
                 AppLog.log("Idle \(Int(interval / 60))min — unloading model to free memory", category: "model")
-                Task {
-                    if self.settings.transcriptionEngine == .whisperKit {
-                        await self.models.unload()
-                    }
-                    await self.fluidModels.unload()
-                }
+                Task { await self.fluidModels.unload() }
             }
         }
     }
@@ -2017,21 +1915,19 @@ final class RecordingController: ObservableObject {
         var m = SessionManifest(
             id: dir.lastPathComponent,
             title: meeting.meetingTitle, attendees: meeting.attendees, filing: meeting.destinationPath,
-            model: settings.model.rawValue, computeMode: settings.computeMode.rawValue,
+            model: settings.parakeetVersion.rawValue, computeMode: "fluid",
             startedAt: recordingStartDate ?? Date(), lastHeartbeat: Date(),
             status: .active, startedByDetection: startedByDetection,
             callBundleID: call?.bundleID, callDisplayName: call?.displayName,
             manualNotes: meeting.manualNotes, attachments: meeting.attachments.isEmpty ? nil : meeting.attachments,
             audioTracks: ["mic.caf", "system.caf"])
         if sessionBatchMode {
-            m.transcriptionEngine = .fluidAudio
             m.fluidAsrProfile = BatchModePolicy.profile(language: settings.liveStreamingLanguage)
             m.batchMode = true
             m.transcriptionTiming = settings.transcriptionTiming
             m.transcriptionWindowStartHour = settings.transcriptionWindowStartHour
             m.transcriptionWindowEndHour = settings.transcriptionWindowEndHour
         } else {
-            m.transcriptionEngine = settings.transcriptionEngine
             m.fluidAsrProfile = FluidAsrBinding.profile(from: settings)
         }
         manifest = m
@@ -2172,19 +2068,15 @@ final class RecordingController: ObservableObject {
         }
     }
 
-    /// Finalize a crashed session into a transcript without resuming. Fast path
-    /// rebuilds from the journal; `reTranscribe` re-runs the (crash-safe) audio
-    /// through the model for the complete text. Idempotent: marks the manifest
-    /// finalized so it won't reappear.
-    func recover(_ session: RecoverableSession, reTranscribe: Bool) {
+    /// Finalize a crashed session into a transcript without resuming. Rebuilds from
+    /// the segment journal. Idempotent: marks the manifest finalized so it won't reappear.
+    func recover(_ session: RecoverableSession) {
         guard live.state == .idle || isErrorState else { return }
         let dir = session.dir
         let m = session.manifest
         Task {
-            isRecovering = reTranscribe
-            let segs = reTranscribe
-                ? await reTranscribeSession(dir: dir)
-                : SegmentJournal.read(dir.appendingPathComponent("segments.jsonl"))
+            isRecovering = true
+            let segs = SegmentJournal.read(dir.appendingPathComponent("segments.jsonl"))
             do {
                 let result = try TranscriptWriter.write(
                     title: m.title, date: m.startedAt, attendees: m.attendees,
@@ -2196,7 +2088,7 @@ final class RecordingController: ObservableObject {
                 SessionStore.write(finalized, to: dir)
                 lastTranscriptURL = result.url
                 lastResult = "Recovered “\(m.title)” → \(result.url.lastPathComponent)"
-                AppLog.log("Recovered \(session.id) (\(reTranscribe ? "re-transcribed" : "from journal"); \(segs.count) segments) → \(result.url.lastPathComponent)", category: "record")
+                AppLog.log("Recovered \(session.id) (from journal; \(segs.count) segments) → \(result.url.lastPathComponent)", category: "record")
                 store.refresh()
                 // Give the recovered session the same background offline pass a normal
                 // stop gets (speaker detect + attributed rewrite), when next idle.
@@ -2205,9 +2097,7 @@ final class RecordingController: ObservableObject {
                     let binding = Self.offlineBinding(
                         batchMode: batch,
                         language: settings.liveStreamingLanguage,
-                        storedEngine: m.transcriptionEngine,
                         storedProfile: m.fluidAsrProfile,
-                        fallbackEngine: settings.transcriptionEngine,
                         fallbackProfile: FluidAsrBinding.profile(from: settings))
                     SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: result.url.path,
                                                   presentReviewWhenDone: false, in: dir)
@@ -2215,7 +2105,7 @@ final class RecordingController: ObservableObject {
                         sessionDir: dir, transcriptURL: result.url, title: m.title,
                         attendees: m.attendees, filing: m.filing,
                         presentReviewWhenDone: false, autoSummarize: settings.autoRunClaude,
-                        engine: binding.engine, fluidAsrProfile: binding.profile,
+                        fluidAsrProfile: binding.profile,
                         schedule: BatchModePolicy.pinnedSchedule(
                             batchMode: batch, stored: m.transcriptionTiming, live: .afterCall),
                         windowStartHour: m.transcriptionWindowStartHour ?? settings.transcriptionWindowStartHour,
@@ -2274,21 +2164,6 @@ final class RecordingController: ObservableObject {
         try? FileManager.default.removeItem(at: session.dir)
         pendingRecoveries.removeAll { $0.id == session.id }
         AppLog.log("Discarded crashed session \(session.id)", category: "record")
-    }
-
-    /// Re-transcribe every audio segment of a session through the model, mapping
-    /// mic*→Me and system*→Remote with cumulative time offsets.
-    private func reTranscribeSession(dir: URL) async -> [Segment] {
-        guard let kit = await models.prepare(settings.model) else { return [] }
-        var out: [Segment] = []
-        for (track, base) in [(SpeakerTrack.me, "mic"), (SpeakerTrack.remote, "system")] {
-            var offset: TimeInterval = 0
-            for url in audioSegmentURLs(in: dir, base: base) {
-                out += await OfflineTranscriber.transcribe(caf: url, track: track, using: kit, startElapsed: offset)
-                offset += SessionStore.audioDuration(url)
-            }
-        }
-        return out.sorted { $0.start < $1.start }
     }
 
     /// All audio segment files for a track base name, in capture order

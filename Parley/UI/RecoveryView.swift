@@ -83,15 +83,14 @@ struct RecoveryView: View {
                 .disabled(busy)
                 .help("Continue recording into this same note.")
 
-                Menu {
-                    Button("Recover from saved text (instant)") { recording.recover(s, reTranscribe: false) }
-                    Button("Re-transcribe full audio (complete)") { recording.recover(s, reTranscribe: true) }
+                Button {
+                    recording.recover(s)
                 } label: {
                     Label("Recover", systemImage: "doc.text")
                 }
                 .fixedSize()
                 .disabled(busy)
-                .help("Finalize as a transcript without resuming.")
+                .help("Finalize as a transcript from the saved segment journal without resuming.")
 
                 Spacer()
 

@@ -29,7 +29,7 @@ struct CallSpeakerSummary: Identifiable, Equatable {
 /// catches up — so rapid back-and-forth within one ASR chunk no longer collapses
 /// onto a single speaker. Phases 4–5 layer voiceprint identification on top.
 @MainActor
-final class FluidAudioEngine: TranscriptionEngine {
+final class FluidAudioEngine {
     private let settings: AppSettings
     /// Saved voiceprints for cross-session auto-identification (nil = no matching).
     private let voiceprints: VoiceprintStore?
@@ -122,6 +122,8 @@ final class FluidAudioEngine: TranscriptionEngine {
     var onSegmentsChanged: (([Segment]) -> Void)?
     /// Fired when a speaker is auto-identified to a saved voiceprint (the person's name).
     var onSpeakerIdentified: ((String) -> Void)?
+    /// Optional progress callback for the offline pass UI; FluidAudio does not emit stage events.
+    var onOfflineProgress: (@Sendable (EngineProgressEvent) -> Void)?
 
     init(settings: AppSettings, voiceprints: VoiceprintStore? = nil,
          identificationThreshold: Double = 0.6, modelManager: FluidModelManager? = nil) {
@@ -618,47 +620,6 @@ final class FluidAudioEngine: TranscriptionEngine {
         return embs.isEmpty ? nil : embs
     }
 
-    /// Whole-recording diarization for engines that pair FluidAudio speaker labeling
-    /// with a non-FluidAudio ASR backend (e.g. SpeechAnalyzer).
-    struct DiarizationSnapshot: Sendable {
-        let turns: [DiarizationAttribution.Turn]
-        let centroids: [String: [Float]]
-        let gatedSeconds: [String: TimeInterval]
-    }
-
-    nonisolated static func diarizeRecording(samples: [Float],
-                                             clusterThreshold: Float,
-                                             minQuality: Float = 0.4) async -> DiarizationSnapshot? {
-        guard let diar = try? await makeDiarizer(clusterThreshold: clusterThreshold),
-              let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000) else { return nil }
-        let segs = result.segments
-        guard !segs.isEmpty else { return nil }
-        var turns: [DiarizationAttribution.Turn] = []
-        var emb: [String: [[Float]]] = [:]
-        var secs: [String: TimeInterval] = [:]
-        for s in segs {
-            let id = s.speakerId
-            let start = TimeInterval(s.startTimeSeconds)
-            let end = TimeInterval(s.endTimeSeconds)
-            turns.append(.init(speakerId: id, start: start, end: end))
-            if s.qualityScore >= minQuality, !s.embedding.isEmpty {
-                emb[id, default: []].append(s.embedding)
-                secs[id, default: 0] += max(0, end - start)
-            }
-        }
-        var cents: [String: [Float]] = [:]
-        for (id, vecs) in emb where !vecs.isEmpty {
-            cents[id] = normalize(meanVector(vecs))
-        }
-        return DiarizationSnapshot(turns: turns.sorted { $0.start < $1.start },
-                                   centroids: cents, gatedSeconds: secs)
-    }
-
-    /// Incremental/live diarization helper for SpeechAnalyzerEngine.
-    nonisolated static func makeDiarizerForExport(clusterThreshold: Float) async throws -> DiarizerManager {
-        try await makeDiarizer(clusterThreshold: clusterThreshold)
-    }
-
     /// Merge newly-diarized turns, accumulate quality-gated per-speaker embeddings,
     /// auto-identify against saved voiceprints, then re-derive segments.
     private func ingestDiarization(_ segs: [(speakerId: String, start: TimeInterval, end: TimeInterval, embedding: [Float], quality: Float)]) {
@@ -853,6 +814,11 @@ final class FluidAudioEngine: TranscriptionEngine {
         AppLog.log("FluidAudio final diarization: \(n) speaker(s)\(repassed ? " + offline ASR re-pass" : "") in \(String(format: "%.1fs", elapsed))", category: "record")
         return FinalizeSummary(speakerCount: n, relabeled: true,
                                note: "Offline Speaker Detection complete · \(n) speaker\(n == 1 ? "" : "s")\(repassNote) · \(String(format: "%.1fs", elapsed))")
+    }
+
+    func runOfflinePass() async -> OfflinePassSummary {
+        let s = await finalizeDiarization()
+        return OfflinePassSummary(speakerCount: s.speakerCount, relabeled: s.relabeled, note: s.note)
     }
 
     private struct Seg: Sendable { let id: String; let start: TimeInterval; let end: TimeInterval; let emb: [Float]; let q: Float }

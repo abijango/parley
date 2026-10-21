@@ -8,7 +8,6 @@ import AppKit
 struct SettingsView: View {
     @EnvironmentObject private var recording: RecordingController
     @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var models: ModelManager
     @EnvironmentObject private var vault: VaultDirectory
     @EnvironmentObject private var detector: CallDetector
     @StateObject private var recordings = RecordingsStore()
@@ -17,7 +16,6 @@ struct SettingsView: View {
     @State private var purgeDays = 14
     @State private var pendingBulkDelete: [RecordingFolder]?
     @State private var storageStatus: String?
-    @State private var pendingModelDelete: WhisperModel?
     /// AX trust has no change notification — refreshed when the Detection tab appears.
     @State private var axTrusted = PermissionManager.accessibilityAuthorized()
     @StateObject private var groundTruthEval = SummaryGroundTruthEval()
@@ -779,8 +777,7 @@ struct SettingsView: View {
 
     // MARK: Transcription
 
-    /// Cross-session speaker-recognition sliders, shared by both speaker-capable
-    /// engines (FluidAudio + WhisperKit + SpeakerKit).
+    /// Cross-session speaker-recognition sliders for FluidAudio.
     @ViewBuilder private var speakerRecognitionSection: some View {
         Section("Speaker recognition") {
             HStack(spacing: Theme.Spacing.medium) {
@@ -827,79 +824,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Engine") {
-                Picker("Engine", selection: Binding(
-                    get: { settings.transcriptionEngine }, set: { settings.transcriptionEngine = $0 }
-                )) {
-                    ForEach(TranscriptionEngineKind.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
-                .disabled(recording.isRecording)   // engine applies to the next session, never mid-recording
-                helpText(settings.transcriptionEngine.blurb)
-            }
-
-            if settings.transcriptionEngine == .whisperKit {
-                Section("Live transcript") {
-                    SettingRow("Show a live transcript while recording",
-                               description: "Off = offline-only: capture audio silently and generate the full, speaker-attributed transcript in one fast pass when you stop. On also streams text during the call — at the cost of continuous live decoding.") {
-                        Toggle("", isOn: $settings.liveTranscriptEnabled).labelsHidden()
-                            .disabled(recording.isRecording)
-                    }
-                }
-
-                Section("Model") {
-                    SettingRow("Whisper Turbo (large-v3)",
-                               description: WhisperModel.turbo.blurb) {
-                        modelStateControl(for: .turbo)
-                    }
-                    Text("Stored in \(AppPaths.modelsDirectory.path)")
-                        .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-                        .lineLimit(1).truncationMode(.middle)
-                    if recording.isRecording {
-                        Text("Model can't be changed while recording.")
-                            .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-                    }
-                }
-
-                Section("Compute") {
-                    Picker("Compute", selection: Binding(
-                        get: { settings.computeMode }, set: { settings.computeMode = $0 }
-                    )) {
-                        ForEach(ComputeMode.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden()
-                    .disabled(recording.isRecording)
-                    helpText(settings.computeMode.blurb)
-                    if let advisory = models.memoryAdvisory {
-                        StatusBanner(.warning, advisory, symbol: "memorychip")
-                    }
-                }
-
-                Section("Memory") {
-                    SettingRow("Unload the model when idle",
-                               description: "Reclaims the model's memory after inactivity. It reloads on the next detected call or recording — capture starts immediately and the transcript catches up once the model finishes loading.") {
-                        Toggle("", isOn: $settings.idleUnloadEnabled).labelsHidden()
-                    }
-                    if settings.idleUnloadEnabled {
-                        SettingRow("Unload after idle") {
-                            Stepper("\(Int(settings.idleUnloadMinutes)) min",
-                                    value: $settings.idleUnloadMinutes, in: 1...60, step: 1)
-                                .fixedSize()
-                        }
-                    }
-                    SettingRow("Reset model cache",
-                               description: "If transcription crashes on load, the compiled-model cache may be corrupt. Resetting rebuilds it on the next load.") {
-                        Button("Reset") {
-                            ModelManager.clearCompiledCache()
-                            Task { _ = await models.prepare(settings.model) }
-                        }
-                        .disabled(recording.isRecording)
-                    }
-                }
-
-                speakerRecognitionSection
-            } else if settings.transcriptionEngine == .fluidAudio {
-                FluidModelSection(models: recording.fluidModels, settings: settings, isRecording: recording.isRecording)
+            FluidModelSection(models: recording.fluidModels, settings: settings, isRecording: recording.isRecording)
 
                 Section("English optimization") {
                     Toggle("Parakeet Unified (English)", isOn: $settings.useParakeetUnified)
@@ -921,7 +846,7 @@ struct SettingsView: View {
                         Text(String(format: "%.2f", settings.diarizationThreshold))
                             .font(Theme.Typography.mono).foregroundStyle(.secondary)
                     }
-                    helpText("How readily two voice samples are treated as the same person during in-session clustering. Too high merges distinct speakers into one; too low fragments a single person's natural variation into several \"speakers\". ~0.6–0.7 suits most calls — only nudge it if you see one of those failure modes. Applies to both FluidAudio and WhisperKit + SpeakerKit on the next recording.")
+                    helpText("How readily two voice samples are treated as the same person during in-session clustering. Too high merges distinct speakers into one; too low fragments a single person's natural variation into several \"speakers\". ~0.6–0.7 suits most calls — only nudge it if you see one of those failure modes.")
                 }
 
                 speakerRecognitionSection
@@ -965,58 +890,30 @@ struct SettingsView: View {
                         .disabled(recording.isRecording)
                     helpText("Runs the multilingual TDT v3 conformer encoder on GPU during the offline re-pass (~8% faster, WER-neutral). Parakeet Unified manages placement internally.")
                 }
-            } else {
-                SpeechAnalyzerSettingsSection(
-                    speechAssets: recording.speechAssets,
-                    fluidModels: recording.fluidModels,
-                    settings: settings,
-                    isRecording: recording.isRecording)
-                speakerRecognitionSection
+
+            Section("Memory") {
+                SettingRow("Unload the model when idle",
+                           description: "Reclaims streaming model memory after inactivity. It reloads on the next detected call or recording — capture starts immediately and the transcript catches up once the model finishes loading.") {
+                    Toggle("", isOn: $settings.idleUnloadEnabled).labelsHidden()
+                }
+                if settings.idleUnloadEnabled {
+                    SettingRow("Unload after idle") {
+                        Stepper("\(Int(settings.idleUnloadMinutes)) min",
+                                value: $settings.idleUnloadMinutes, in: 1...60, step: 1)
+                            .fixedSize()
+                    }
+                }
+                SettingRow("Reset model cache",
+                           description: "If transcription crashes on load, the compiled-model cache may be corrupt. Resetting rebuilds it on the next load.") {
+                    Button("Reset") {
+                        FluidModelManager.clearCompiledCache()
+                        Task { _ = await recording.fluidModels.prepare() }
+                    }
+                    .disabled(recording.isRecording)
+                }
             }
         }
         .formStyle(.grouped)
-        .onAppear { models.refreshDownloadedModels() }
-        // Reload the model when the compute mode changes (forces a rebuild with
-        // the new compute units; GPU drops the ANE specialization wait).
-        .onChange(of: settings.computeModeRaw) {
-            guard !recording.isRecording else { return }
-            Task { _ = await models.prepare(settings.model) }
-        }
-        .confirmationDialog(
-            "Delete Whisper Turbo?",
-            isPresented: Binding(get: { pendingModelDelete != nil },
-                                 set: { if !$0 { pendingModelDelete = nil } }),
-            presenting: pendingModelDelete
-        ) { _ in
-            Button("Delete \(WhisperModel.turbo.approxSize)", role: .destructive) {
-                models.delete(.turbo); pendingModelDelete = nil
-            }
-            Button("Cancel", role: .cancel) { pendingModelDelete = nil }
-        } message: { _ in
-            Text("Frees \(WhisperModel.turbo.approxSize) from disk. Turbo re-downloads automatically the next time it's used.")
-        }
-    }
-
-    /// The affordance shown next to the Whisper Turbo row, by state.
-    /// downloading → progress + %, not downloaded → Download, downloaded → delete icon.
-    @ViewBuilder
-    private func modelStateControl(for model: WhisperModel) -> some View {
-        if let progress = models.downloadProgress[model.rawValue] {
-            HStack(spacing: Theme.Spacing.xSmall) {
-                ProgressView(value: progress).frame(width: 80)
-                Text("\(Int(progress * 100))%")
-                    .font(Theme.Typography.captionSecondary).monospacedDigit()
-            }
-        } else if !models.downloadedModels.contains(model.rawValue) {
-            Button("Download") { Task { await models.download(model) } }
-                .controlSize(.small)
-        } else {
-            Button(role: .destructive) { pendingModelDelete = model } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("Delete \(model.label) (\(model.approxSize)) from disk")
-        }
     }
 
     // MARK: Vault reconciliation
@@ -1226,91 +1123,6 @@ private struct CursorConnectionView: View {
     }
 }
 
-/// The Active-model section shown when the FluidAudio engine is selected: the
-/// SpeechAnalyzer engine settings: locale assets + FluidAudio diarization models.
-private struct SpeechAnalyzerSettingsSection: View {
-    @ObservedObject var speechAssets: SpeechAssetManager
-    @ObservedObject var fluidModels: FluidModelManager
-    @ObservedObject var settings: AppSettings
-    let isRecording: Bool
-
-    private static let localeOptions: [(id: String, label: String)] = [
-        ("en-US", "English (US)"), ("en-GB", "English (UK)"),
-        ("de-DE", "German"), ("fr-FR", "French"), ("es-ES", "Spanish"),
-        ("it-IT", "Italian"), ("pt-BR", "Portuguese (Brazil)"),
-        ("ja-JP", "Japanese"), ("zh-CN", "Chinese (Simplified)"),
-        ("ko-KR", "Korean"), ("nl-NL", "Dutch"), ("sv-SE", "Swedish"),
-    ]
-
-    var body: some View {
-        FluidModelSection(models: fluidModels, settings: settings, isRecording: isRecording)
-
-        Section("Speech language") {
-            Picker("Locale", selection: $settings.speechLocale) {
-                ForEach(Self.localeOptions, id: \.id) { opt in
-                    Text(opt.label).tag(opt.id)
-                }
-            }
-            .disabled(isRecording)
-            .onAppear { speechAssets.refreshPresence(for: settings.speechLocale) }
-            .onChange(of: settings.speechLocale) { speechAssets.refreshPresence(for: settings.speechLocale) }
-
-            HStack(alignment: .top, spacing: Theme.Spacing.medium) {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                    Text("SpeechAnalyzer (\(settings.speechLocale))")
-                        .font(Theme.Typography.controlLabel)
-                    Text("Apple on-device ASR. Language assets download from the system on first use.")
-                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
-                }
-                Spacer()
-                speechStatusControl
-            }
-        }
-
-        Section("Speaker separation") {
-            HStack(spacing: Theme.Spacing.medium) {
-                Slider(value: $settings.diarizationThreshold, in: 0.40...0.80, step: 0.05)
-                    .frame(maxWidth: 260)
-                    .disabled(isRecording)
-                Text(String(format: "%.2f", settings.diarizationThreshold))
-                    .font(Theme.Typography.mono).foregroundStyle(.secondary)
-            }
-            Text("FluidAudio diarization labels who spoke. ~0.6–0.7 suits most calls.")
-                .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    @ViewBuilder private var speechStatusControl: some View {
-        switch speechAssets.status {
-        case .unknown, .notInstalled:
-            Button("Download") {
-                speechAssets.download(localeIdentifier: settings.speechLocale)
-            }.disabled(isRecording)
-        case .downloading:
-            HStack(spacing: Theme.Spacing.small) {
-                ProgressView().controlSize(.small)
-                Text("Downloading…").font(Theme.Typography.caption).foregroundStyle(.secondary)
-            }
-        case .installed:
-            Label("Ready", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(Theme.Severity.success.color)
-                .font(Theme.Typography.secondary)
-        case .unsupported:
-            Text("Unsupported").font(Theme.Typography.caption).foregroundStyle(Theme.Severity.danger.color)
-        case .failed(let msg):
-            VStack(alignment: .trailing, spacing: Theme.Spacing.xxSmall) {
-                Button("Retry") { speechAssets.download(localeIdentifier: settings.speechLocale) }
-                    .disabled(isRecording)
-                Text(msg).font(Theme.Typography.captionSecondary)
-                    .foregroundStyle(Theme.Severity.danger.color).lineLimit(2)
-            }
-        }
-    }
-}
-
-/// Parakeet speech model with its download / ready state (replaces the Whisper
-/// model list, which doesn't apply to this engine).
 private struct FluidModelSection: View {
     @ObservedObject var models: FluidModelManager
     @ObservedObject var settings: AppSettings
@@ -1342,7 +1154,7 @@ private struct FluidModelSection: View {
             }
 
             if models.status == .downloaded {
-                Label("Active — used automatically while the engine is FluidAudio. Start a recording to use it.",
+                Label("Active — used automatically when you record. Start a recording to use it.",
                       systemImage: "checkmark.seal.fill")
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -202,7 +202,6 @@ struct RecordDetailView: View {
     @ObservedObject private var live = RecordingController.shared.live
     @ObservedObject private var meeting = RecordingController.shared.meeting
     @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var models: ModelManager
     @EnvironmentObject private var vault: VaultDirectory
     @ObservedObject private var summaryService = RecordingController.shared.summaryService
     @State private var apps: [CapturableApp] = []
@@ -338,11 +337,9 @@ struct RecordDetailView: View {
                     isRecording: recording.isRecording,
                     people: vault.people,
                     attendees: TranscriptWriter.splitAttendees(meeting.attendees),
-                    onNameSpeaker: (settings.transcriptionEngine == .fluidAudio
-                                    || settings.transcriptionEngine == .speechAnalyzer)
-                        ? { id, name in recording.nameSpeaker(id, as: name) } : nil,
-                    liveDisabled: settings.batchMode
-                        || (settings.transcriptionEngine == .whisperKit && !settings.liveTranscriptEnabled),
+                    onNameSpeaker: settings.batchMode
+                        ? nil : { id, name in recording.nameSpeaker(id, as: name) },
+                    liveDisabled: settings.batchMode,
                     hidesEmptyState: isPreRecordIdle
                 )
                 .overlay {
@@ -548,9 +545,6 @@ struct RecordDetailView: View {
                          actionLabel: "Open Settings", action: PermissionManager.openPrivacySettings)
         }
         MicSilenceBanner()
-        if let advisory = models.memoryAdvisory {
-            StatusBanner(.warning, advisory, symbol: "memorychip")
-        }
         // One-time nudge: meeting-detail suggestions are on but can't work
         // without the Accessibility permission (recording is unaffected).
         if settings.metadataDiscoveryEnabled, !axBannerDismissed, !axTrusted {
@@ -574,9 +568,7 @@ struct RecordDetailView: View {
         }
     }
 
-    /// Compact two-part model badge for the transport bar. For WhisperKit, the live
-    /// transcript uses the *live* model when enabled; only the final (at-stop) model
-    /// runs in offline-only mode. FluidAudio uses a single Parakeet model.
+    /// Compact model badge for the transport bar. FluidAudio uses one Parakeet model.
     private var audioModelBadge: some View {
         let info = audioModelBadgeInfo
         return HStack(spacing: Theme.Spacing.xxSmall) {
@@ -610,14 +602,7 @@ struct RecordDetailView: View {
                 : "Parakeet v3"
             return AudioModelBadgeInfo(engine: profileName, model: "Batch mode")
         }
-        switch settings.transcriptionEngine {
-        case .fluidAudio:
-            return AudioModelBadgeInfo(engine: nil, model: FluidAsrRouting.displayModelName(settings: settings))
-        case .speechAnalyzer:
-            return AudioModelBadgeInfo(engine: nil, model: "Apple Speech")
-        case .whisperKit:
-            return AudioModelBadgeInfo(engine: WhisperModel.engineName, model: WhisperModel.turbo.displayName)
-        }
+        return AudioModelBadgeInfo(engine: nil, model: FluidAsrRouting.displayModelName(settings: settings))
     }
 
     /// Audio capture controls, always visible directly under the record button:
@@ -866,10 +851,10 @@ struct RecordDetailView: View {
 
     /// Current model load/download progress, if any (drives `modelLoadingBar`).
     private var modelLoadingInfo: (stage: String, fraction: Double)? {
-        switch models.status {
-        case .downloading(let f): return ("Downloading… \(Int(f * 100))%", f)
-        case .loading(let stage, let fraction): return (stage, fraction)
-        case .idle, .ready, .failed: return nil
+        switch recording.fluidModels.status {
+        case .downloading: return ("Downloading…", 0.3)
+        case .loading: return ("Loading…", 0.6)
+        default: return nil
         }
     }
 
@@ -946,11 +931,11 @@ struct RecordDetailView: View {
             }
         }
         if case .error = live.state { return "Error" }
-        switch models.status {
+        switch recording.fluidModels.status {
         case .downloading: return "Downloading model…"
-        case .loading(let stage, _): return stage
+        case .loading: return "Loading model…"
         case .failed: return "Model error"
-        case .ready, .idle: return recording.appActivity.statusText
+        default: return recording.appActivity.statusText
         }
     }
 
@@ -969,10 +954,10 @@ struct RecordDetailView: View {
         case .settling: return .orange
         case .processing: return .orange
         case .idle:
-            switch models.status {
+            switch recording.fluidModels.status {
             case .downloading, .loading: return .orange
             case .failed: return .red
-            case .ready, .idle: return .secondary
+            default: return .secondary
             }
         }
     }

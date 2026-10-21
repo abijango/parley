@@ -7,11 +7,6 @@ enum AppPaths {
         return base.appendingPathComponent(AppInfo.supportDirectoryName, isDirectory: true)  // TODO(app-name)
     }
 
-    /// Where WhisperKit models are stored (explicit, not the HF default).
-    static var modelsDirectory: URL {
-        supportDirectory.appendingPathComponent("models", isDirectory: true)
-    }
-
     /// Raw audio archives, one folder per recording session.
     static var recordingsDirectory: URL {
         supportDirectory.appendingPathComponent("Recordings", isDirectory: true)

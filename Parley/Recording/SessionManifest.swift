@@ -66,10 +66,8 @@ struct SessionManifest: Codable, Equatable {
     var offlineHeld: Bool?
     /// User held this session's summary — stays queued but skipped while draining.
     var summaryHeld: Bool?
-    /// Engine that recorded this session. Offline passes must use this, not live Settings.
-    var transcriptionEngine: TranscriptionEngineKind?
-    /// Fluid ASR stack for this session (Unified / TDT v2 / TDT v3). Nil on non-Fluid
-    /// sessions and on manifests written before this field existed.
+    /// Fluid ASR stack for this session (Unified / TDT v2 / TDT v3). Nil on manifests
+    /// written before this field existed.
     var fluidAsrProfile: FluidAsrProfile?
     /// This session was recorded in Batch mode. The offline pass stays on FluidAudio.
     var batchMode: Bool? = nil
@@ -251,12 +249,6 @@ enum SessionStore {
 
     static func isSummaryHeld(_ dir: URL) -> Bool {
         read(dir)?.summaryHeld == true
-    }
-
-    static func setTranscriptionEngine(_ engine: TranscriptionEngineKind, in dir: URL) {
-        guard var m = read(dir) else { return }
-        m.transcriptionEngine = engine
-        write(m, to: dir)
     }
 
     /// Finalized sessions whose summary hasn't completed — `.queued`/`.paused`/`.running`

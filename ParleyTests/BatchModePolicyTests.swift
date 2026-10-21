@@ -80,16 +80,14 @@ final class BatchModePolicyTests: XCTestCase {
         manifest.transcriptionWindowEndHour = 7
         manifest.offlineForced = true
         manifest.fluidAsrProfile = .parakeetUnified
-        manifest.transcriptionEngine = .fluidAudio
         let job = try XCTUnwrap(OfflineJob(
             dir: root, manifest: manifest, autoSummarize: false,
-            fallbackEngine: .whisperKit, fallbackAsrProfile: .parakeetV3))
+            fallbackAsrProfile: .parakeetV3))
         XCTAssertTrue(job.accurateBatch)
         XCTAssertEqual(job.schedule, .window)
         XCTAssertEqual(job.windowStartHour, 22)
         XCTAssertEqual(job.windowEndHour, 7)
         XCTAssertTrue(job.forced)
-        XCTAssertEqual(job.engine, .fluidAudio)
         XCTAssertEqual(job.fluidAsrProfile, .parakeetUnified)
     }
 }

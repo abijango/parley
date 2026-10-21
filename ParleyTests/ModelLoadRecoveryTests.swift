@@ -9,23 +9,23 @@ final class ModelLoadRecoveryTests: XCTestCase {
 
     func testMarkInProgressIsIgnoredInTestHost() {
         let defaults = UserDefaults.standard
-        defaults.set(false, forKey: ModelManager.loadInProgressKey)
-        ModelManager.markCompiledLoadInProgress()
-        XCTAssertFalse(defaults.bool(forKey: ModelManager.loadInProgressKey))
+        defaults.set(false, forKey: FluidModelManager.loadInProgressKey)
+        FluidModelManager.markCompiledLoadInProgress()
+        XCTAssertFalse(defaults.bool(forKey: FluidModelManager.loadInProgressKey))
     }
 
     func testCrashedLoadRecoveryInTestsDropsSentinelWithoutWipingCache() throws {
         let defaults = UserDefaults.standard
-        defaults.set(true, forKey: ModelManager.loadInProgressKey)
-        let cache = try XCTUnwrap(ModelManager.compiledCacheURL())
+        defaults.set(true, forKey: FluidModelManager.loadInProgressKey)
+        let cache = try XCTUnwrap(FluidModelManager.compiledCacheURL())
         try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
         let marker = cache.appendingPathComponent("parley-xctest-keep")
         try Data("keep".utf8).write(to: marker)
         defer { try? FileManager.default.removeItem(at: marker) }
 
-        ModelManager.recoverFromCrashedLoadIfNeeded()
+        FluidModelManager.recoverFromCrashedLoadIfNeeded()
 
-        XCTAssertFalse(defaults.bool(forKey: ModelManager.loadInProgressKey))
+        XCTAssertFalse(defaults.bool(forKey: FluidModelManager.loadInProgressKey))
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
     }
 }

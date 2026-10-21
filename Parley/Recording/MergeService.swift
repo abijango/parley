@@ -232,8 +232,8 @@ final class MergeService {
             title: leg0.meta.title,
             attendees: allAttendees.joined(separator: ", "),
             filing: filing,
-            model: settings.model.rawValue,
-            computeMode: settings.computeMode.rawValue,
+            model: settings.parakeetVersion.rawValue,
+            computeMode: "fluid",
             startedAt: leg0.meta.date,
             lastHeartbeat: Date(),
             status: .finalized,
@@ -243,8 +243,6 @@ final class MergeService {
             manualNotes: "",
             audioTracks: ["mic.caf", "system.caf"]
         )
-        mergedManifest.transcriptionEngine = leg0Session.dir.flatMap { SessionStore.read($0)?.transcriptionEngine }
-            ?? settings.transcriptionEngine
         mergedManifest.fluidAsrProfile = leg0Session.dir.flatMap { SessionStore.read($0)?.fluidAsrProfile }
             ?? FluidAsrBinding.profile(from: settings)
         SessionStore.write(mergedManifest, to: mergedSessionDir)
@@ -302,7 +300,6 @@ final class MergeService {
             filing: filing,
             presentReviewWhenDone: false,
             autoSummarize: settings.autoRunClaude,
-            engine: mergedManifest.transcriptionEngine ?? settings.transcriptionEngine,
             fluidAsrProfile: FluidAsrBinding.resolved(
                 stored: mergedManifest.fluidAsrProfile, settings: settings)))
         offline.runNextIfIdle()

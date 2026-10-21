@@ -447,7 +447,6 @@ private struct PersonDetailView: View {
     private var engineStatusRow: some View {
         HStack(spacing: Theme.Spacing.medium) {
             engineStatus(label: "FluidAudio", enrolled: person.enrolledEngines.contains("FluidAudio"))
-            engineStatus(label: "WhisperKit", enrolled: person.enrolledEngines.contains("WhisperKit"))
             if person.voiceprints.isEmpty {
                 Text("Not enrolled")
                     .font(Theme.Typography.caption)
@@ -544,19 +543,13 @@ private struct PersonDetailView: View {
 
 // MARK: - EngineBadgeRow
 
-/// Small engine enrollment badges (FluidAudio / WhisperKit tick or cross).
-/// `compact` = icon-only; !compact = icon + label.
+/// Small FluidAudio enrollment badge. `compact` = icon-only; !compact = icon + label.
 struct EngineBadgeRow: View {
     let engines: Set<String>
     var compact: Bool = false
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.xSmall) {
-            badge(label: "FA", enrolled: engines.contains("FluidAudio"),
-                  help: "FluidAudio")
-            badge(label: "WK", enrolled: engines.contains("WhisperKit"),
-                  help: "WhisperKit")
-        }
+        badge(label: "FA", enrolled: engines.contains("FluidAudio"), help: "FluidAudio")
     }
 
     private func badge(label: String, enrolled: Bool, help: String) -> some View {
