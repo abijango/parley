@@ -48,6 +48,9 @@ struct MainWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 720, minHeight: 560)
+        .onChange(of: recording.historyFocusPath) {
+            if recording.historyFocusPath != nil { selection = .history }
+        }
         // Sidebar collapse toggle lives in the toolbar (in the title bar, by the
         // traffic lights) — the native placement, so it isn't floating in the column.
         .toolbar {
@@ -338,8 +341,8 @@ struct RecordDetailView: View {
                     onNameSpeaker: (settings.transcriptionEngine == .fluidAudio
                                     || settings.transcriptionEngine == .speechAnalyzer)
                         ? { id, name in recording.nameSpeaker(id, as: name) } : nil,
-                    liveDisabled: settings.transcriptionEngine == .whisperKit
-                        && !settings.liveTranscriptEnabled,
+                    liveDisabled: settings.batchMode
+                        || (settings.transcriptionEngine == .whisperKit && !settings.liveTranscriptEnabled),
                     hidesEmptyState: isPreRecordIdle
                 )
                 .overlay {
@@ -477,7 +480,7 @@ struct RecordDetailView: View {
     /// Informational empty state; Start/Stop is in `recordControlStrip` above.
     private var preRecordIdleMessage: some View {
         VStack(spacing: Theme.Spacing.large) {
-            Image(systemName: "text.bubble")
+            Image(systemName: settings.batchMode ? "waveform" : "text.bubble")
                 .font(.system(size: 30, weight: .medium))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(Theme.Palette.accent)
@@ -485,13 +488,16 @@ struct RecordDetailView: View {
                 .background(Theme.Palette.accent.opacity(Theme.Opacity.tintFill), in: Circle())
 
             VStack(spacing: Theme.Spacing.xSmall) {
-                Text("Ready to record")
+                Text(settings.batchMode ? "Batch mode" : "Ready to record")
                     .font(Theme.Typography.sectionHeader)
                     .foregroundStyle(.primary)
-                Text("Your live transcript will appear here as people speak.")
+                Text(settings.batchMode
+                     ? "Audio is saved as you record. The transcript is written after the call."
+                     : "Your live transcript will appear here as people speak.")
                     .font(Theme.Typography.secondary)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -598,6 +604,12 @@ struct RecordDetailView: View {
     }
 
     private var audioModelBadgeInfo: AudioModelBadgeInfo {
+        if settings.batchMode {
+            let profileName = BatchModePolicy.profile(language: settings.liveStreamingLanguage) == .parakeetUnified
+                ? "Parakeet Unified"
+                : "Parakeet v3"
+            return AudioModelBadgeInfo(engine: profileName, model: "Batch mode")
+        }
         switch settings.transcriptionEngine {
         case .fluidAudio:
             return AudioModelBadgeInfo(engine: nil, model: FluidAsrRouting.displayModelName(settings: settings))
@@ -1012,7 +1024,7 @@ private struct OfflinePassBar: View {
 
     var body: some View {
         Group {
-            if controller.isRecording, waitingCount > 0 {
+            if controller.isRecording, waitingCount > 0, !controller.sessionBatchMode {
                 HStack(spacing: Theme.Spacing.small) {
                     Image(systemName: "pause.circle")
                     Text("Speaker pass paused · \(waitingCount) waiting")
@@ -1040,7 +1052,7 @@ private struct OfflinePassBar: View {
                     .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
                     .background(.quaternary.opacity(Theme.Opacity.surface))
                 }
-            } else if waitingCount > 0, let remaining = controller.idleDrainRemaining {
+            } else if waitingCount > 0, !controller.sessionBatchMode, let remaining = controller.idleDrainRemaining {
                 HStack(spacing: Theme.Spacing.small) {
                     Image(systemName: "clock")
                     Text("Speaker pass in \(remaining)s")

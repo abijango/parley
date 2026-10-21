@@ -87,62 +87,30 @@ final class CallDetector: ObservableObject {
             AppLog.log("eval(\(source)) capturing=[\(desc)] active=\(activeCall?.bundleID ?? "none")", category: "detect")
         }
 
-        let candidate = bestCandidate(from: nonSelf)
-        let now = Date()
-
-        if let active = activeCall {
-            // active.bundleID is the *parent* app for helper-process capturers,
-            // so the bundle comparison must be prefix-aware too (the helper pid
-            // can change mid-call, e.g. Chromium renderer swaps).
-            let stillActive = nonSelf.contains { $0.pid == active.pid }
-                || nonSelf.contains {
-                    guard let bid = $0.bundleID?.lowercased() else { return false }
-                    return bid == active.bundleID || bid.hasPrefix(active.bundleID + ".")
-                }
-            if stillActive {
-                lastActiveSeen = now
-            } else if let last = lastActiveSeen, now.timeIntervalSince(last) >= settings.callEndGraceSeconds {
-                AppLog.log("CALL ENDED — \(active.displayName) [\(active.bundleID)] (mic released \(Int(now.timeIntervalSince(last)))s ago)", category: "detect")
-                activeCall = nil; pending = nil; pendingSince = nil
-                onCallEnd?(active)
-            }
-        } else if let cand = candidate {
-            if pending?.pid == cand.pid, let since = pendingSince {
-                if now.timeIntervalSince(since) >= startDebounce {
-                    AppLog.log("CALL STARTED — \(cand.displayName) [\(cand.bundleID)] known=\(cand.known)", category: "detect")
-                    activeCall = cand; lastActiveSeen = now; pending = nil; pendingSince = nil
-                    onCallStart?(cand)
-                }
-            } else {
-                pending = cand; pendingSince = now
-                AppLog.log("candidate seen — \(cand.displayName) [\(cand.bundleID)] known=\(cand.known); confirming…", category: "detect")
-            }
-        } else {
-            if pending != nil { pending = nil; pendingSince = nil }
+        var state = CallDetectionState(
+            active: activeCall, pending: pending, pendingSince: pendingSince, lastActiveSeen: lastActiveSeen)
+        let event = CallDetection.step(
+            &state,
+            capturers: nonSelf.map { CapturingProcess(pid: $0.pid, bundleID: $0.bundleID) },
+            now: Date(),
+            known: settings.conferencingBundleIDs,
+            grace: settings.callEndGraceSeconds,
+            startDebounce: startDebounce)
+        activeCall = state.active
+        pending = state.pending
+        pendingSince = state.pendingSince
+        lastActiveSeen = state.lastActiveSeen
+        guard let event else { return }
+        switch event {
+        case .candidate(let call):
+            AppLog.log("candidate seen — \(call.displayName) [\(call.bundleID)] known=\(call.known); confirming…", category: "detect")
+        case .started(let call):
+            AppLog.log("CALL STARTED — \(call.displayName) [\(call.bundleID)] known=\(call.known)", category: "detect")
+            onCallStart?(call)
+        case .ended(let call, let after):
+            AppLog.log("CALL ENDED — \(call.displayName) [\(call.bundleID)] (mic released \(Int(after))s ago)", category: "detect")
+            onCallEnd?(call)
         }
-    }
-
-    /// Prefer a known conferencing app; otherwise the first non-self capturer.
-    /// Browsers capture the mic from a *helper* process (`com.brave.Browser.helper`,
-    /// `com.google.Chrome.helper`, …), so a capturer counts as known when its
-    /// bundle id matches a known id exactly OR is a dotted child of one — and the
-    /// call is attributed to the parent app either way (display name, AX lookups).
-    /// Safari is the documented exception: WebKit captures as
-    /// `com.apple.WebKit.GPU`, which carries no Safari prefix to match.
-    private func bestCandidate(from caps: [AudioInputProcess]) -> DetectedCall? {
-        let known = settings.conferencingBundleIDs
-        for cap in caps {
-            guard let bid = cap.bundleID?.lowercased() else { continue }
-            if let parent = known.first(where: { bid == $0 || bid.hasPrefix($0 + ".") }) {
-                return DetectedCall(pid: cap.pid, bundleID: parent,
-                                    displayName: Self.displayName(parent), known: true)
-            }
-        }
-        if let any = caps.first(where: { $0.bundleID != nil }) {
-            return DetectedCall(pid: any.pid, bundleID: any.bundleID!.lowercased(),
-                                displayName: Self.displayName(any.bundleID!), known: false)
-        }
-        return nil
     }
 
     private func heartbeatIfDue(nonSelf: [AudioInputProcess]) {

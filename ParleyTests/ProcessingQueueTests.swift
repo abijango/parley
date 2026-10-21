@@ -63,6 +63,14 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertEqual(p.decide(trigger: .launchBacklog, alreadyQueuedOrPending: 9), .confirmBulk(count: 10))
     }
 
+    func testExplicitRetryLiftsRepeatedFailurePause() {
+        XCTAssertTrue(SummaryEnqueuePolicy.liftsRepeatedFailurePause(.userInitiated))
+        XCTAssertTrue(SummaryEnqueuePolicy.liftsRepeatedFailurePause(.speakerReviewCompleted))
+        XCTAssertFalse(SummaryEnqueuePolicy.liftsRepeatedFailurePause(.freshRecording))
+        XCTAssertFalse(SummaryEnqueuePolicy.liftsRepeatedFailurePause(.offlinePassCompleted))
+        XCTAssertFalse(SummaryEnqueuePolicy.liftsRepeatedFailurePause(.launchBacklog))
+    }
+
     // MARK: backoff
 
     func testBackoffIsMonotonicAndCapped() {

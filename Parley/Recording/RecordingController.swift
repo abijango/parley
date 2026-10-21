@@ -85,6 +85,10 @@ final class RecordingController: ObservableObject {
     /// History view (which used to silently discard it, forcing a full re-run).
     @Published var autoPresentSpeakerReview = false
 
+    /// Set when the user opens the "speakers ready" notification. History selects the row.
+    /// The speaker sheet stays closed.
+    @Published var historyFocusPath: String?
+
     // MARK: - Post-call batch enrichment (Slice B)
 
     /// Snapshot of attendees with no known company, offered to the user once
@@ -126,6 +130,8 @@ final class RecordingController: ObservableObject {
     private var clearToken = 0        // a new session invalidates a stale timer
     private var clearArmable = false  // true only after a live recording finishes
     private var idleDrainTimer: Timer?
+    /// Captured at record start so a mid-call settings flip does not change this session.
+    var sessionBatchMode = false
     private var queueDrainUnlocked = false
     private var cancellables = Set<AnyCancellable>()
 
@@ -212,6 +218,23 @@ final class RecordingController: ObservableObject {
     /// Build the transcription engine for this session from settings (gated to
     /// the next recording — no mid-session switch) and wire segment publishing +
     /// the confirmed-segment journal.
+    private static func offlineBinding(
+        batchMode: Bool,
+        language: String,
+        storedEngine: TranscriptionEngineKind?,
+        storedProfile: FluidAsrProfile?,
+        fallbackEngine: TranscriptionEngineKind,
+        fallbackProfile: FluidAsrProfile
+    ) -> (engine: TranscriptionEngineKind, profile: FluidAsrProfile, accurate: Bool) {
+        if batchMode {
+            return (.fluidAudio, BatchModePolicy.pinnedProfile(stored: storedProfile, language: language), true)
+        }
+        return (
+            storedEngine ?? fallbackEngine,
+            FluidAsrBinding.profile(stored: storedProfile, fallback: fallbackProfile),
+            false)
+    }
+
     private func makeEngine() -> TranscriptionEngine {
         let engine: TranscriptionEngine
         switch settings.transcriptionEngine {
@@ -552,14 +575,27 @@ final class RecordingController: ObservableObject {
             guard let self else { return false }
             return self.live.state == .idle && !self.isRecording
         }
-        let canDrain: () -> Bool = { [weak self] in
+        // Batch mode keeps the offline pass running through the next recording,
+        // including the gap while that recording is still preparing. Summaries
+        // still wait until the recording has ended and the idle drain has elapsed.
+        let offlineIdle: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            if self.sessionBatchMode { return true }
+            return self.live.state == .idle && !self.isRecording
+        }
+        let summaryCanDrain: () -> Bool = { [weak self] in
             guard let self else { return false }
             return self.queueDrainUnlocked || self.settings.idleDrainSeconds <= 0
         }
-        offlineService.isIdle = idle
+        let offlineCanDrain: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            if !BatchModePolicy.waitsForIdleDrain(batchMode: self.sessionBatchMode) { return true }
+            return summaryCanDrain()
+        }
+        offlineService.isIdle = offlineIdle
         summaryService.isIdle = idle
-        offlineService.canDrain = canDrain
-        summaryService.canDrain = canDrain
+        offlineService.canDrain = offlineCanDrain
+        summaryService.canDrain = summaryCanDrain
         let pump: () -> Void = { [weak self] in self?.pumpBackgroundQueues() }
         offlineService.requestPump = pump
         summaryService.requestPump = pump
@@ -567,10 +603,15 @@ final class RecordingController: ObservableObject {
         summaryService.onSessionAudioDeleted = { [weak self] dir in self?.offlineService.cancel(sessionDir: dir) }
     }
 
-    /// Start or restart the idle debounce before background queues may run.
+    /// Start or restart the idle debounce before summaries (and non-batch speaker
+    /// passes) may run. Batch transcription does not use this wait: it is pumped
+    /// here as soon as the audio has been queued.
     func armIdleDrain() {
+        if sessionBatchMode {
+            offlineService.runNextIfIdle()
+        }
         cancelIdleDrainTimerOnly()
-        guard live.state == .idle else { return }
+        guard live.state == .idle || (isRecording && sessionBatchMode) else { return }
         let seconds = Int(settings.idleDrainSeconds)
         if seconds <= 0 {
             queueDrainUnlocked = true
@@ -585,7 +626,7 @@ final class RecordingController: ObservableObject {
         idleDrainTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                guard self.live.state == .idle else {
+                guard self.live.state == .idle || (self.isRecording && self.sessionBatchMode) else {
                     self.cancelIdleDrain()
                     return
                 }
@@ -619,9 +660,13 @@ final class RecordingController: ObservableObject {
     }
 
     func pumpBackgroundQueues() {
-        guard live.state == .idle else { return }
-        guard queueDrainUnlocked || settings.idleDrainSeconds <= 0 else { return }
-        offlineService.runNextIfIdle()
+        let idle = live.state == .idle
+        let drainReady = queueDrainUnlocked || settings.idleDrainSeconds <= 0
+        let batch = sessionBatchMode
+        if (drainReady || !BatchModePolicy.waitsForIdleDrain(batchMode: batch)) && (idle || batch) {
+            offlineService.runNextIfIdle()
+        }
+        guard idle, drainReady else { return }
         summaryService.runNextIfIdle()
     }
 
@@ -634,11 +679,6 @@ final class RecordingController: ObservableObject {
             appActivity = .idle
             return
         }
-        if let remaining = idleDrainRemaining, remaining > 0,
-           offlineService.hasWork || summaryService.hasQueuedWork {
-            appActivity = .settling(remaining: remaining)
-            return
-        }
         if let running = summaryService.runningID,
            let item = store.items.first(where: { $0.id == running })
             ?? store.items.first(where: { $0.url.path == running }) {
@@ -648,6 +688,11 @@ final class RecordingController: ObservableObject {
         if let running = offlineService.runningID,
            let item = store.items.first(where: { $0.meta.audio?.contains(running) == true }) {
             appActivity = .processing(kind: .speakerPass, detail: item.meta.title)
+            return
+        }
+        if let remaining = idleDrainRemaining, remaining > 0,
+           offlineService.hasWork || summaryService.hasQueuedWork {
+            appActivity = .settling(remaining: remaining)
             return
         }
         if offlineService.hasWork || summaryService.hasQueuedWork {
@@ -696,7 +741,7 @@ final class RecordingController: ObservableObject {
             // "Start" (notify path) or the auto-start fires, the model is already
             // loading/loaded, so transcription begins with little or no catch-up.
             self.cancelIdleUnload()
-            self.preloadModel()
+            if !self.settings.batchMode { self.preloadModel() }
             // New call context: reset the last call's discoveries, start fresh.
             self.meeting.resetDiscovery()
             self.admission.reset()
@@ -743,6 +788,7 @@ final class RecordingController: ObservableObject {
     /// WhisperKit and FluidAudio both `prepare` into a shared holder. SpeechAnalyzer
     /// only needs locale assets on disk plus Fluid diarization presence.
     func preloadModel() {
+        guard !settings.batchMode else { return }
         switch settings.transcriptionEngine {
         case .whisperKit:
             Task { _ = await models.prepare(settings.model) }
@@ -770,6 +816,7 @@ final class RecordingController: ObservableObject {
         if detectionInitiated, meeting.meetingTitle.trimmingCharacters(in: .whitespaces).isEmpty {
             meeting.meetingTitle = "Recorded call"   // fallback for the notification-Start path
         }
+        sessionBatchMode = settings.batchMode
         live.state = .preparing
         // Keep the user's Regular/Room selection across Start — do not reset here.
         cancelPendingClear(); clearArmable = false   // a new recording supersedes any pending auto-clear
@@ -799,7 +846,7 @@ final class RecordingController: ObservableObject {
         }
         micDenied = false
 
-        if settings.transcriptionEngine == .speechAnalyzer {
+        if !sessionBatchMode && settings.transcriptionEngine == .speechAnalyzer {
             guard await PermissionManager.requestSpeechRecognition() else {
                 live.state = .error("Speech recognition access denied. Enable it in System Settings → Privacy & Security → Speech Recognition.")
                 startedByDetection = false
@@ -836,6 +883,7 @@ final class RecordingController: ObservableObject {
         // Preserve detection origin so call-end can still auto-stop (AUTO-RESUME and
         // Recovery-sheet resume of an auto-started meeting both land here).
         startedByDetection = m.startedByDetection
+        sessionBatchMode = settings.batchMode
         live.state = .preparing
         // Keep the user's Regular/Room selection across Resume — do not reset here.
         cancelPendingClear(); clearArmable = false   // a resumed recording supersedes any pending auto-clear
@@ -856,7 +904,7 @@ final class RecordingController: ObservableObject {
         }
         micDenied = false
 
-        if settings.transcriptionEngine == .speechAnalyzer {
+        if !sessionBatchMode && settings.transcriptionEngine == .speechAnalyzer {
             guard await PermissionManager.requestSpeechRecognition() else {
                 live.state = .error("Speech recognition access denied. Enable it in System Settings → Privacy & Security → Speech Recognition.")
                 return
@@ -936,10 +984,15 @@ final class RecordingController: ObservableObject {
             eng.micArchiveURL = micArchive
             eng.systemArchiveURL = systemArchive
         }
-        offlineService.yieldToLiveRecording()
         summaryService.yieldToLiveRecording()
-        cancelIdleDrain()
-        engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
+        if sessionBatchMode {
+            AppLog.log("Batch mode — capturing audio; transcription stays on the offline queue", category: "record")
+            offlineService.runNextIfIdle()
+        } else {
+            offlineService.yieldToLiveRecording()
+            cancelIdleDrain()
+            engine?.start(micRing: micRing, systemRing: systemRing, startElapsed: startOffset)
+        }
 
         startMeterTimer()
         // Session-scoped freeze detector: captures main-thread stacks if the main
@@ -1144,6 +1197,14 @@ final class RecordingController: ObservableObject {
         let sessionManifest = manifest
         let isSpeakerEngine = engine is SpeakerCapableEngine
         let autoSummarize = settings.autoRunClaude
+        let batchMode = sessionBatchMode
+        let batchLanguage = settings.liveStreamingLanguage
+        let batchTiming = BatchModePolicy.pinnedSchedule(
+            batchMode: batchMode,
+            stored: sessionManifest?.transcriptionTiming,
+            live: settings.transcriptionTiming)
+        let batchWindowStart = sessionManifest?.transcriptionWindowStartHour ?? settings.transcriptionWindowStartHour
+        let batchWindowEnd = sessionManifest?.transcriptionWindowEndHour ?? settings.transcriptionWindowEndHour
         let partialPath = sessionDir.map { $0.appendingPathComponent("transcript.partial.md") }
         // Link to the session audio (mic track) if it was archived.
         let audioPath = sessionDir.map { $0.appendingPathComponent("mic.caf").path }
@@ -1178,7 +1239,9 @@ final class RecordingController: ObservableObject {
                 AppLog.log("Transcript written: \(result.url.path)\(segments.isEmpty ? " (no speech transcribed)" : "")", category: "record")
                 lastTranscriptURL = result.url
                 lastResult = segments.isEmpty
-                    ? "Saved (no speech transcribed): \(result.url.lastPathComponent)"
+                    ? (batchMode
+                        ? "Recording saved. Transcription queued."
+                        : "Saved (no speech transcribed): \(result.url.lastPathComponent)")
                     : "Transcript saved: \(result.url.lastPathComponent)"
                 notes.reset()
                 store.refresh()
@@ -1201,17 +1264,31 @@ final class RecordingController: ObservableObject {
                     filing: destination,
                     manualNotes: manual,
                     attachments: attachments)
-                if isSpeakerEngine, let dir = sessionDir, !segments.isEmpty {
+                if BatchModePolicy.shouldQueue(batchMode: batchMode, isSpeakerEngine: isSpeakerEngine,
+                                               segmentCount: segments.count),
+                   let dir = sessionDir {
+                    let binding = Self.offlineBinding(
+                        batchMode: batchMode, language: batchLanguage,
+                        storedEngine: sessionManifest?.transcriptionEngine,
+                        storedProfile: sessionManifest?.fluidAsrProfile,
+                        fallbackEngine: settings.transcriptionEngine,
+                        fallbackProfile: FluidAsrBinding.profile(from: settings))
                     SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: result.url.path,
                                                   presentReviewWhenDone: false, in: dir)
                     await captureTeardown?.value
-                    offlineService.enqueue(OfflineJob(
-                        sessionDir: dir, transcriptURL: result.url, title: title,
-                        attendees: attendees, filing: destination,
-                        presentReviewWhenDone: false, autoSummarize: autoSummarize,
-                        engine: sessionManifest?.transcriptionEngine ?? settings.transcriptionEngine,
-                        fluidAsrProfile: FluidAsrBinding.resolved(
-                            stored: sessionManifest?.fluidAsrProfile, settings: settings)))
+                    let mic = dir.appendingPathComponent("mic.caf")
+                    let micBytes = (try? mic.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    if micBytes > 0 {
+                        offlineService.enqueue(OfflineJob(
+                            sessionDir: dir, transcriptURL: result.url, title: title,
+                            attendees: attendees, filing: destination,
+                            presentReviewWhenDone: false, autoSummarize: autoSummarize,
+                            engine: binding.engine, fluidAsrProfile: binding.profile,
+                            schedule: batchTiming, windowStartHour: batchWindowStart,
+                            windowEndHour: batchWindowEnd, accurateBatch: binding.accurate))
+                    } else {
+                        SessionStore.setOfflineStatus(.cancelled, in: dir)
+                    }
                     armIdleDrain()
                 }
                 clearArmable = true
@@ -1973,8 +2050,17 @@ final class RecordingController: ObservableObject {
             callBundleID: call?.bundleID, callDisplayName: call?.displayName,
             manualNotes: meeting.manualNotes, attachments: meeting.attachments.isEmpty ? nil : meeting.attachments,
             audioTracks: ["mic.caf", "system.caf"])
-        m.transcriptionEngine = settings.transcriptionEngine
-        m.fluidAsrProfile = FluidAsrBinding.profile(from: settings)
+        if sessionBatchMode {
+            m.transcriptionEngine = .fluidAudio
+            m.fluidAsrProfile = BatchModePolicy.profile(language: settings.liveStreamingLanguage)
+            m.batchMode = true
+            m.transcriptionTiming = settings.transcriptionTiming
+            m.transcriptionWindowStartHour = settings.transcriptionWindowStartHour
+            m.transcriptionWindowEndHour = settings.transcriptionWindowEndHour
+        } else {
+            m.transcriptionEngine = settings.transcriptionEngine
+            m.fluidAsrProfile = FluidAsrBinding.profile(from: settings)
+        }
         manifest = m
         SessionStore.write(m, to: dir)
         AppLog.log("Session manifest written (active) — \(dir.lastPathComponent)", category: "record")
@@ -2141,16 +2227,27 @@ final class RecordingController: ObservableObject {
                 store.refresh()
                 // Give the recovered session the same background offline pass a normal
                 // stop gets (speaker detect + attributed rewrite), when next idle.
-                if !segs.isEmpty {
+                let batch = m.batchMode == true
+                if batch || !segs.isEmpty {
+                    let binding = Self.offlineBinding(
+                        batchMode: batch,
+                        language: settings.liveStreamingLanguage,
+                        storedEngine: m.transcriptionEngine,
+                        storedProfile: m.fluidAsrProfile,
+                        fallbackEngine: settings.transcriptionEngine,
+                        fallbackProfile: FluidAsrBinding.profile(from: settings))
                     SessionStore.setOfflineStatus(.pending, attempts: 0, transcriptPath: result.url.path,
                                                   presentReviewWhenDone: false, in: dir)
                     offlineService.enqueue(OfflineJob(
                         sessionDir: dir, transcriptURL: result.url, title: m.title,
                         attendees: m.attendees, filing: m.filing,
                         presentReviewWhenDone: false, autoSummarize: settings.autoRunClaude,
-                        engine: m.transcriptionEngine ?? settings.transcriptionEngine,
-                        fluidAsrProfile: FluidAsrBinding.resolved(
-                            stored: m.fluidAsrProfile, settings: settings)))
+                        engine: binding.engine, fluidAsrProfile: binding.profile,
+                        schedule: BatchModePolicy.pinnedSchedule(
+                            batchMode: batch, stored: m.transcriptionTiming, live: .afterCall),
+                        windowStartHour: m.transcriptionWindowStartHour ?? settings.transcriptionWindowStartHour,
+                        windowEndHour: m.transcriptionWindowEndHour ?? settings.transcriptionWindowEndHour,
+                        accurateBatch: binding.accurate))
                     armIdleDrain()
                 }
             } catch {
@@ -2166,8 +2263,16 @@ final class RecordingController: ObservableObject {
     /// same conferencing app is on the mic) — Resume is recommended when true.
     func isCallLive(_ session: RecoverableSession) -> Bool {
         guard let bid = session.manifest.callBundleID else { return false }
-        return callDetector.activeCall?.bundleID == bid
-            || callDetector.capturing.contains { $0.bundleID?.lowercased() == bid }
+        let known = settings.conferencingBundleIDs
+        let wanted = AppIdentity.canonical(bid, known: known)
+        if let active = callDetector.activeCall?.bundleID,
+           AppIdentity.canonical(active, known: known) == wanted {
+            return true
+        }
+        return callDetector.capturing.contains { process in
+            guard let raw = process.bundleID else { return false }
+            return AppIdentity.canonical(raw, known: known) == wanted
+        }
     }
 
     /// How recently a crashed session must have been beating to be treated as "the
@@ -2180,8 +2285,13 @@ final class RecordingController: ObservableObject {
     /// match wins. Drives auto-resume in `onCallStart` (Option B).
     private func matchingLiveRecovery(for call: DetectedCall) -> RecoverableSession? {
         let now = Date()
+        let known = settings.conferencingBundleIDs
+        let liveID = AppIdentity.canonical(call.bundleID, known: known)
         return pendingRecoveries
-            .filter { $0.manifest.callBundleID == call.bundleID }
+            .filter { session in
+                guard let stored = session.manifest.callBundleID else { return false }
+                return AppIdentity.canonical(stored, known: known) == liveID
+            }
             .filter { now.timeIntervalSince($0.manifest.lastHeartbeat) < Self.resumeMatchWindow }
             .max { $0.manifest.lastHeartbeat < $1.manifest.lastHeartbeat }
     }

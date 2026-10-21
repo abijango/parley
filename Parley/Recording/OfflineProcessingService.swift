@@ -14,7 +14,7 @@ import Combine
 /// `isRunning` gate. The summary STAGE is delegated to `SummaryService` (not rebuilt).
 @MainActor
 final class OfflineProcessingService: ObservableObject {
-    enum JobUIState: Equatable { case queued, running, paused, held, failed(String) }
+    enum JobUIState: Equatable { case queued, running, paused, held, waiting, failed(String) }
 
     /// Live per-session state, keyed by session id (= session dir name). Drives the
     /// Record-screen "processing" strip and History's per-item busy indicator.
@@ -39,6 +39,7 @@ final class OfflineProcessingService: ObservableObject {
     private var runningJob: OfflineJob?
     private var attemptsBeforeRun = 0
     private var preemptRequested = false
+    private var windowTimer: Timer?
 
     private let models: ModelManager
     private let voiceprints: VoiceprintStore
@@ -100,15 +101,22 @@ final class OfflineProcessingService: ObservableObject {
     /// callers invoke `runNextIfIdle()` once they're ready (so a batch enqueue pumps once).
     /// Any frozen failure progress for this id is cleared so a re-enqueue starts fresh.
     func enqueue(_ job: OfflineJob) {
+        if case .failed = jobs[job.id] { jobs[job.id] = nil }
         guard jobs[job.id] == nil, !queue.contains(where: { $0.id == job.id }) else { return }
         // Clear any frozen failure progress from a previous attempt so the bar resets.
         progress[job.id] = nil
         SessionStore.setOfflineStatus(.pending, transcriptPath: job.transcriptURL.path,
-                                      presentReviewWhenDone: job.presentReviewWhenDone, in: job.sessionDir)
+                                      presentReviewWhenDone: job.presentReviewWhenDone,
+                                      timing: job.schedule, windowStart: job.windowStartHour,
+                                      windowEnd: job.windowEndHour,
+                                      batchMode: job.accurateBatch,
+                                      asrProfile: job.fluidAsrProfile, in: job.sessionDir)
         SessionStore.setTranscriptionEngine(job.engine, in: job.sessionDir)
+        if job.forced { SessionStore.setOfflineForced(true, in: job.sessionDir) }
         let held = SessionStore.isOfflineHeld(job.sessionDir)
-        jobs[job.id] = held ? .held : .queued
+        jobs[job.id] = Self.uiState(for: job, held: held, now: Date())
         queue.append(job)
+        armWindowTimerIfNeeded()
     }
 
     /// Session id of the running job, if any.
@@ -137,17 +145,25 @@ final class OfflineProcessingService: ObservableObject {
     func cancel(sessionDir: URL) {
         let id = sessionDir.lastPathComponent
         queue.removeAll { $0.id == id }
-        if jobs[id] == .queued || jobs[id] == .held || jobs[id] == .paused { jobs[id] = nil }
+        if jobs[id] == .queued || jobs[id] == .held || jobs[id] == .paused || jobs[id] == .waiting { jobs[id] = nil }
     }
 
-    /// Start the next job IFF idle and not already running. Safe to call from any idle
-    /// re-entry point — it no-ops while recording, so the queue simply waits.
+    /// Start the next eligible job. Batch mode keeps this open during a recording.
+    /// With Batch mode off, `isIdle` is false while recording and the queue waits.
     func runNextIfIdle() {
+        refreshWaitingLabels()
         guard !isRunning, !queue.isEmpty, isIdle(), canDrain() else { return }
         let allowHeld = settings.allowsHeldJobDrain(canDrain: true)
+        let now = Date()
+        // `isIdle` already refused a recording while Batch mode is off.
         guard let idx = queue.firstIndex(where: { job in
-            if !SessionStore.isOfflineHeld(job.sessionDir) { return true }
-            return allowHeld
+            let held = SessionStore.isOfflineHeld(job.sessionDir)
+            let inWindow = AppSettings.isQuietHours(
+                now: now, startHour: job.windowStartHour, endHour: job.windowEndHour)
+            return BatchModePolicy.mayRun(
+                batchMode: true, recordingActive: false, held: held,
+                heldMayDrain: allowHeld, forced: job.forced,
+                schedule: job.schedule, inWindow: inWindow)
         }) else { return }
         isRunning = true
         let job = queue.remove(at: idx)
@@ -171,14 +187,10 @@ final class OfflineProcessingService: ObservableObject {
 
     private func run(_ job: OfflineJob) async {
         // A recording may have started between the pump and this Task — re-defer.
-        guard isIdle() else {
-            queue.insert(job, at: 0)
-            jobs[job.id] = .queued
-            runningJobID = nil
-            runningJob = nil
-            runningTask = nil
-            isRunning = false
-            preemptRequested = false
+        // The window and hold are checked again here so a job dequeued at 06:59
+        // does not start after the window has closed, and it does not burn an attempt.
+        guard isIdle(), releaseAllows(job) else {
+            deferJob(job)
             return
         }
         // Audio gone (e.g. filed + deleted) → permanent failure, surfaced in History.
@@ -251,10 +263,11 @@ final class OfflineProcessingService: ObservableObject {
         let segs = eng.finalTimeline()
         let audioDuration = SessionStore.audioDuration(archives.mic)
         let mergedAttendees = Self.merge(job.attendees, with: identified)
+        let filing = TranscriptWriter.parseFrontmatter(job.transcriptURL)?.filing ?? job.filing
         if TranscriptCoverage.isSafeReplacement(offline: segs, existingFile: job.transcriptURL,
                                                 audioDuration: audioDuration) {
             TranscriptWriter.rewriteTranscriptFile(at: job.transcriptURL, segments: segs,
-                                                   title: job.title, filing: job.filing, attendees: mergedAttendees)
+                                                   title: job.title, filing: filing, attendees: mergedAttendees)
             AppLog.log("Offline job \(job.id): rewrote transcript \(job.transcriptURL.lastPathComponent)", category: "offline")
         } else {
             // Keep the existing (longer) transcript, but still record any newly
@@ -342,9 +355,12 @@ final class OfflineProcessingService: ObservableObject {
             presentReview(RecordingController.SpeakerReview(
                 speakers: speakers, mixedCaf: job.mixedURL, engine: eng,
                 transcriptURL: job.transcriptURL, title: job.title,
-                filing: job.filing, attendees: mergedAttendees, autoSummarize: job.autoSummarize))
+                filing: filing, attendees: mergedAttendees, autoSummarize: job.autoSummarize))
         } else {
             store.refresh()
+            if TranscriptStore.bodyHasGenericLabels(at: job.transcriptURL) {
+                SpeakerReadyNotifier.post(title: job.title, transcriptPath: job.transcriptURL.path)
+            }
             if let item = transcriptItem(for: job.transcriptURL) {
                 summaryService.enqueueIfPolicyAllows(item, trigger: .offlinePassCompleted)
             }
@@ -363,7 +379,65 @@ final class OfflineProcessingService: ObservableObject {
         runningJob = nil
         runningTask = nil
         preemptRequested = false
+        armWindowTimerIfNeeded()
         requestPump()
+    }
+
+    private func refreshWaitingLabels() {
+        let now = Date()
+        for job in queue where jobs[job.id] != .paused {
+            let held = SessionStore.isOfflineHeld(job.sessionDir)
+            jobs[job.id] = Self.uiState(for: job, held: held, now: now)
+        }
+    }
+
+    private static func uiState(for job: OfflineJob, held: Bool, now: Date) -> JobUIState {
+        if job.forced { return .queued }
+        if held { return .held }
+        let open = AppSettings.isQuietHours(
+            now: now, startHour: job.windowStartHour, endHour: job.windowEndHour)
+        if job.schedule == .window && !open { return .waiting }
+        return .queued
+    }
+
+    /// Re-check hourly windows while a job is waiting. The queue has no other clock.
+    private func armWindowTimerIfNeeded() {
+        let needsClock = queue.contains { $0.schedule == .window && !$0.forced }
+        if needsClock, windowTimer == nil {
+            windowTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.requestPump() }
+            }
+        }
+        if !needsClock {
+            windowTimer?.invalidate()
+            windowTimer = nil
+        }
+    }
+
+    private func releaseAllows(_ job: OfflineJob) -> Bool {
+        let held = SessionStore.isOfflineHeld(job.sessionDir)
+        let inWindow = AppSettings.isQuietHours(
+            now: Date(), startHour: job.windowStartHour, endHour: job.windowEndHour)
+        return BatchModePolicy.mayRun(
+            batchMode: true, recordingActive: false, held: held,
+            heldMayDrain: settings.allowsHeldJobDrain(canDrain: true),
+            forced: job.forced, schedule: job.schedule, inWindow: inWindow)
+    }
+
+    /// Put a dequeued job back without counting an attempt. The recording gate
+    /// already ran through `isIdle`. This path is the window and the hold.
+    private func deferJob(_ job: OfflineJob) {
+        if !queue.contains(where: { $0.id == job.id }) {
+            queue.insert(job, at: 0)
+        }
+        let held = SessionStore.isOfflineHeld(job.sessionDir)
+        jobs[job.id] = Self.uiState(for: job, held: held, now: Date())
+        runningJobID = nil
+        runningJob = nil
+        runningTask = nil
+        isRunning = false
+        preemptRequested = false
+        armWindowTimerIfNeeded()
     }
 
     private func shouldParkForLive() -> Bool {
@@ -487,6 +561,9 @@ final class OfflineProcessingService: ObservableObject {
         eng.micArchiveURL = archives.mic
         eng.systemArchiveURL = archives.system
         eng.forceOfflineAsr = true   // no live streaming units for a saved call
+        if let fluid = eng as? FluidAudioEngine {
+            fluid.preferNeuralEngine = job.accurateBatch
+        }
         // Clustering hint from user-accepted meeting metadata: tell the diarizer how many
         // distinct speakers to expect so it doesn't merge two people into one cluster or
         // split one person across several. Only meaningful with ≥ 2 attendees.
@@ -518,6 +595,23 @@ extension OfflineProcessingService: ProcessingQueue {
         guard let i = queue.firstIndex(where: { $0.id == id }), i > 0 else { return }
         let e = queue.remove(at: i); queue.insert(e, at: 0)
         objectWillChange.send()
+    }
+
+    /// Jump a waiting job to the front, ignore the window and any hold, and pump.
+    /// A pass that is already running finishes first.
+    func transcribeNow(id: String) {
+        guard jobs[id] != .running else { return }
+        if case .failed = jobs[id] { jobs[id] = nil }
+        guard let i = queue.firstIndex(where: { $0.id == id }) else { return }
+        var job = queue.remove(at: i)
+        job.forced = true
+        SessionStore.setOfflineHeld(false, in: job.sessionDir)
+        SessionStore.setOfflineForced(true, in: job.sessionDir)
+        queue.insert(job, at: 0)
+        jobs[id] = .queued
+        objectWillChange.send()
+        armWindowTimerIfNeeded()
+        requestPump()
     }
 
     func move(id: String, to index: Int) {

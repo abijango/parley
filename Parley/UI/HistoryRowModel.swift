@@ -41,6 +41,7 @@ struct HistoryRowModel: Equatable {
             return (isNextInQueue ? "Next" : "Queued", .info)
         case .pausedForSpeakers: return ("Paused", .warning)
         case .heldForSpeakers, .heldForSummary: return ("Held", .warning)
+        case .waitingForTranscription: return ("Waiting", .info)
         case .needsSpeakerNames: return ("Needs speakers", .warning)
         case .reviewReady: return ("Review", .info)
         case .processed: return ("Processed", .success)

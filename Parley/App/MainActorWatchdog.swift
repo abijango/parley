@@ -197,17 +197,22 @@ final class MainActorWatchdog {
                ? "stack capture written — \(url.lastPathComponent)"
                : "stack capture exited \(sample.terminationStatus) — no usable sample")
         pruneCaptures()
+        LogRotation.scheduleCompression(of: config.directory)
     }
 
-    /// Keep only the newest `retainedCaptures` samples. Sorting is by the timestamp in
-    /// the filename, which sorts lexicographically because `fileStamp` is zero-padded
-    /// big-endian — no `stat` per file needed. Internal so tests can drive it against
-    /// fixture files rather than waiting on real captures.
+    /// Keep only the newest `retainedCaptures` samples. Plain and zipped dumps share
+    /// a timestamp key, so a compressed older capture still counts toward the cap.
+    /// Internal so tests can drive it against fixture files rather than waiting on
+    /// real captures.
     func pruneCaptures() {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: config.directory.path)) ?? []
         let captures = names
-            .filter { $0.hasPrefix("freeze-") && $0.hasSuffix(".txt") }
-            .sorted()
+            .compactMap { name -> (name: String, key: String)? in
+                guard let key = LogRotation.freezeCaptureKey(name) else { return nil }
+                return (name, key)
+            }
+            .sorted { $0.key < $1.key }
+            .map(\.name)
         guard captures.count > config.retainedCaptures else { return }
         let stale = captures.dropLast(config.retainedCaptures)
         for name in stale {
@@ -241,6 +246,9 @@ final class MainActorWatchdog {
 
     private func record(_ message: String) {
         if config.mirrorToAppLog { AppLog.log(message, category: "freeze") }
+        if LogRotation.rotateActiveFileIfNeeded(logURL) {
+            LogRotation.scheduleCompression(of: config.directory)
+        }
 
         try? FileManager.default.createDirectory(at: config.directory, withIntermediateDirectories: true)
         let url = logURL

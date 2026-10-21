@@ -35,4 +35,14 @@ struct SummaryEnqueuePolicy: Equatable {
         if alreadyQueuedOrPending + 1 >= max(2, bulkThreshold) { return .confirmBulk(count: alreadyQueuedOrPending + 1) }
         return .enqueue
     }
+
+    /// A pause caused by repeated summary failures should not swallow the next
+    /// explicit attempt. Automatic triggers stay held so a tripped queue cannot
+    /// immediately refill itself.
+    static func liftsRepeatedFailurePause(_ trigger: SummaryTrigger) -> Bool {
+        switch trigger {
+        case .userInitiated, .speakerReviewCompleted: return true
+        case .freshRecording, .offlinePassCompleted, .launchBacklog: return false
+        }
+    }
 }

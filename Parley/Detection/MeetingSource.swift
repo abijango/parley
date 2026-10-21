@@ -109,8 +109,14 @@ struct SourceReading: Equatable, Sendable {
 
 protocol MeetingSource: AnyObject, Sendable {
     static var identity: SourceIdentity { get }
+    /// Raw bundle id to the app's canonical id, for helpers that are not `parent.child`.
+    static var helperAliases: [String: String] { get }
     init(call: CallIdentity)
     func read(_ context: ScanContext) -> SourceReading
+}
+
+extension MeetingSource {
+    static var helperAliases: [String: String] { [:] }
 }
 
 enum MeetingSourceRegistry {
@@ -131,5 +137,15 @@ enum MeetingSourceRegistry {
         guard let type = sourceType(for: call.bundleID),
               type.identity.capability != .none else { return nil }
         return type.init(call: call)
+    }
+
+    static var helperAliases: [String: String] {
+        var map: [String: String] = [:]
+        for type in all {
+            for (raw, canonical) in type.helperAliases {
+                map[raw.lowercased()] = canonical.lowercased()
+            }
+        }
+        return map
     }
 }

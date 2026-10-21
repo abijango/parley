@@ -194,4 +194,15 @@ final class MeetingParsersTests: XCTestCase {
             title: "tomorrow's meeting\n9:00 AM - 9:30 AM Host: Someone Else", depth: 8)]
         XCTAssertNil(MeetingParsers.zoomHomeNowTitle(nodes))
     }
+
+    func testWebexCallTitleRejectsIdleWindowNames() {
+        XCTAssertNil(MeetingParsers.webexCallTitle(windowTitle: "Webex"))
+        XCTAssertNil(MeetingParsers.webexCallTitle(windowTitle: "Window"))
+        XCTAssertNil(MeetingParsers.webexCallTitle(windowTitle: "  "))
+        XCTAssertNil(MeetingParsers.webexCallTitle(windowTitle: "Cisco Webex"))
+    }
+
+    func testWebexCallTitleKeepsTheMeetingName() {
+        XCTAssertEqual(MeetingParsers.webexCallTitle(windowTitle: " AEGIS Weekly Update "), "AEGIS Weekly Update")
+    }
 }

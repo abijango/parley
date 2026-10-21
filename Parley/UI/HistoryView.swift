@@ -147,22 +147,29 @@ struct HistoryView: View {
             store.startWatching()
             rowIndex.observe(store: store, offline: offline, summary: summaryService)
             seedReviewDestination()
+            applyHistoryFocus()
         }
+        .onChange(of: recording.historyFocusPath) { applyHistoryFocus() }
         .onChange(of: searchQuery) { updateContentSearch() }
         .onChange(of: searchInContents) { updateContentSearch() }
         .onChange(of: selection) { seedReviewDestination() }
         .onChange(of: selectedItem?.summaryReadyURL) { seedReviewDestination() }
         // The "Detect speakers" review sheet is hosted at the window root
         // (MainWindowView), not here, so it survives switching tabs/notes mid-review.
-        .confirmationDialog(
+        .alert(
             "Speakers aren't all named",
             isPresented: Binding(get: { pendingProcessItem != nil },
                                  set: { if !$0 { pendingProcessItem = nil } }),
             presenting: pendingProcessItem
         ) { item in
-            Button("Detect speakers first") { detectSpeakers(item); pendingProcessItem = nil }
-            Button("Summarize anyway") { summarize(item); pendingProcessItem = nil }
-            Button("Cancel", role: .cancel) { pendingProcessItem = nil }
+            Button("Detect speakers first") {
+                // The review sheet is hosted on the window. Presenting it in this
+                // alert's dismiss turn drops it, so yield once first.
+                let target = item
+                Task { @MainActor in detectSpeakers(target) }
+            }
+            Button("Summarize anyway") { summarize(item) }
+            Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text("This transcript still has unnamed speakers. Detect & assign first for higher-quality attribution, or summarize now — Parley will include attendee and speaker hints.")
         }
@@ -180,6 +187,12 @@ struct HistoryView: View {
                 store.refresh()
             }
         }
+    }
+
+    private func applyHistoryFocus() {
+        guard let path = recording.historyFocusPath else { return }
+        selection = [path]
+        recording.historyFocusPath = nil
     }
 
     /// Seed the editable review destination from the selected item's filing.
@@ -238,6 +251,11 @@ struct HistoryView: View {
 
     private func isPending(_ item: TranscriptItem) -> Bool {
         if case .pending = summaryService.state(for: item) { return true }
+        return false
+    }
+
+    private func summaryHasFailed(_ item: TranscriptItem) -> Bool {
+        if case .failed = summaryService.state(for: item) { return true }
         return false
     }
 
@@ -368,8 +386,9 @@ struct HistoryView: View {
             Button("Release hold") { summaryService.releaseHold(id: item.id) }
             Button("Cancel summary") { summaryService.cancelQueued(item) }
             Divider()
-        case .queuedForSpeakers, .pausedForSpeakers, .heldForSpeakers:
+        case .queuedForSpeakers, .pausedForSpeakers, .heldForSpeakers, .waitingForTranscription:
             if let sid = sessionID(for: item) {
+                Button("Transcribe Now") { offline.transcribeNow(id: sid) }
                 Button("Do next") { offline.prioritize(id: sid) }
                 if offline.isHeld(id: sid) {
                     Button("Release hold") { offline.releaseHold(id: sid) }
@@ -985,8 +1004,13 @@ struct HistoryView: View {
             if item.summaryReadyURL == nil {
                 let pending = isPending(item)
                 let summarizeLabel = Label(item.isProcessed ? "Re-summarize" : "Summarize", systemImage: "sparkles")
+                // A failed run is a retry. Don't route it through the unnamed-speaker
+                // prompt — that prompt was what made Summarize look dead next to Retry.
+                let promptForSpeakers = item.hasUnnamedSpeakers && audioAvailable(item) && !summaryHasFailed(item)
                 if item.hasUnnamedSpeakers && audioAvailable(item) {
-                    Button { pendingProcessItem = item } label: { summarizeLabel }
+                    Button {
+                        if promptForSpeakers { pendingProcessItem = item } else { summarize(item) }
+                    } label: { summarizeLabel }
                         .glassButton().disabled(busy || pending)
                 } else {
                     Button { summarize(item) } label: { summarizeLabel }

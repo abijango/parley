@@ -53,6 +53,18 @@ enum MeetingParsers {
         return title.isEmpty ? nil : title
     }
 
+    /// Window titles seen on idle Webex (`Webex`, `Window`) and the app chrome
+    /// names. A meeting window replaces these with the space or meeting name.
+    static let webexGenericTitles: Set<String> = [
+        "webex", "window", "webex meetings", "webexhelper", "cisco webex",
+    ]
+
+    static func webexCallTitle(windowTitle: String) -> String? {
+        let title = windowTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !webexGenericTitles.contains(title.lowercased()) else { return nil }
+        return title
+    }
+
     /// Teams bakes presence/relationship badges ("External", "unfamiliar", "Unverified",
     /// "Guest") into the SAME accessibility segment as the name (no comma), so a parsed
     /// name reads "Farhang Mehregani External unfamiliar". Strip those trailing badge
@@ -274,6 +286,22 @@ enum MeetingParsers {
             guard let start = e.start, let end = e.end else { return false }
             return start.addingTimeInterval(-graceMinutes * 60) <= now && now < end
         }
+    }
+
+    /// Title from the Teams calendar view, then native Outlook's joinable event.
+    /// Callers prepare the Teams tree first. Electron apps stay blank until that prep.
+    static func scheduleOverlapTitle(apps: RunningApps, tree: any MeetingUITree) -> TitleCandidate? {
+        if let teamsPid = apps.pid(prefix: "com.microsoft.teams") {
+            let events = outlookCalendarEvents(tree.nodes(pid: teamsPid))
+            if let event = currentEvent(in: events) {
+                return TitleCandidate(title: event.title, authority: .scheduleOverlap, provenance: "calendar:teams")
+            }
+        }
+        if let outlookPid = apps.pid(exact: "com.microsoft.outlook"),
+           let title = outlookNativeJoinableTitle(tree.nodes(pid: outlookPid)) {
+            return TitleCandidate(title: title, authority: .scheduleOverlap, provenance: "calendar:outlook")
+        }
+        return nil
     }
 
     /// Native Outlook Calendar view: events are title-only buttons grouped by

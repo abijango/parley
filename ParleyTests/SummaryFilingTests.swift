@@ -88,6 +88,56 @@ final class SummaryFilingTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: sessionDir.path))
     }
 
+    func testFailedSummaryRetryEnqueuesAgain() throws {
+        let (item, _) = try makeItem(title: "Retry After Stall")
+        let service = SummaryService(store: TranscriptStore())
+        service.isIdle = { false }
+        service.noteFailedRun(item, reason: "RetriableError: Connection stalled repeatedly")
+
+        service.enqueueIfPolicyAllows(item, trigger: .userInitiated)
+
+        XCTAssertEqual(service.queuedIDs, [item.id])
+        guard case .pending = service.state(for: item) else {
+            return XCTFail("retry should replace the failed job, got \(String(describing: service.state(for: item)))")
+        }
+
+        service.enqueueIfPolicyAllows(item, trigger: .userInitiated)
+        XCTAssertEqual(service.queuedIDs, [item.id], "a second press must not double-enqueue the pending run")
+    }
+
+    func testSpeakerReviewRetriesAFailedSummary() throws {
+        let orig = AppSettings.shared.autoRunClaude
+        AppSettings.shared.autoRunClaude = true
+        defer { AppSettings.shared.autoRunClaude = orig }
+
+        let (item, _) = try makeItem(title: "Retry After Speakers")
+        let service = SummaryService(store: TranscriptStore())
+        service.isIdle = { false }
+        service.noteFailedRun(item, reason: "Connection stalled")
+
+        service.enqueueIfPolicyAllows(item, trigger: .speakerReviewCompleted)
+
+        XCTAssertEqual(service.queuedIDs, [item.id])
+        guard case .pending = service.state(for: item) else {
+            return XCTFail("finishing speaker review should replace the failed summary")
+        }
+    }
+
+    func testRetryLeavesAStagedDraftAlone() throws {
+        let (item, _) = try makeItem(title: "Staged Draft")
+        let staged = SummaryService.stagingURL(for: item.url, backend: .claude)
+        AppPaths.ensureDirectory(staged.deletingLastPathComponent())
+        try "## Summary\nAlready drafted.".write(to: staged, atomically: true, encoding: .utf8)
+
+        let service = SummaryService(store: TranscriptStore())
+        service.isIdle = { false }
+        service.noteFailedRun(item, reason: "Connection stalled")
+        service.enqueueIfPolicyAllows(item, trigger: .userInitiated)
+
+        XCTAssertTrue(service.queuedIDs.isEmpty)
+        XCTAssertEqual(service.state(for: item), .failed("Connection stalled"))
+    }
+
     func testFilingClearsAQueuedRerun() throws {
         let (item, _) = try makeItem(title: "Queued Rerun")
         let store = TranscriptStore()

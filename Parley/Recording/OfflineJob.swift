@@ -29,6 +29,14 @@ struct OfflineJob: Identifiable, Equatable {
     let engine: TranscriptionEngineKind
     /// Fluid ASR stack for this session. Ignored when `engine` is not FluidAudio.
     let fluidAsrProfile: FluidAsrProfile
+    /// When this pass may start. Snapshotted at enqueue.
+    let schedule: TranscriptionTiming
+    let windowStartHour: Int
+    let windowEndHour: Int
+    /// Transcribe Now. Mutable so the queue can mark a waiting job without rebuilding it.
+    var forced: Bool
+    /// FluidAudio batch profile, Neural Engine, GPU toggle ignored.
+    let accurateBatch: Bool
 
     /// Stable id = session folder name (e.g. "2026-06-08-160310"); also the manifest id.
     var id: String { sessionDir.lastPathComponent }
@@ -52,13 +60,20 @@ struct OfflineJob: Identifiable, Equatable {
         self.engine = OfflineEngineBinding.kind(stored: manifest.transcriptionEngine, fallback: fallbackEngine)
         self.fluidAsrProfile = FluidAsrBinding.profile(
             stored: manifest.fluidAsrProfile, fallback: fallbackAsrProfile)
+        self.schedule = manifest.transcriptionTiming ?? .afterCall
+        self.windowStartHour = manifest.transcriptionWindowStartHour ?? 22
+        self.windowEndHour = manifest.transcriptionWindowEndHour ?? 7
+        self.forced = manifest.offlineForced == true
+        self.accurateBatch = manifest.batchMode == true
     }
 
     /// Direct construction (post-stop / History flows), where paths and metadata are
     /// known without re-reading the manifest.
     init(sessionDir: URL, transcriptURL: URL, title: String, attendees: String,
          filing: String, presentReviewWhenDone: Bool, autoSummarize: Bool,
-         engine: TranscriptionEngineKind, fluidAsrProfile: FluidAsrProfile) {
+         engine: TranscriptionEngineKind, fluidAsrProfile: FluidAsrProfile,
+         schedule: TranscriptionTiming = .afterCall, windowStartHour: Int = 22,
+         windowEndHour: Int = 7, forced: Bool = false, accurateBatch: Bool = false) {
         self.sessionDir = sessionDir
         self.transcriptURL = transcriptURL
         self.micArchiveURL = sessionDir.appendingPathComponent("mic.caf")
@@ -71,6 +86,11 @@ struct OfflineJob: Identifiable, Equatable {
         self.autoSummarize = autoSummarize
         self.engine = engine
         self.fluidAsrProfile = fluidAsrProfile
+        self.schedule = schedule
+        self.windowStartHour = windowStartHour
+        self.windowEndHour = windowEndHour
+        self.forced = forced
+        self.accurateBatch = accurateBatch
     }
 }
 

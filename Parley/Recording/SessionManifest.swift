@@ -71,6 +71,14 @@ struct SessionManifest: Codable, Equatable {
     /// Fluid ASR stack for this session (Unified / TDT v2 / TDT v3). Nil on non-Fluid
     /// sessions and on manifests written before this field existed.
     var fluidAsrProfile: FluidAsrProfile?
+    /// This session was recorded in Batch mode. The offline pass stays on FluidAudio.
+    var batchMode: Bool? = nil
+    /// When the offline pass may start. Nil on manifests written before the field existed.
+    var transcriptionTiming: TranscriptionTiming? = nil
+    var transcriptionWindowStartHour: Int? = nil
+    var transcriptionWindowEndHour: Int? = nil
+    /// User chose Transcribe Now. The job ignores the window and a manual hold.
+    var offlineForced: Bool? = nil
 }
 
 /// One person discovered in the meeting roster, with the join timestamp
@@ -188,12 +196,22 @@ enum SessionStore {
                                  attempts: Int? = nil,
                                  transcriptPath: String? = nil,
                                  presentReviewWhenDone: Bool? = nil,
+                                 timing: TranscriptionTiming? = nil,
+                                 windowStart: Int? = nil,
+                                 windowEnd: Int? = nil,
+                                 batchMode: Bool? = nil,
+                                 asrProfile: FluidAsrProfile? = nil,
                                  in dir: URL) {
         guard var m = read(dir) else { return }
         m.offlineStatus = status
         if let attempts { m.offlineAttempts = attempts }
         if let transcriptPath { m.transcriptPath = transcriptPath }
         if let presentReviewWhenDone { m.presentReviewWhenDone = presentReviewWhenDone }
+        if let timing { m.transcriptionTiming = timing }
+        if let windowStart { m.transcriptionWindowStartHour = windowStart }
+        if let windowEnd { m.transcriptionWindowEndHour = windowEnd }
+        if let batchMode { m.batchMode = batchMode }
+        if let asrProfile { m.fluidAsrProfile = asrProfile }
         write(m, to: dir)
     }
 
@@ -203,6 +221,16 @@ enum SessionStore {
         guard var m = read(dir) else { return }
         m.summaryStatus = status
         write(m, to: dir)
+    }
+
+    static func setOfflineForced(_ forced: Bool, in dir: URL) {
+        guard var m = read(dir) else { return }
+        m.offlineForced = forced
+        write(m, to: dir)
+    }
+
+    static func isOfflineForced(_ dir: URL) -> Bool {
+        read(dir)?.offlineForced == true
     }
 
     static func setOfflineHeld(_ held: Bool, in dir: URL) {

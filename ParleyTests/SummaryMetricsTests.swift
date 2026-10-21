@@ -59,6 +59,8 @@ final class SummaryMetricsTests: XCTestCase {
         XCTAssertEqual(cost, 2 + 6 + 0.5, accuracy: 0.0001)
         let medium = SummaryRunMetrics(inputTokens: 1_000_000, model: "grok-4.7-medium")
         XCTAssertEqual(try XCTUnwrap(SummaryPricing.estimate(medium)), 2, accuracy: 0.0001)
+        let mediumFast = SummaryRunMetrics(inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, model: "grok-4.7-medium-fast")
+        XCTAssertEqual(try XCTUnwrap(SummaryPricing.estimate(mediumFast)), 4 + 12 + 1, accuracy: 0.0001)
     }
 
     func testPricingEstimateIsProportional() throws {

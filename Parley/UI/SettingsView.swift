@@ -501,7 +501,7 @@ struct SettingsView: View {
                     .labelsHidden().fixedSize()
                 }
                 SettingRow("Idle before background work",
-                           description: "How long to stay idle after a call before speaker detection and summaries start. Starting a new recording cancels the wait.") {
+                           description: "How long to stay idle after a call before summaries start, and before speaker detection when Batch mode is off. Batch transcription starts as soon as the recording is saved. Starting a new recording cancels this wait.") {
                     Picker("", selection: $settings.idleDrainSeconds) {
                         Text("Off").tag(0.0)
                         Text("30s").tag(30.0)
@@ -812,6 +812,30 @@ struct SettingsView: View {
 
     private var transcriptionTab: some View {
         Form {
+            Section("Batch mode") {
+                SettingRow("Batch mode",
+                           description: "Record audio only. Transcription starts as soon as the call ends and keeps running while the next call records. English uses the accurate offline model. Any other language uses Parakeet v3.") {
+                    Toggle("", isOn: $settings.batchMode).labelsHidden()
+                }
+                Picker("When", selection: Binding(
+                    get: { settings.transcriptionTiming },
+                    set: { settings.transcriptionTiming = $0 }
+                )) {
+                    Text("After each call").tag(TranscriptionTiming.afterCall)
+                    Text("During a daily window").tag(TranscriptionTiming.window)
+                }
+                .disabled(!settings.batchMode)
+                if settings.batchMode && settings.transcriptionTiming == .window {
+                    Stepper(value: $settings.transcriptionWindowStartHour, in: 0...23) {
+                        Text(String(format: "Starts %02d:00", settings.transcriptionWindowStartHour))
+                    }
+                    Stepper(value: $settings.transcriptionWindowEndHour, in: 0...23) {
+                        Text(String(format: "Ends %02d:00", settings.transcriptionWindowEndHour))
+                    }
+                    helpText("Outside this window, recordings wait. Transcribe Now on a History row runs that one next. Overnight windows are allowed, for example 22:00 to 07:00.")
+                }
+            }
+
             Section("Engine") {
                 Picker("Engine", selection: Binding(
                     get: { settings.transcriptionEngine }, set: { settings.transcriptionEngine = $0 }

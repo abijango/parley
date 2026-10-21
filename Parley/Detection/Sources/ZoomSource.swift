@@ -34,15 +34,7 @@ final class ZoomSource: MeetingSource, @unchecked Sendable {
     private func renderedCalendarTitle(_ context: ScanContext) -> TitleCandidate? {
         if let teamsPid = context.runningApps.pid(prefix: "com.microsoft.teams") {
             context.tree.prepareRichTree(pid: teamsPid)
-            let events = MeetingParsers.outlookCalendarEvents(context.tree.nodes(pid: teamsPid))
-            if let event = MeetingParsers.currentEvent(in: events) {
-                return TitleCandidate(title: event.title, authority: .scheduleOverlap, provenance: "calendar:teams")
-            }
         }
-        if let outlookPid = context.runningApps.pid(exact: "com.microsoft.outlook"),
-           let title = MeetingParsers.outlookNativeJoinableTitle(context.tree.nodes(pid: outlookPid)) {
-            return TitleCandidate(title: title, authority: .scheduleOverlap, provenance: "calendar:outlook")
-        }
-        return nil
+        return MeetingParsers.scheduleOverlapTitle(apps: context.runningApps, tree: context.tree)
     }
 }

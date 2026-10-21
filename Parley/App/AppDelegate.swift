@@ -53,6 +53,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 AppLog.log("Notification action — starting recording", category: "detect")
                 await RecordingController.shared.start(detectionInitiated: true)
             }
+        } else if category == SpeakerReadyNotifier.categoryID,
+                  id == UNNotificationDefaultActionIdentifier {
+            let path = response.notification.request.content.userInfo[SpeakerReadyNotifier.transcriptPathKey] as? String
+            Task { @MainActor in
+                RecordingController.shared.historyFocusPath = path
+                NSApp.activate(ignoringOtherApps: true)
+            }
         } else if id == UNNotificationDefaultActionIdentifier {
             NSApp.activate(ignoringOtherApps: true)
         }

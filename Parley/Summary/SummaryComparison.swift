@@ -290,7 +290,7 @@ final class SummaryComparison: ObservableObject {
             } catch {
                 return .failure(error.localizedDescription, Date().timeIntervalSince(startLocal))
             }
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
             let model = backend.rawValue
             let r = await Task.detached {
                 SummaryService.runCursorForCompare(

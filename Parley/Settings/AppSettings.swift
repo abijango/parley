@@ -128,6 +128,7 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
     case cursorGrok46Fast = "cursor-grok-4.6-high-fast"
     case cursorGrok47Low = "grok-4.7-low"
     case cursorGrok47Medium = "grok-4.7-medium"
+    case cursorGrok47MediumFast = "grok-4.7-medium-fast"
 
     var id: String { rawValue }
     var displayName: String {
@@ -140,6 +141,7 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
         case .cursorGrok46Fast: return "Cursor Grok 4.6 Fast"
         case .cursorGrok47Low: return "Cursor Grok 4.7 Low"
         case .cursorGrok47Medium: return "Cursor Grok 4.7 Medium"
+        case .cursorGrok47MediumFast: return "Cursor Grok 4.7 Medium Fast"
         }
     }
     var blurb: String {
@@ -157,13 +159,15 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
             return "Runs `cursor agent -p --mode ask` with model `grok-4.7-low`."
         case .cursorGrok47Medium:
             return "Runs `cursor agent -p --mode ask` with model `grok-4.7-medium`."
+        case .cursorGrok47MediumFast:
+            return "Runs `cursor agent -p --mode ask` with model `grok-4.7-medium-fast`."
         }
     }
 
     /// True when this backend is invoked via the Cursor Agent CLI.
     var isCursorAgent: Bool {
         switch self {
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
             return true
         default: return false
         }
@@ -173,7 +177,7 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
     var cursorModelID: String? { isCursorAgent ? rawValue : nil }
 
     /// What the in-progress summary bar shows. Cursor backends use the CLI id
-    /// (`grok-4.7-medium`); the others keep their display name.
+    /// (`grok-4.7-medium-fast`); the others keep their display name.
     var statusName: String { cursorModelID ?? displayName }
 
     /// Maps persisted raw values, including retired Cursor Grok 4.5 ids.
@@ -189,12 +193,12 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
     /// Backends suitable for the Summary v2 writer role.
     /// Local Qwen is omitted — `SummaryService.runBackend` does not support it in v2 yet.
     static var writerBackends: [SummaryBackend] {
-        [.composer25, .composer25Fast, .claude, .grok, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium]
+        [.composer25, .composer25Fast, .claude, .grok, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast]
     }
 
     /// Backends suitable for the Summary v2 checker role.
     static var checkerBackends: [SummaryBackend] {
-        [.cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .composer25, .composer25Fast, .claude, .grok]
+        [.cursorGrok47MediumFast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .composer25, .composer25Fast, .claude, .grok]
     }
 }
 
@@ -245,6 +249,7 @@ final class AppSettings: ObservableObject {
         // Tests construct this singleton against the developer's defaults domain.
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
             migrateActiveCursorGrokTo47Medium()
+            migrateActiveCursorGrokTo47MediumFast()
         }
     }
 
@@ -256,6 +261,19 @@ final class AppSettings: ObservableObject {
         guard !UserDefaults.standard.bool(forKey: flag) else { return }
         let previous = SummaryBackend.cursorGrok46Fast.rawValue
         let next = SummaryBackend.cursorGrok47Medium.rawValue
+        if summaryBackendRaw == previous { summaryBackendRaw = next }
+        if summaryCheckerBackendRaw == previous { summaryCheckerBackendRaw = next }
+        UserDefaults.standard.set(true, forKey: flag)
+    }
+
+    /// One-shot. Medium Fast is the summarizer default. Moves a saved
+    /// `grok-4.7-medium` selection (the previous default) onto
+    /// `grok-4.7-medium-fast`. Picking Medium again sticks.
+    private func migrateActiveCursorGrokTo47MediumFast() {
+        let flag = "parley.didMigrateSummaryBackendToGrok47MediumFast"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        let previous = SummaryBackend.cursorGrok47Medium.rawValue
+        let next = SummaryBackend.cursorGrok47MediumFast.rawValue
         if summaryBackendRaw == previous { summaryBackendRaw = next }
         if summaryCheckerBackendRaw == previous { summaryCheckerBackendRaw = next }
         UserDefaults.standard.set(true, forKey: flag)
@@ -313,6 +331,10 @@ final class AppSettings: ObservableObject {
         static let fluidGpuEncoder = "parley.fluidGpuEncoder"
         static let minSpeechToIdentify = "parley.minSpeechToIdentify"
         static let liveTranscriptEnabled = "parley.liveTranscriptEnabled"
+        static let batchMode = "parley.batchMode"
+        static let transcriptionTiming = "parley.transcriptionTiming"
+        static let transcriptionWindowStartHour = "parley.transcriptionWindowStartHour"
+        static let transcriptionWindowEndHour = "parley.transcriptionWindowEndHour"
         static let summaryPromptTemplate = "parley.summaryPromptTemplate"
         static let summaryRepairPromptTemplate = "parley.summaryRepairPromptTemplate"
         static let summaryCheckerPromptTemplate = "parley.summaryCheckerPromptTemplate"
@@ -460,6 +482,20 @@ final class AppSettings: ObservableObject {
     /// speaker-attributed transcript in one pass at stop. The offline pass is fast and
     /// accurate, so live text is opt-in; turning it off removes all live-decode load.
     @AppStorage(Key.liveTranscriptEnabled) var liveTranscriptEnabled: Bool = false
+    /// Record audio only and transcribe on FluidAudio's batch model, including
+    /// while the next call is recording. Off keeps the live engine and pauses
+    /// the offline queue for the duration of a recording.
+    @AppStorage(Key.batchMode) var batchMode: Bool = true
+    @AppStorage(Key.transcriptionTiming) var transcriptionTimingRaw: String = TranscriptionTiming.afterCall.rawValue
+    /// Daily window start (24h, inclusive). Used when `transcriptionTiming` is `.window`.
+    @AppStorage(Key.transcriptionWindowStartHour) var transcriptionWindowStartHour: Int = 22
+    /// Daily window end (24h, exclusive). Overnight spans match quiet hours.
+    @AppStorage(Key.transcriptionWindowEndHour) var transcriptionWindowEndHour: Int = 7
+
+    var transcriptionTiming: TranscriptionTiming {
+        get { TranscriptionTiming(rawValue: transcriptionTimingRaw) ?? .afterCall }
+        set { transcriptionTimingRaw = newValue.rawValue }
+    }
     /// BCP-47 locale for SpeechAnalyzer (e.g. en-US). Validated against
     /// `SpeechTranscriber.supportedLocales` at record time.
     @AppStorage(Key.speechLocale) var speechLocale: String = Locale.current.identifier(.bcp47)
@@ -467,12 +503,12 @@ final class AppSettings: ObservableObject {
     /// summary automatically (result is staged for review in History). Default on.
     /// Key name is historical (`autoRunClaude`); applies to whichever `summaryBackend` is set.
     @AppStorage(Key.autoRunClaude) var autoRunClaude: Bool = true
-    /// Which engine generates summaries: Claude Code, Grok, or local MLX/Qwen.
-    @AppStorage(Key.summaryBackend) var summaryBackendRaw: String = SummaryBackend.claude.rawValue
+    /// Which engine generates summaries. Default is Cursor Grok 4.7 Medium Fast.
+    @AppStorage(Key.summaryBackend) var summaryBackendRaw: String = SummaryBackend.cursorGrok47MediumFast.rawValue
     /// Classic single-backend vs v2 writer→checker pipeline.
     @AppStorage(Key.summaryPipeline) var summaryPipelineRaw: String = SummaryPipeline.classic.rawValue
     @AppStorage(Key.summaryWriterBackend) var summaryWriterBackendRaw: String = SummaryBackend.composer25.rawValue
-    @AppStorage(Key.summaryCheckerBackend) var summaryCheckerBackendRaw: String = SummaryBackend.cursorGrok46Fast.rawValue
+    @AppStorage(Key.summaryCheckerBackend) var summaryCheckerBackendRaw: String = SummaryBackend.cursorGrok47MediumFast.rawValue
     @AppStorage(Key.claudeBinaryPath) var claudeBinaryPath: String = "\(NSHomeDirectory())/.local/bin/claude"
     @AppStorage(Key.claudePromptTemplate) var claudePromptTemplate: String = AppSettings.defaultClaudePrompt
     @AppStorage(Key.claudeModel) var claudeModel: String = "sonnet"
@@ -484,7 +520,7 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.cursorBinaryPath) var cursorBinaryPath: String = "/usr/local/bin/cursor"
 
     var summaryBackend: SummaryBackend {
-        get { SummaryBackend.resolved(summaryBackendRaw) ?? .claude }
+        get { SummaryBackend.resolved(summaryBackendRaw) ?? .cursorGrok47MediumFast }
         set { summaryBackendRaw = newValue.rawValue }
     }
 
@@ -499,7 +535,7 @@ final class AppSettings: ObservableObject {
     }
 
     var summaryCheckerBackend: SummaryBackend {
-        get { SummaryBackend.resolved(summaryCheckerBackendRaw) ?? .cursorGrok46Fast }
+        get { SummaryBackend.resolved(summaryCheckerBackendRaw) ?? .cursorGrok47MediumFast }
         set { summaryCheckerBackendRaw = newValue.rawValue }
     }
     /// Ask before auto-summarizing a wave of ≥ this many notes at once (backlog / bulk

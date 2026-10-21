@@ -9,6 +9,7 @@ enum PipelineStage: Equatable {
     case queuedForSpeakers      // offline pass waiting (for idle)
     case pausedForSpeakers      // offline pass parked for live recording
     case heldForSpeakers        // offline pass held by user
+    case waitingForTranscription // outside the daily transcription window
     case needsSpeakerNames      // offline done but generic "Speaker N" labels remain
     case summarizing            // Claude summary running now
     case queuedForSummary       // summary queued / awaiting bulk confirm
@@ -79,6 +80,7 @@ extension PipelineStage {
         if offlineState == .running { return .detectingSpeakers }
         if offlineState == .paused { return .pausedForSpeakers }
         if offlineState == .held { return .heldForSpeakers }
+        if offlineState == .waiting { return .waitingForTranscription }
         if offlineState == .queued { return .queuedForSpeakers }
 
         if item.summaryReadyURL != nil { return .reviewReady }
@@ -117,6 +119,7 @@ extension PipelineStage {
         if offlineState == .running { return .detectingSpeakers }
         if offlineState == .paused { return .pausedForSpeakers }
         if offlineState == .held { return .heldForSpeakers }
+        if offlineState == .waiting { return .waitingForTranscription }
         if offlineState == .queued { return .queuedForSpeakers }
 
         // 4. Human gates / waiting.
@@ -137,7 +140,7 @@ extension PipelineStage {
     var isProcessing: Bool {
         switch self {
         case .detectingSpeakers, .queuedForSpeakers, .pausedForSpeakers, .heldForSpeakers,
-             .summarizing, .queuedForSummary, .heldForSummary: return true
+             .waitingForTranscription, .summarizing, .queuedForSummary, .heldForSummary: return true
         default: return false
         }
     }

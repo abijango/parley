@@ -47,6 +47,9 @@ final class FluidAudioEngine: TranscriptionEngine {
     /// re-processing an already-recorded call from History (there are no streaming
     /// units, so the batch pass is the only source of transcript text + timings).
     var forceOfflineAsr = false
+    /// Batch mode pass. The int8 Unified encoder aborts on the GPU, and the v3
+    /// GPU encoder is a speed toggle, so this pass stays on the Neural Engine.
+    var preferNeuralEngine = false
     /// Meeting metadata for custom vocabulary (set before `start()`).
     var sessionAttendees = ""
     var sessionMeetingTitle = ""
@@ -751,7 +754,7 @@ final class FluidAudioEngine: TranscriptionEngine {
         let profile = asrProfile ?? FluidAsrBinding.profile(from: settings)
         let useUnified = profile == .parakeetUnified
         let version: AsrModelVersion = profile == .parakeetV2 ? .v2 : .v3
-        let gpuEncoder = settings.fluidGpuEncoder
+        let gpuEncoder = preferNeuralEngine ? false : settings.fluidGpuEncoder
         var vocab: CustomVocabularyContext?
         var ctc: CtcModels?
         let terms = FluidVocabularyBuilder.build(

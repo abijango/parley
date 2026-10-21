@@ -98,4 +98,26 @@ final class MeetingRosterTests: XCTestCase {
         XCTAssertTrue(NameClassifier.isChromeLabel(name("See more")))
         XCTAssertTrue(AttendeePolicy.uncertainChips(in: roster).isEmpty)
     }
+
+    @MainActor
+    func testAttendeeFieldAppendsJoinersAndKeepsLeavers() {
+        let meeting = MeetingSessionState()
+        let admission = MeetingAdmission(meeting: meeting)
+        let t0 = Date()
+        func reading(_ names: [String], at date: Date) -> SourceReading {
+            SourceReading(
+                title: nil,
+                roster: RosterSnapshot(
+                    observedAt: date, coverage: .complete, isFirstSighting: date == t0,
+                    participants: names.map {
+                        Participant(name: name($0), presence: .inCall(.listedInCall), role: nil)
+                    }))
+        }
+        admission.ingest(reading(["Ada", "Bob"], at: t0))
+        XCTAssertEqual(meeting.attendees, "Ada, Bob")
+        admission.ingest(reading(["Ada"], at: t0.addingTimeInterval(10)))
+        XCTAssertEqual(meeting.attendees, "Ada, Bob")
+        admission.ingest(reading(["Ada", "Cara"], at: t0.addingTimeInterval(20)))
+        XCTAssertEqual(meeting.attendees, "Ada, Bob, Cara")
+    }
 }

@@ -43,16 +43,8 @@ final class TeamsSource: MeetingSource, @unchecked Sendable {
     private func renderedCalendarTitle(_ context: ScanContext) -> TitleCandidate? {
         if let teamsPid = context.runningApps.pid(prefix: "com.microsoft.teams") {
             prepareIfNeeded(teamsPid, tree: context.tree)
-            let events = MeetingParsers.outlookCalendarEvents(context.tree.nodes(pid: teamsPid))
-            if let event = MeetingParsers.currentEvent(in: events) {
-                return TitleCandidate(title: event.title, authority: .scheduleOverlap, provenance: "calendar:teams")
-            }
         }
-        if let outlookPid = context.runningApps.pid(exact: "com.microsoft.outlook"),
-           let title = MeetingParsers.outlookNativeJoinableTitle(context.tree.nodes(pid: outlookPid)) {
-            return TitleCandidate(title: title, authority: .scheduleOverlap, provenance: "calendar:outlook")
-        }
-        return nil
+        return MeetingParsers.scheduleOverlapTitle(apps: context.runningApps, tree: context.tree)
     }
 
     /// Roster is found by the Attendees outline, not by a settled call-window title.

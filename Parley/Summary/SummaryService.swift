@@ -176,6 +176,11 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         case .skipAutoOff:
             return
         case .enqueue:
+            if SummaryEnqueuePolicy.liftsRepeatedFailurePause(trigger),
+               case .paused(let reason, _) = throttle, reason == .repeatedFailures {
+                clearThrottle()
+                AppLog.log("Summary: resuming queue paused for repeated failures — explicit retry", category: "summary")
+            }
             summarize(item)
         case .confirmBulk:
             // Debounce into the single slot — never raise a second dialog.
@@ -224,9 +229,15 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     // MARK: Run
 
-    /// Queue a background summary for `item` (no-op if already pending or this backend is staged).
+    /// Queue a background summary for `item`.
+    ///
+    /// A pending run is left alone so Retry cannot double-enqueue. A failed run is
+    /// replaced: the failure stays in `jobs` so History can show it, and treating
+    /// that record like in-flight work made Retry and Summarize return without
+    /// starting anything. A staged draft still blocks a second run; Regenerate
+    /// deletes that draft first.
     func summarize(_ item: TranscriptItem) {
-        guard jobs[item.id] == nil else { return }
+        if case .pending = jobs[item.id] { return }
         let settings = AppSettings.shared
         if settings.summaryPipeline == .v2 {
             let v2 = Self.v2StagingURL(for: item.url)
@@ -236,6 +247,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             if FileManager.default.fileExists(atPath: Self.stagingURL(for: item.url, backend: backend).path) {
                 return
             }
+        }
+        if case .failed = jobs[item.id] {
+            AppLog.log("Summary: retrying \(item.url.lastPathComponent) after a failed run", category: "summary")
+            jobs[item.id] = nil
         }
         jobs[item.id] = .pending(since: Date())
         setSummaryStatus(.queued, for: item)
@@ -397,11 +412,25 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
     /// Resume after a pause (manual Resume button, or the auto-resume timer firing).
     func resumeQueue() {
+        clearThrottle()
+        runNextIfIdle()
+    }
+
+    /// Clear a pause without starting the queue. `resumeQueue` pumps afterwards;
+    /// an explicit retry pumps via `summarize` once the retried item is enqueued,
+    /// so the new run is not left behind an already-empty pump.
+    private func clearThrottle() {
         resumeTask?.cancel(); resumeTask = nil
         consecutiveFailures = 0
         backoffAttempt = 0
         throttle = .normal
-        runNextIfIdle()
+    }
+
+    /// Record a terminal failure. The next `summarize` replaces it. A usage-limit
+    /// hold stays `.pending` instead — that job is still in the queue.
+    func noteFailedRun(_ item: TranscriptItem, reason: String) {
+        jobs[item.id] = .failed(reason)
+        setSummaryStatus(.failed, for: item)
     }
 
     private func tripThrottle(reason: PauseReason, resumeAt: Date?) {
@@ -503,7 +532,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             case .claude: return "Starting Claude…"
             case .grok: return "Starting Grok…"
             case .local: return "Starting local Qwen…"
-            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
                 return "Starting \(backend.statusName)…"
             }
         }()
@@ -530,7 +559,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             case .claude: return claudeModel
             case .grok: return grokModel
             case .local: return settings.localSummaryModelId
-            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
                 return backend.rawValue
             }
         }()
@@ -602,7 +631,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 result = await Self.runLocal(prompt: built.prompt, model: modelLabel) { line in
                     Task { @MainActor [weak self] in self?.runningActivity = line }
                 }
-            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
                 Task { @MainActor [weak self] in self?.runningActivity = "\(backend.statusName) is writing…" }
                 result = Self.runCursorAgent(binary: cursorBinary, prompt: built.prompt, model: backend.rawValue, processHandle: handle)
             }
@@ -636,7 +665,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                             GrokConnection.shared.noteRunSucceeded()
                         case .local:
                             break
-                        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+                        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
                             CursorConnection.shared.noteRunSucceeded()
                         }
                         let run = SummaryRunRecord(
@@ -654,8 +683,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                         Self.notifyReady(title: item.meta.title)
                         AppLog.log("Summary: ready for review — \(staged.lastPathComponent) (\(backendLabel))", category: "summary")
                     } catch {
-                        self.jobs[item.id] = .failed("Couldn't write the summary: \(error.localizedDescription)")
-                        self.setSummaryStatus(.failed, for: item)
+                        self.noteFailedRun(item, reason: "Couldn't write the summary: \(error.localizedDescription)")
                     }
                 case .usageLimited(let trip):
                     // Don't lose it or burn the rest of the queue — put it back at the
@@ -670,14 +698,13 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                         GrokConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
                     case .local:
                         break
-                    case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+                    case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
                         break
                     }
                     AppLog.log("Summary: \(backendLabel) usage/rate limit hit (\(trip.matchedPhrase)) — pausing queue", category: "summary")
                     self.tripThrottle(reason: .usageLimit, resumeAt: trip.resumeAt)
                 case .failure(let reason, let setupIssue):
-                    self.jobs[item.id] = .failed(reason)
-                    self.setSummaryStatus(.failed, for: item)
+                    self.noteFailedRun(item, reason: reason)
                     self.consecutiveFailures += 1
                     // Keep the connection badge honest so the user is pointed at setup.
                     switch (backend, setupIssue) {
@@ -687,11 +714,11 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     case (.grok, .notLoggedIn):     GrokConnection.shared.noteAuthFailure(detail: reason)
                     case (.composer25, .notInstalled), (.composer25Fast, .notInstalled),
                          (.cursorGrok46Fast, .notInstalled), (.cursorGrok47Low, .notInstalled),
-                         (.cursorGrok47Medium, .notInstalled):
+                         (.cursorGrok47Medium, .notInstalled), (.cursorGrok47MediumFast, .notInstalled):
                         CursorConnection.shared.refresh()
                     case (.composer25, .notLoggedIn), (.composer25Fast, .notLoggedIn),
                          (.cursorGrok46Fast, .notLoggedIn), (.cursorGrok47Low, .notLoggedIn),
-                         (.cursorGrok47Medium, .notLoggedIn):
+                         (.cursorGrok47Medium, .notLoggedIn), (.cursorGrok47MediumFast, .notLoggedIn):
                         CursorConnection.shared.noteAuthFailure(detail: reason)
                     default: break
                     }
@@ -893,8 +920,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     Self.notifyReady(title: item.meta.title)
                     AppLog.log("Summary v2: ready for review — \(staged.lastPathComponent)", category: "summary")
                 } catch {
-                    self.jobs[item.id] = .failed("Couldn't write the summary: \(error.localizedDescription)")
-                    self.setSummaryStatus(.failed, for: item)
+                    self.noteFailedRun(item, reason: "Couldn't write the summary: \(error.localizedDescription)")
                 }
                 self.store.refresh()
                 self.isRunning = false
@@ -908,8 +934,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     private func finishFailure(item: TranscriptItem, reason: String, setupIssue: SetupIssue?,
                                backend: SummaryBackend, failureTrip: Int) {
         if parkIfPreempted(item) { return }
-        jobs[item.id] = .failed(reason)
-        setSummaryStatus(.failed, for: item)
+        noteFailedRun(item, reason: reason)
         consecutiveFailures += 1
         switch (backend, setupIssue) {
         case (.claude, .notInstalled): ClaudeConnection.shared.refresh()
@@ -918,11 +943,11 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         case (.grok, .notLoggedIn): GrokConnection.shared.noteAuthFailure(detail: reason)
         case (.composer25, .notInstalled), (.composer25Fast, .notInstalled),
              (.cursorGrok46Fast, .notInstalled), (.cursorGrok47Low, .notInstalled),
-             (.cursorGrok47Medium, .notInstalled):
+             (.cursorGrok47Medium, .notInstalled), (.cursorGrok47MediumFast, .notInstalled):
             CursorConnection.shared.refresh()
         case (.composer25, .notLoggedIn), (.composer25Fast, .notLoggedIn),
              (.cursorGrok46Fast, .notLoggedIn), (.cursorGrok47Low, .notLoggedIn),
-             (.cursorGrok47Medium, .notLoggedIn):
+             (.cursorGrok47Medium, .notLoggedIn), (.cursorGrok47MediumFast, .notLoggedIn):
             CursorConnection.shared.noteAuthFailure(detail: reason)
         default: break
         }
@@ -942,7 +967,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         case .claude: ClaudeConnection.shared.noteRunSucceeded()
         case .grok: GrokConnection.shared.noteRunSucceeded()
         case .local: break
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
             CursorConnection.shared.noteRunSucceeded()
         }
     }
@@ -965,7 +990,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             return runGrok(binary: grokBinary, prompt: prompt, model: grokModel, processHandle: processHandle)
         case .local:
             return .failure(reason: "Local Qwen is not supported in the v2 writer/checker roles yet.", setupIssue: nil)
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
             return runCursorAgent(binary: cursorBinary, prompt: prompt, model: backend.rawValue, processHandle: processHandle)
         }
     }
@@ -1377,7 +1402,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             case .claude: return claudeModel
             case .grok: return grokModel
             case .local: return localModel
-            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
                 return backend.rawValue
             }
         }()
@@ -1391,7 +1416,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             result = runGrok(binary: grokBinary, prompt: prompt, model: grokModel)
         case .local:
             result = await runLocal(prompt: prompt, model: localModel, onActivity: { _ in })
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium:
+        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
             result = runCursorAgent(binary: cursorBinary, prompt: prompt, model: backend.rawValue)
         }
         switch withWallClock(start, result, model: modelLabel) {

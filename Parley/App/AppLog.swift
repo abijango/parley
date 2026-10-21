@@ -5,6 +5,8 @@ import OSLog
 ///
 /// Writes timestamped lines to `~/Library/Logs/<App>/parley.log` on a serial
 /// queue (safe to call from any thread/actor). Reveal it from Settings.
+/// When the file reaches the rotation limit it moves into `archive/` and a
+/// later pass zips it; see `LogRotation`.
 /// TODO(app-name): log file name.
 enum AppLog {
     static var directory: URL {
@@ -15,6 +17,7 @@ enum AppLog {
 
     private static let queue = DispatchQueue(label: "\(AppInfo.name).applog")
     private static let osLog = Logger(subsystem: AppInfo.name, category: "app")
+    private static var didScheduleLaunchCompression = false
     private static let stamp: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
@@ -27,6 +30,7 @@ enum AppLog {
         queue.async {
             let line = "\(stamp.string(from: date)) [\(category)] \(message)\n"
             guard let data = line.data(using: .utf8) else { return }
+            let rotated = LogRotation.rotateActiveFileIfNeeded(fileURL, now: date)
             let fm = FileManager.default
             try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
             if let handle = try? FileHandle(forWritingTo: fileURL) {
@@ -35,6 +39,10 @@ enum AppLog {
                 handle.write(data)
             } else {
                 try? data.write(to: fileURL)
+            }
+            if rotated || !didScheduleLaunchCompression {
+                didScheduleLaunchCompression = true
+                LogRotation.scheduleCompression(of: directory)
             }
         }
     }
