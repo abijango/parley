@@ -162,7 +162,7 @@ final class ClaudeConnection: ObservableObject {
 
     /// Runs `claude --version` with a short timeout; true on a clean exit. No token spend.
     nonisolated private static func runsOK(_ binary: String) -> Bool {
-        guard let result = runSync(binary: binary, args: ["--version"], timeout: 10) else { return false }
+        guard let result = ProcessRun.capture(binary: binary, args: ["--version"], timeout: 10) else { return false }
         return result.exitCode == 0
     }
 
@@ -175,7 +175,7 @@ final class ClaudeConnection: ObservableObject {
 
     /// Minimal `-p` probe: cheapest model, tiny prompt, no tools / MCP / session.
     nonisolated private static func runProbe(binary: String) -> ProbeOutcome {
-        guard let r = runSync(
+        guard let r = ProcessRun.capture(
             binary: binary,
             args: ["-p", "Reply with the single word OK.",
                    "--model", "haiku",
@@ -185,41 +185,14 @@ final class ClaudeConnection: ObservableObject {
         else { return .otherError(detail: "Claude didn't respond to a test prompt.") }
 
         if r.exitCode == 0 { return .ok }
-        if ClaudeUsageLimit.detect(stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode) != nil {
+        if ClaudeUsageLimit.detect(stdout: r.stdoutText, stderr: r.stderrText, exitCode: r.exitCode) != nil {
             // resumeAt parsing is best-effort; the badge only needs the limited state here.
             return .limited(resumeAt: nil)
         }
-        if let phrase = ClaudeAuthError.detect(stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode) {
+        if let phrase = ClaudeAuthError.detect(stdout: r.stdoutText, stderr: r.stderrText, exitCode: r.exitCode) {
             return .notLoggedIn(detail: phrase)
         }
-        let detail = r.stderr.isEmpty ? "claude exited with code \(r.exitCode)" : String(r.stderr.prefix(160))
+        let detail = r.stderrText.isEmpty ? "claude exited with code \(r.exitCode)" : String(r.stderrText.prefix(160))
         return .otherError(detail: detail)
-    }
-
-    private struct SyncResult { var exitCode: Int32; var stdout: String; var stderr: String }
-
-    /// Spawn `binary args…`, read stdout/stderr to EOF, terminate if it overruns `timeout`.
-    /// Returns nil only if the process fails to launch.
-    nonisolated private static func runSync(binary: String, args: [String], timeout: TimeInterval) -> SyncResult? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = args
-        let out = Pipe(); let err = Pipe()
-        process.standardOutput = out
-        process.standardError = err
-        process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-
-        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
-
-        let outData = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        watchdog.cancel()
-        return SyncResult(
-            exitCode: process.terminationStatus,
-            stdout: String(data: outData, encoding: .utf8) ?? "",
-            stderr: String(data: errData, encoding: .utf8) ?? "")
     }
 }

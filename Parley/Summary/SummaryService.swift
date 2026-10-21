@@ -1028,13 +1028,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     /// terminated and the job fails *retryably*.
     private static let runTimeout: TimeInterval = 600   // 10 minutes
 
-    /// A flag the watchdog flips so the caller can tell a timeout-kill from a real exit-1.
-    private final class TimeoutFlag: @unchecked Sendable {
-        private let lock = NSLock(); private var v = false
-        func trip() { lock.lock(); v = true; lock.unlock() }
-        var tripped: Bool { lock.lock(); defer { lock.unlock() }; return v }
-    }
-
     /// Runs `claude -p` with `--output-format stream-json --include-partial-messages`,
     /// incrementally parsing NDJSON lines so the caller can drive a live-activity ticker.
     ///
@@ -1067,22 +1060,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         } catch {
             return .failure(reason: error.localizedDescription, setupIssue: nil)
         }
-        do { try built.process.run() }
-        catch { return .failure(reason: "Failed to launch claude: \(error.localizedDescription)", setupIssue: nil) }
-        processHandle?.set(built.process)
-
-        // Watchdog: terminate the process if it overruns the cap. Terminating closes the
-        // write-end of the pipe, so availableData returns empty and the read loop exits
-        // naturally — no extra synchronisation needed.
-        let flag = TimeoutFlag()
-        let watchdog = DispatchWorkItem {
-            guard built.process.isRunning else { return }
-            flag.trip()
-            built.process.terminate()
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + runTimeout, execute: watchdog)
-
-        let handle = built.stdout.fileHandleForReading
         var buffer = Data()
         var accumulatedText = ""    // text deltas joined in order (note-sized, not bounded)
         var resultText: String?     // set once the `result` event arrives
@@ -1102,65 +1079,64 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         // before the model reaches a section heading.
         var earlyLinesEmitted = false
 
-        while true {
-            let chunk = handle.availableData
-            if chunk.isEmpty { break }   // EOF (process exited or was terminated)
-
-            // Accumulate raw bytes for limit detection (bounded ring-like behaviour via
-            // trimming: we only ever trim when we exceed the cap, which is rare).
-            rawTailData.append(chunk)
-            if rawTailData.count > rawTailCap {
-                rawTailData = rawTailData.suffix(rawTailCap)
-            }
-
-            buffer.append(chunk)
-            while let nl = buffer.firstIndex(of: 0x0A) {
-                let lineData = buffer.subdata(in: buffer.startIndex..<nl)
-                buffer.removeSubrange(buffer.startIndex...nl)
-
-                let event = ClaudeStreamParser.parse(lineData)
-
-                // Accumulate text deltas.
-                if !event.textDelta.isEmpty {
-                    accumulatedText += event.textDelta
+        let output: ProcessOutput
+        do {
+            output = try ProcessRun.run(built.process, stdout: built.stdout, stderr: built.stderr,
+                                        timeout: runTimeout, handle: processHandle) { chunk in
+                // Accumulate raw bytes for limit detection (bounded ring-like behaviour via
+                // trimming: we only ever trim when we exceed the cap, which is rare).
+                rawTailData.append(chunk)
+                if rawTailData.count > rawTailCap {
+                    rawTailData = rawTailData.suffix(rawTailCap)
                 }
 
-                // Capture the result envelope (text, error flag, usage tally).
-                if let r = event.resultText {
-                    resultText = r
-                    isError = event.isError ?? false
-                    if let u = event.usage { usage = u }
-                }
+                buffer.append(chunk)
+                while let nl = buffer.firstIndex(of: 0x0A) {
+                    let lineData = buffer.subdata(in: buffer.startIndex..<nl)
+                    buffer.removeSubrange(buffer.startIndex...nl)
 
-                // Early tool/text lines surface before a section heading appears.
-                if !earlyLinesEmitted, !event.activityLines.isEmpty {
-                    earlyLinesEmitted = true
-                    onActivity(event.activityLines.first ?? "Working…")
-                }
+                    let event = ClaudeStreamParser.parse(lineData)
 
-                // Section-change ticker (≥1 s between updates).
-                if let section = ClaudeStreamParser.currentSection(in: accumulatedText) {
-                    let now = Date()
-                    if section != lastActivitySection,
-                       now.timeIntervalSince(lastActivityTime) >= 1.0 {
-                        lastActivitySection = section
-                        lastActivityTime = now
-                        onActivity("Writing \(section)…")
+                    // Accumulate text deltas.
+                    if !event.textDelta.isEmpty {
+                        accumulatedText += event.textDelta
+                    }
+
+                    // Capture the result envelope (text, error flag, usage tally).
+                    if let r = event.resultText {
+                        resultText = r
+                        isError = event.isError ?? false
+                        if let u = event.usage { usage = u }
+                    }
+
+                    // Early tool/text lines surface before a section heading appears.
+                    if !earlyLinesEmitted, !event.activityLines.isEmpty {
+                        earlyLinesEmitted = true
+                        onActivity(event.activityLines.first ?? "Working…")
+                    }
+
+                    // Section-change ticker (≥1 s between updates).
+                    if let section = ClaudeStreamParser.currentSection(in: accumulatedText) {
+                        let now = Date()
+                        if section != lastActivitySection,
+                           now.timeIntervalSince(lastActivityTime) >= 1.0 {
+                            lastActivitySection = section
+                            lastActivityTime = now
+                            onActivity("Writing \(section)…")
+                        }
                     }
                 }
             }
+        } catch {
+            return .failure(reason: "Failed to launch claude: \(error.localizedDescription)", setupIssue: nil)
         }
 
-        built.process.waitUntilExit()
-        watchdog.cancel()
-
-        if flag.tripped {
+        if output.timedOut {
             return .failure(reason: "Summary timed out after \(Int(runTimeout / 60)) min — retry.", setupIssue: nil)
         }
 
-        let code = built.process.terminationStatus
-        let errData = built.stderr.fileHandleForReading.readDataToEndOfFile()
-        let err = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let code = output.exitCode
+        let err = output.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Usage-limit / auth detection: prefer the decoded result text; fall back to the
         // bounded raw tail so phrases inside JSON wrapping are still found.
@@ -1200,30 +1176,20 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         } catch {
             return .failure(reason: error.localizedDescription, setupIssue: nil)
         }
-        do { try built.process.run() }
-        catch { return .failure(reason: "Failed to launch grok: \(error.localizedDescription)", setupIssue: nil) }
-        processHandle?.set(built.process)
-
-        let flag = TimeoutFlag()
-        let watchdog = DispatchWorkItem {
-            guard built.process.isRunning else { return }
-            flag.trip()
-            built.process.terminate()
+        let output: ProcessOutput
+        do {
+            output = try ProcessRun.run(built.process, stdout: built.stdout, stderr: built.stderr,
+                                        timeout: runTimeout, handle: processHandle)
+        } catch {
+            return .failure(reason: "Failed to launch grok: \(error.localizedDescription)", setupIssue: nil)
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + runTimeout, execute: watchdog)
-
-        let outData = built.stdout.fileHandleForReading.readDataToEndOfFile()
-        let errData = built.stderr.fileHandleForReading.readDataToEndOfFile()
-        built.process.waitUntilExit()
-        watchdog.cancel()
-
-        if flag.tripped {
+        if output.timedOut {
             return .failure(reason: "Summary timed out after \(Int(runTimeout / 60)) min — retry.", setupIssue: nil)
         }
 
-        let code = built.process.terminationStatus
-        let out = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let err = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let code = output.exitCode
+        let out = output.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let err = output.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let trip = ClaudeUsageLimit.detect(stdout: out, stderr: err, exitCode: code) {
             return .usageLimited(trip)
@@ -1291,30 +1257,20 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         } catch {
             return .failure(reason: error.localizedDescription, setupIssue: nil)
         }
-        do { try built.process.run() }
-        catch { return .failure(reason: "Failed to launch cursor agent: \(error.localizedDescription)", setupIssue: nil) }
-        processHandle?.set(built.process)
-
-        let flag = TimeoutFlag()
-        let watchdog = DispatchWorkItem {
-            guard built.process.isRunning else { return }
-            flag.trip()
-            built.process.terminate()
+        let output: ProcessOutput
+        do {
+            output = try ProcessRun.run(built.process, stdout: built.stdout, stderr: built.stderr,
+                                        timeout: runTimeout, handle: processHandle)
+        } catch {
+            return .failure(reason: "Failed to launch cursor agent: \(error.localizedDescription)", setupIssue: nil)
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + runTimeout, execute: watchdog)
-
-        let outData = built.stdout.fileHandleForReading.readDataToEndOfFile()
-        let errData = built.stderr.fileHandleForReading.readDataToEndOfFile()
-        built.process.waitUntilExit()
-        watchdog.cancel()
-
-        if flag.tripped {
+        if output.timedOut {
             return .failure(reason: "Summary timed out after \(Int(runTimeout / 60)) min — retry.", setupIssue: nil)
         }
 
-        let code = built.process.terminationStatus
-        let out = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let err = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let code = output.exitCode
+        let out = output.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let err = output.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let trip = ClaudeUsageLimit.detect(stdout: out, stderr: err, exitCode: code) {
             return .usageLimited(trip)

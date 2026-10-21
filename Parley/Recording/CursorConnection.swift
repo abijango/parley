@@ -66,18 +66,6 @@ final class CursorConnection: ObservableObject {
     }
 
     nonisolated private static func runsOK(_ path: String) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["agent", "--version"]
-        p.standardOutput = Pipe()
-        p.standardError = Pipe()
-        p.standardInput = FileHandle.nullDevice
-        do {
-            try p.run()
-            p.waitUntilExit()
-            return p.terminationStatus == 0
-        } catch {
-            return false
-        }
+        ProcessRun.capture(binary: path, args: ["agent", "--version"], timeout: 10)?.exitCode == 0
     }
 }

@@ -3,13 +3,6 @@ import Foundation
 /// Runs a vision-only Cursor agent pass over meeting attachment images.
 enum AttachmentVisionRunner {
 
-    private final class TimeoutFlag: @unchecked Sendable {
-        private let lock = NSLock()
-        private var v = false
-        func trip() { lock.lock(); v = true; lock.unlock() }
-        var tripped: Bool { lock.lock(); defer { lock.unlock() }; return v }
-    }
-
     enum Outcome: Equatable {
         case success(String)
         case failure(String)
@@ -32,35 +25,23 @@ enum AttachmentVisionRunner {
         } catch {
             return .failure((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         }
-        do { try built.process.run() }
-        catch { return .failure("Failed to launch cursor agent: \(error.localizedDescription)") }
-
-        let timedOut = TimeoutFlag()
         let timeout: TimeInterval = 600
-        let watchdog = DispatchWorkItem {
-            guard built.process.isRunning else { return }
-            timedOut.trip()
-            built.process.terminate()
+        let output: ProcessOutput
+        do {
+            output = try ProcessRun.run(built.process, stdout: built.stdout, stderr: built.stderr, timeout: timeout)
+        } catch {
+            return .failure("Failed to launch cursor agent: \(error.localizedDescription)")
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
-
-        let stdoutData = built.stdout.fileHandleForReading.readDataToEndOfFile()
-        built.stdout.fileHandleForReading.closeFile()
-        let stderrData = built.stderr.fileHandleForReading.readDataToEndOfFile()
-        built.stderr.fileHandleForReading.closeFile()
-        built.process.waitUntilExit()
-        watchdog.cancel()
-
-        if timedOut.tripped {
+        if output.timedOut {
             return .failure("Vision pass timed out after \(Int(timeout / 60)) min.")
         }
 
-        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        let stdout = output.stdoutText
+        let stderr = output.stderrText
 
-        guard built.process.terminationStatus == 0 else {
+        guard output.exitCode == 0 else {
             let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return .failure(detail.isEmpty ? "Vision pass exited with code \(built.process.terminationStatus)" : detail)
+            return .failure(detail.isEmpty ? "Vision pass exited with code \(output.exitCode)" : detail)
         }
 
         let text: String

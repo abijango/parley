@@ -158,7 +158,7 @@ final class GrokConnection: ObservableObject {
     }
 
     nonisolated private static func runsOK(_ binary: String) -> Bool {
-        guard let result = runSync(binary: binary, args: ["--version"], timeout: 10) else { return false }
+        guard let result = ProcessRun.capture(binary: binary, args: ["--version"], timeout: 10) else { return false }
         return result.exitCode == 0
     }
 
@@ -170,7 +170,7 @@ final class GrokConnection: ObservableObject {
     }
 
     nonisolated private static func runProbe(binary: String, model: String) -> ProbeOutcome {
-        guard let r = runSync(
+        guard let r = ProcessRun.capture(
             binary: binary,
             args: [
                 "-p", "Reply with the single word OK.",
@@ -182,26 +182,26 @@ final class GrokConnection: ObservableObject {
         else { return .otherError(detail: "Grok didn't respond to a test prompt.") }
 
         if r.exitCode == 0 {
-            switch GrokRunner.parseJSONResult(stdout: r.stdout) {
+            switch GrokRunner.parseJSONResult(stdout: r.stdoutText) {
             case .text: return .ok
             case .error(let msg):
                 if Self.looksLikeAuth(msg) { return .notLoggedIn(detail: msg) }
                 return .otherError(detail: msg)
             case .unparseable:
                 // Exit 0 with non-JSON is still a good connectivity signal.
-                return r.stdout.localizedCaseInsensitiveContains("OK") ? .ok
+                return r.stdoutText.localizedCaseInsensitiveContains("OK") ? .ok
                     : .otherError(detail: "Unexpected Grok probe output.")
             }
         }
 
-        let blob = r.stdout + "\n" + r.stderr
-        if ClaudeUsageLimit.detect(stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode) != nil {
+        let blob = r.stdoutText + "\n" + r.stderrText
+        if ClaudeUsageLimit.detect(stdout: r.stdoutText, stderr: r.stderrText, exitCode: r.exitCode) != nil {
             return .limited(resumeAt: nil)
         }
         if Self.looksLikeAuth(blob) {
             return .notLoggedIn(detail: String(blob.trimmingCharacters(in: .whitespacesAndNewlines).prefix(160)))
         }
-        let detail = r.stderr.isEmpty ? "grok exited with code \(r.exitCode)" : String(r.stderr.prefix(160))
+        let detail = r.stderrText.isEmpty ? "grok exited with code \(r.exitCode)" : String(r.stderrText.prefix(160))
         return .otherError(detail: detail)
     }
 
@@ -213,30 +213,5 @@ final class GrokConnection: ObservableObject {
             || lower.contains("authentication")
             || lower.contains("sign in")
             || lower.contains("login required")
-    }
-
-    private struct SyncResult { var exitCode: Int32; var stdout: String; var stderr: String }
-
-    nonisolated private static func runSync(binary: String, args: [String], timeout: TimeInterval) -> SyncResult? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = args
-        let out = Pipe(); let err = Pipe()
-        process.standardOutput = out
-        process.standardError = err
-        process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-
-        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
-
-        let outData = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        watchdog.cancel()
-        return SyncResult(
-            exitCode: process.terminationStatus,
-            stdout: String(data: outData, encoding: .utf8) ?? "",
-            stderr: String(data: errData, encoding: .utf8) ?? "")
     }
 }
