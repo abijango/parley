@@ -152,7 +152,6 @@ final class RecordingController: ObservableObject {
     let speechAssets = SpeechAssetManager()
     let voiceprints = VoiceprintStore()
     let vault = VaultDirectory()
-    let notes = NotesGenerator()
     let store = TranscriptStore()
     /// Holds the local MLX summary model across compare runs (download/load/unload).
     /// Drives the background summary → review → commit flow (Claude / Grok / local).
@@ -1058,10 +1057,6 @@ final class RecordingController: ObservableObject {
         micLastActive = nil; remoteLastActive = nil
     }
 
-    private func partialURL() -> URL? {
-        sessionDirectory?.appendingPathComponent("transcript.partial.md")
-    }
-
     /// On launch, salvage any `.partial` left by a crashed or orphaned session into
     /// the vault inbox. Two cases are handled:
     ///
@@ -1243,7 +1238,6 @@ final class RecordingController: ObservableObject {
                         ? "Recording saved. Transcription queued."
                         : "Saved (no speech transcribed): \(result.url.lastPathComponent)")
                     : "Transcript saved: \(result.url.lastPathComponent)"
-                notes.reset()
                 store.refresh()
                 if !enrichRows.isEmpty {
                     let runSummary = autoSummarize && !segments.isEmpty && !isSpeakerEngine
@@ -1853,7 +1847,6 @@ final class RecordingController: ObservableObject {
         clearArmable = false
         meeting.resetDiscovery()
         admission.reset()
-        notes.reset()
         modeResetForNextMeeting?()
         AppLog.log("Auto-cleared Record view for the next meeting", category: "record")
     }
@@ -1882,7 +1875,7 @@ final class RecordingController: ObservableObject {
         summaryService.enqueueIfPolicyAllows(item, trigger: .freshRecording)
     }
 
-    /// Record-tab Preview "Generate notes" uses the same queue as History, not NotesGenerator.
+    /// Record-tab Preview "Generate notes" uses the same queue as History.
     func enqueuePreviewSummary() {
         guard let url = lastTranscriptURL else { return }
         let meta = TranscriptWriter.parseFrontmatter(url)

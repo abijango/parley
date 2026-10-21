@@ -1082,7 +1082,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + runTimeout, execute: watchdog)
 
-        // Incremental NDJSON read — same pattern as NotesGenerator's proven loop.
         let handle = built.stdout.fileHandleForReading
         var buffer = Data()
         var accumulatedText = ""    // text deltas joined in order (note-sized, not bounded)
@@ -1502,48 +1501,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         return finishFiling(item: item, noteURL: noteURL, destination: dest,
                             alreadyProcessed: item.isProcessed,
                             logMessage: "compare-filed \(noteURL.lastPathComponent) (overwrite=\(overwriteExisting))")
-    }
-
-    /// Blocking text-output variant — kept for reference while streaming is validated.
-    private nonisolated static func runClaude(binary: String, prompt: String, model: String) -> RunResult {
-        let built: (process: Process, stdout: Pipe, stderr: Pipe)
-        do {
-            built = try ClaudeRunner.makeRawSummaryProcess(binaryPath: binary, prompt: prompt, model: model)
-        } catch {
-            return .failure(reason: error.localizedDescription, setupIssue: nil)
-        }
-        do { try built.process.run() }
-        catch { return .failure(reason: "Failed to launch claude: \(error.localizedDescription)", setupIssue: nil) }
-
-        // Watchdog: terminate the process if it overruns the cap. The pipe reads below
-        // then unblock (EOF on the closed handles) and we surface a timeout failure.
-        let flag = TimeoutFlag()
-        let watchdog = DispatchWorkItem {
-            guard built.process.isRunning else { return }
-            flag.trip()
-            built.process.terminate()
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + runTimeout, execute: watchdog)
-
-        let outData = built.stdout.fileHandleForReading.readDataToEndOfFile()
-        let errData = built.stderr.fileHandleForReading.readDataToEndOfFile()
-        built.process.waitUntilExit()
-        watchdog.cancel()
-
-        if flag.tripped {
-            return .failure(reason: "Summary timed out after \(Int(runTimeout / 60)) min — retry.", setupIssue: nil)
-        }
-        let code = built.process.terminationStatus
-        let out = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let err = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard code == 0 else {
-            // Distinguish a usage/rate limit (→ pause + retry) from a plain failure.
-            if let trip = ClaudeUsageLimit.detect(stdout: out, stderr: err, exitCode: code) {
-                return .usageLimited(trip)
-            }
-            return .failure(reason: err.isEmpty ? "claude exited with code \(code)" : String(err.prefix(240)), setupIssue: nil)
-        }
-        return out.isEmpty ? .failure(reason: "claude produced no output.", setupIssue: nil) : .success(out, nil)
     }
 
     private enum RunResult {

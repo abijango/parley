@@ -1,8 +1,6 @@
 import Foundation
 
-/// Generalised NDJSON-line parser for `claude -p --output-format stream-json` output.
-/// Extracted from NotesGenerator's proven per-line parser so both NotesGenerator and
-/// SummaryService share identical stream-event handling without coupling their call sites.
+/// NDJSON-line parser for `claude -p --output-format stream-json` output.
 ///
 /// All methods are nonisolated so the parser can be called from any concurrency context
 /// (Task.detached, DispatchQueue, etc.) without actor-hop overhead.
@@ -144,8 +142,7 @@ enum ClaudeStreamParser {
         return Event(textDelta: text)
     }
 
-    /// Maps known Claude tool names to a short human-readable detail suffix, matching
-    /// the formatting established in NotesGenerator's toolDetail helper.
+    /// Maps known Claude tool names to a short human-readable detail suffix.
     private nonisolated static func toolDetail(_ name: String, _ input: [String: Any]) -> String {
         switch name {
         case "Read", "Write", "Edit":

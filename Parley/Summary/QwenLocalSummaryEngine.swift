@@ -5,7 +5,7 @@ import MLXLMCommon
 /// Uses `SummarizerManager` to download/load/hold the model, and a fresh `ChatSession`
 /// per summary so runs don't share chat history. Does not file anything (Approve step does).
 @MainActor
-final class QwenLocalSummaryEngine: SummaryEngine {
+final class QwenLocalSummaryEngine {
     private let settings: AppSettings
     private let manager: SummarizerManager
 

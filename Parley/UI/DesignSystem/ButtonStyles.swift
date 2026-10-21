@@ -36,8 +36,8 @@ extension View {
 /// The Cursor-style button: flat and matte, no translucency. Primary is a solid clay
 /// fill with white text; secondary is a panel fill with a hairline border. Interaction
 /// is shown by darkening the fill a few percent (the matte analog of glass's material
-/// response). `controlSize`-aware so `.controlSize(.small)` call sites (e.g.
-/// `NotesActionBar`) stay correctly sized instead of rendering oversized.
+/// response). `controlSize`-aware so `.controlSize(.small)` call sites stay
+/// correctly sized instead of rendering oversized.
 struct ClayButtonStyle: ButtonStyle {
     var prominent: Bool = true
 

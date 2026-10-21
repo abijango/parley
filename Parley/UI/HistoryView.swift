@@ -353,7 +353,7 @@ struct HistoryView: View {
         Divider()
         if let note = item.meta.note, !note.isEmpty {
             Button("Open note in Obsidian") {
-                recording.notes.openInObsidian(URL(fileURLWithPath: note))
+                Obsidian.open(URL(fileURLWithPath: note))
             }
         }
         if let audio = item.meta.audio, !audio.isEmpty, FileManager.default.fileExists(atPath: audio) {
@@ -951,7 +951,7 @@ struct HistoryView: View {
         HStack(spacing: Theme.Spacing.medium) {
             if let notePath = item.meta.note, !notePath.isEmpty {
                 Button {
-                    recording.notes.openInObsidian(URL(fileURLWithPath: notePath))
+                    Obsidian.open(URL(fileURLWithPath: notePath))
                 } label: {
                     Label("Open in Obsidian", systemImage: "arrow.up.right.square")
                 }
@@ -1115,7 +1115,7 @@ struct HistoryView: View {
             }
             if let note = l.note {
                 fileChip(icon: "tray.full", label: "Filed note", detail: nil, reveal: note,
-                         open: { recording.notes.openInObsidian(note) })
+                         open: { Obsidian.open(note) })
             }
             Spacer()
         }

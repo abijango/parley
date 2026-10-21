@@ -1,7 +1,6 @@
 import Foundation
 
-/// Shared error / availability types for summary backends. Claude and Grok stay as
-/// CLI runners inside `SummaryService`; the local MLX path uses `QwenLocalSummaryEngine`.
+/// Shared error / availability types for summary backends.
 enum SummaryAvailability: Equatable {
     case available
     case unavailable(String)
@@ -22,11 +21,4 @@ enum SummaryError: LocalizedError {
         case .cancelled: return "Cancelled."
         }
     }
-}
-
-/// A summary backend that takes one fully-built prompt and returns Markdown.
-@MainActor
-protocol SummaryEngine: AnyObject {
-    func availability() async -> SummaryAvailability
-    func summarize(prompt: String) async throws -> String
 }

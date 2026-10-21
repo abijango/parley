@@ -3,7 +3,7 @@ import AVFoundation
 import WhisperKit
 
 /// Second speaker-ID engine: WhisperKit for fast LIVE transcript text (track-labelled
-/// "Me"/"Remote", same as `WhisperKitEngine`), then at stop an OFFLINE pass —
+/// "Me"/"Remote"), then at stop an OFFLINE pass —
 /// re-transcribe the clean mix with word timings, diarize it with SpeakerKit, and
 /// attribute words to speakers (diarization-first). Cross-session voiceprints reuse
 /// `VoiceprintStore`, tagged with SpeakerKit's `pyannote_v3` model so they don't

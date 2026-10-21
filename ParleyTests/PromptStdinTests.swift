@@ -7,7 +7,7 @@ final class PromptStdinTests: XCTestCase {
         let bin = try Self.makeFakeBinary()
         defer { try? FileManager.default.removeItem(at: bin) }
         let secret = "UNIQUE-MEETING-SECRET-\(UUID().uuidString)"
-        let built = try ClaudeRunner.makeRawSummaryProcess(
+        let built = try ClaudeRunner.makeRawSummaryStreamProcess(
             binaryPath: bin.path, prompt: secret, model: "opus")
         let args = built.process.arguments ?? []
         XCTAssertFalse(args.contains(where: { $0.contains(secret) }))

@@ -4,9 +4,7 @@ import Foundation
 ///
 /// `RecordingController` owns capture, persistence, crash recovery, and finalize;
 /// an engine consumes the two capture rings and produces the merged transcript
-/// timeline. Two implementations exist:
-///   • `WhisperKitEngine` — the original path (transcription only, no speaker ID).
-///   • `FluidAudioEngine`  — native Parakeet ASR + on-device speaker identification.
+/// timeline: `FluidAudioEngine`, `SpeechAnalyzerEngine`, or `WhisperKitSpeakerKitEngine`.
 ///
 /// The engine is chosen per recording session from `AppSettings.transcriptionEngine`;
 /// there is no mid-session switching.
