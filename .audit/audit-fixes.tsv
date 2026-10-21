@@ -19,3 +19,4 @@ ts	phase	decision	why	evidence	result
 2026-10-21T13:42:58Z	D	review fix: autoupdating tz on cached formatters	cross-model review (claude-opus-5-5-medium) flagged frozen tz; other 4 findings are announced or intended nits	check.sh 588/0	landed
 2026-10-21T13:57:59Z	E	remove local Qwen summarizer	user won't use it; stored 'local' falls back via SummaryBackend.resolved -> default	check.sh 587/0; MLX bundle removed from app per build log	landed
 2026-10-21T14:03:04Z	strict-1	ratchet + HistoryView moveAction + hygiene	crash hid diagnostics; measure every later step	strict build exit 0; 142->131 diags; 587 tests pass	landed 6b3aac9
+2026-10-21T14:07:24Z	strict-2	isolation annotations (app + tests)	MainActor decls used from nonisolated code; theme store singleton; non-Sendable globals	strict 131->59, exit 0; 587 tests pass	landed 6476a1b
