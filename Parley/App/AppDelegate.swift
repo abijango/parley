@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // Application Support paths, so a post-rename data migration lands first.
     func applicationWillFinishLaunching(_ notification: Notification) {
         SupportDirectoryMigration.runIfNeeded()
+        WhisperModelCleanup.runIfNeeded()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
