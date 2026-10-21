@@ -16,7 +16,7 @@ get overwritten on the next regenerate).
 
 ## `tools/localrelease.sh` — use this for each rebuild the user runs locally
 
-Builds the `Parley` scheme in **Release** and installs it to `~/Applications/Parley.app`,
+Builds the `Parley` scheme in **Release** and installs it to `/Applications/Parley.app`,
 replacing the previous copy. Prefer this over a raw `xcodebuild` whenever the user wants an
 installed build they run between sessions.
 
@@ -40,5 +40,5 @@ needs archive → export → notarize → staple.
   reads files being edited fails with `Failed frontend command` (a `swift-frontend` crash),
   not a real `error:`. Re-run once the files settle.
 - The app is **non-sandboxed** (`app-sandbox: false`) — required for Core Audio process taps,
-  spawning `Codex`, and writing to the vault. Deployment target is macOS **14.4+** (process
-  taps).
+  spawning `Codex`, and writing to the vault. Deployment target is macOS **26.0** (set in
+ `project.yml`; it subsumes the 14.4+ floor that process taps need).

@@ -42,5 +42,5 @@ For UI/polish work, follow @docs/DESIGN_POLISH_BRIEF.md. Presentation-layer chan
   reads files being edited fails with `Failed frontend command` (a `swift-frontend` crash),
   not a real `error:`. Re-run once the files settle.
 - The app is **non-sandboxed** (`app-sandbox: false`) — required for Core Audio process taps,
-  spawning `claude`, and writing to the vault. Deployment target is macOS **14.4+** (process
-  taps).
+  spawning `claude`, and writing to the vault. Deployment target is macOS **26.0** (set in
+ `project.yml`; it subsumes the 14.4+ floor that process taps need).

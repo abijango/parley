@@ -8,9 +8,8 @@ import os
 /// a `memcpy` under a brief `os_unfair_lock`. On overflow it drops the OLDEST
 /// samples — a callback must not stall for a slow consumer.
 ///
-/// `Atomic` (Synchronization) would be the lock-free choice but it requires
-/// macOS 15+; we target 14.4, so the short unfair-lock critical section is the
-/// pragmatic correct option.
+/// `Atomic` (Synchronization) would be the lock-free choice; the critical section
+/// is a few index updates plus one copy, so the unfair lock is held only briefly.
 final class AudioRingBuffer: @unchecked Sendable {
     private let capacity: Int
     private let storage: UnsafeMutablePointer<Float>
