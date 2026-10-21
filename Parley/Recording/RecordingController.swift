@@ -1248,7 +1248,7 @@ final class RecordingController: ObservableObject {
                         runSummaryOnFinish: runSummary)
                     autoPresentEnrichment = true
                 } else if autoSummarize && !segments.isEmpty && !isSpeakerEngine {
-                    maybeAutoRunClaude()
+                    maybeAutoRunClaude(forTranscriptURL: result.url)
                 }
                 stampFinalizedManifest(
                     directory: sessionDir,
@@ -1746,7 +1746,7 @@ final class RecordingController: ObservableObject {
                 (name: $0.name, title: $0.title, company: $0.company, linkedin: $0.linkedin)
             })
         }
-        if e?.runSummaryOnFinish == true { maybeAutoRunClaude(forTranscriptURL: e?.transcriptURL) }
+        if let e, e.runSummaryOnFinish, let url = e.transcriptURL { maybeAutoRunClaude(forTranscriptURL: url) }
         armClearIfReady()
     }
 
@@ -1857,18 +1857,10 @@ final class RecordingController: ObservableObject {
     /// Queue a background Claude summary for the just-saved recording, if auto-summarize
     /// is on. Reads the current transcript (post-attribution) from the store so the summary
     /// reflects assigned speakers + attendees. The result is staged for review in History.
-    /// Enqueue the auto-summary for a finalized transcript. `targetURL` lets a DEFERRED
-    /// caller (the enrichment sheet, which may be dismissed only after a new recording
-    /// has re-pointed `lastTranscriptURL`) pin the summary to the correct session rather
-    /// than whatever is live now. Note: both shipping live engines are speaker-capable,
-    /// so the deferred branch is currently inert; the guard is defensive for that path.
-    private func maybeAutoRunClaude(forTranscriptURL targetURL: URL? = nil) {
-        guard settings.autoRunClaude, let url = targetURL ?? lastTranscriptURL else { return }
-        // The live (non-deferred) path requires a non-empty timeline; a deferred call
-        // targets a file already saved to disk, so it skips the live-engine check.
-        if targetURL == nil {
-            guard !(engine?.finalTimeline() ?? live.segments).isEmpty else { return }
-        }
+    /// Callers pass the saved transcript's URL because a new recording may already have
+    /// re-pointed `lastTranscriptURL` and `engine` by the time this runs.
+    private func maybeAutoRunClaude(forTranscriptURL url: URL) {
+        guard settings.autoRunClaude else { return }
         store.refresh()
         guard let item = store.items.first(where: { $0.url == url })
             ?? store.items.first(where: { $0.url.lastPathComponent == url.lastPathComponent }) else { return }
