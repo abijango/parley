@@ -1359,6 +1359,8 @@ struct HistoryView: View {
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = .autoupdatingCurrent
+        f.timeZone = .autoupdatingCurrent
         f.dateStyle = .medium
         f.timeStyle = .short
         return f
@@ -1366,6 +1368,8 @@ struct HistoryView: View {
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = .autoupdatingCurrent
+        f.timeZone = .autoupdatingCurrent
         f.dateStyle = .none
         f.timeStyle = .short
         return f

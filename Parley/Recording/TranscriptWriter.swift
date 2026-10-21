@@ -550,6 +550,7 @@ enum TranscriptWriter {
     static func posixFormatter(_ format: String) -> DateFormatter {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .autoupdatingCurrent
         f.dateFormat = format
         return f
     }
