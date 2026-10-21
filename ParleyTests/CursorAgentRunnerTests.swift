@@ -27,8 +27,14 @@ final class CursorAgentRunnerTests: XCTestCase {
 
     func testSanitizeDropsPreamble() {
         let raw = "Thinking about the transcript…\n\n## Attendees\n\n| Name | Role | Company |"
-        let cleaned = CursorAgentRunner.sanitizeNoteText(raw)
+        let cleaned = AgentCLI.sanitizeNoteText(raw)
         XCTAssertTrue(cleaned.hasPrefix("## Attendees"))
+    }
+
+    func testAuthPhrasesIncludeCursorExtras() {
+        XCTAssertTrue(AgentCLI.looksLikeAuth("Error: Not logged in"))
+        XCTAssertFalse(AgentCLI.looksLikeAuth("Missing API key"))
+        XCTAssertTrue(AgentCLI.looksLikeAuth("Missing API key", extraPhrases: ["api key"]))
     }
 
     func testBackendCursorModelIDs() {

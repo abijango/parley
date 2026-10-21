@@ -4,26 +4,6 @@ import Foundation
 /// Uses `--mode ask` (read-only) so the agent cannot edit the vault; the full
 /// transcript is already embedded in the shared prompt (parity with Claude/Grok).
 enum CursorAgentRunner {
-    enum RunError: Error, LocalizedError {
-        case binaryNotFound(String)
-        case launchFailed(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .binaryNotFound(let path):
-                return "Cursor CLI not found at \(path). Set its path in Settings → Summary."
-            case .launchFailed(let message):
-                return "Failed to launch cursor agent: \(message)"
-            }
-        }
-    }
-
-    enum JSONResult: Equatable {
-        case text(String)
-        case error(String)
-        case unparseable
-    }
-
     /// Neutral cwd so the agent does not load the Parley repo's project skills.
     static let summaryWorkingDirectory = "/tmp"
 
@@ -33,9 +13,7 @@ enum CursorAgentRunner {
         prompt: String,
         model: String
     ) throws -> (process: Process, stdout: Pipe, stderr: Pipe) {
-        guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
-            throw RunError.binaryNotFound(binaryPath)
-        }
+        try AgentCLI.requireExecutable(binaryPath, name: "Cursor")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.currentDirectoryURL = URL(fileURLWithPath: summaryWorkingDirectory)
@@ -65,9 +43,7 @@ enum CursorAgentRunner {
         model: String,
         vaultPath: String
     ) throws -> (process: Process, stdout: Pipe, stderr: Pipe) {
-        guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
-            throw RunError.binaryNotFound(binaryPath)
-        }
+        try AgentCLI.requireExecutable(binaryPath, name: "Cursor")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.currentDirectoryURL = URL(fileURLWithPath: vaultPath)
@@ -98,27 +74,16 @@ enum CursorAgentRunner {
         return trimmed
     }
 
-    /// Drop agent chatter before the first standard section heading.
-    static func sanitizeNoteText(_ text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        for marker in ["## Attendees", "## Executive Summary"] {
-            if let range = trimmed.range(of: marker, options: .caseInsensitive) {
-                return String(trimmed[range.lowerBound...])
-            }
-        }
-        return trimmed
-    }
-
     /// Parse `cursor agent --output-format json` payload.
     /// Success: `{ "type":"result", "subtype":"success", "is_error":false, "result":"…" }`
-    static func parseJSONResult(_ data: Data) -> JSONResult {
+    static func parseJSONResult(_ data: Data) -> AgentCLI.JSONResult {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .unparseable
         }
         return parseJSONResult(obj)
     }
 
-    private static func parseJSONResult(_ obj: [String: Any]) -> JSONResult {
+    private static func parseJSONResult(_ obj: [String: Any]) -> AgentCLI.JSONResult {
         if let isError = obj["is_error"] as? Bool, isError {
             let msg = (obj["result"] as? String)
                 ?? (obj["message"] as? String)
@@ -171,7 +136,7 @@ enum CursorAgentRunner {
         return parseUsage(data)
     }
 
-    static func parseJSONResult(stdout: String) -> JSONResult {
+    static func parseJSONResult(stdout: String) -> AgentCLI.JSONResult {
         let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         if let data = trimmed.data(using: .utf8), case let r = parseJSONResult(data), r != .unparseable {
             return r

@@ -6,27 +6,6 @@ import Foundation
 /// Mirrors the Claude raw-summary path: a fully self-contained prompt, no vault tools,
 /// stdout JSON (`.text`) as the note body. stdin is the null device.
 enum GrokRunner {
-    enum RunError: Error, LocalizedError {
-        case binaryNotFound(String)
-        case launchFailed(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .binaryNotFound(let path):
-                return "Grok CLI not found at \(path). Set its path in Settings → Summary."
-            case .launchFailed(let message):
-                return "Failed to launch grok: \(message)"
-            }
-        }
-    }
-
-    /// Outcome of parsing a `grok --output-format json` response body.
-    enum JSONResult: Equatable {
-        case text(String)
-        case error(String)
-        case unparseable
-    }
-
     /// Built-in tools to strip for headless summary — transcript + contacts are already
     /// embedded in the prompt; file/shell access only invites agent narration (e.g. the
     /// `process-meeting-transcript` skill's "find the transcript on disk" steps).
@@ -53,9 +32,7 @@ enum GrokRunner {
         prompt: String,
         model: String
     ) throws -> (process: Process, stdout: Pipe, stderr: Pipe) {
-        guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
-            throw RunError.binaryNotFound(binaryPath)
-        }
+        try AgentCLI.requireExecutable(binaryPath, name: "Grok")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.currentDirectoryURL = URL(fileURLWithPath: summaryWorkingDirectory)
@@ -82,23 +59,10 @@ enum GrokRunner {
         return (process, stdout, stderr)
     }
 
-    /// Grok sometimes prefixes agent narration ("Searching for the full transcript…")
-    /// before the note even when tools are disabled. Drop everything before the first
-    /// standard section heading.
-    static func sanitizeNoteText(_ text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        for marker in ["## Attendees", "## Executive Summary"] {
-            if let range = trimmed.range(of: marker, options: .caseInsensitive) {
-                return String(trimmed[range.lowerBound...])
-            }
-        }
-        return trimmed
-    }
-
     /// Parse a Grok headless JSON payload.
     /// Success: `{ "text": "…", "stopReason": "EndTurn", … }`
     /// Failure: `{ "type": "error", "message": "…" }`
-    static func parseJSONResult(_ data: Data) -> JSONResult {
+    static func parseJSONResult(_ data: Data) -> AgentCLI.JSONResult {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .unparseable
         }
@@ -114,7 +78,7 @@ enum GrokRunner {
     }
 
     /// Convenience for string stdout.
-    static func parseJSONResult(stdout: String) -> JSONResult {
+    static func parseJSONResult(stdout: String) -> AgentCLI.JSONResult {
         guard let data = stdout.data(using: .utf8) else { return .unparseable }
         // Grok may print a trailing newline; trim is fine for JSONSerialization.
         return parseJSONResult(data)

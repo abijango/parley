@@ -943,10 +943,14 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                                       onActivity: onActivity, processHandle: processHandle)
         case .grok:
             onActivity("Grok is writing…")
-            return runGrok(binary: config.grokBinary, prompt: prompt, model: model, processHandle: processHandle)
+            return runJSONAgent(.grok, model: model, processHandle: processHandle) {
+                try GrokRunner.makeRawSummaryProcess(binaryPath: config.grokBinary, prompt: prompt, model: model)
+            }
         case .cursor:
             onActivity("\(backend.statusName) is writing…")
-            return runCursorAgent(binary: config.cursorBinary, prompt: prompt, model: model, processHandle: processHandle)
+            return runJSONAgent(.cursor, model: model, processHandle: processHandle) {
+                try CursorAgentRunner.makeRawSummaryProcess(binaryPath: config.cursorBinary, prompt: prompt, model: model)
+            }
         case .local:
             return await runLocal(prompt: prompt, model: model, onActivity: onActivity)
         }
@@ -996,7 +1000,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     /// the Mac slept mid-request, a hung network call) can't block the whole queue for
     /// an hour and then fail with an empty "exited with code 1". On trip the process is
     /// terminated and the job fails *retryably*.
-    private static let runTimeout: TimeInterval = 600   // 10 minutes
+    nonisolated private static let runTimeout: TimeInterval = 600   // 10 minutes
 
     /// Runs `claude -p` with `--output-format stream-json --include-partial-messages`,
     /// incrementally parsing NDJSON lines so the caller can drive a live-activity ticker.
@@ -1022,11 +1026,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let built: (process: Process, stdout: Pipe, stderr: Pipe)
         do {
             built = try ClaudeRunner.makeRawSummaryStreamProcess(binaryPath: binary, prompt: prompt, model: model)
-        } catch let e as ClaudeRunner.RunError {
-            if case .binaryNotFound = e {
-                return .failure(reason: e.localizedDescription, setupIssue: .notInstalled)
-            }
-            return .failure(reason: e.localizedDescription, setupIssue: nil)
+        } catch let e as AgentCLI.BinaryNotFound {
+            return .failure(reason: e.localizedDescription, setupIssue: .notInstalled)
         } catch {
             return .failure(reason: error.localizedDescription, setupIssue: nil)
         }
@@ -1132,17 +1133,42 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                                 : .success(noteText, SummaryRunMetrics.from(claude: usage, wallClock: 0, model: model))
     }
 
-    /// Runs `grok -p` with `--output-format json`, parsing the final `.text` field as
-    /// the staged note body. Same timeout / usage-limit / auth classification as Claude.
-    private nonisolated static func runGrok(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> RunResult {
+    /// What differs between the JSON-output agent CLIs (Grok, Cursor agent).
+    private struct JSONAgent: Sendable {
+        let cliName: String
+        let loginReason: String
+        let extraAuthPhrases: [String]
+        let parse: @Sendable (String) -> AgentCLI.JSONResult
+        let usage: @Sendable (String) -> SummaryRunMetrics?
+
+        static let grok = JSONAgent(
+            cliName: "grok",
+            loginReason: "Grok isn't logged in. Open Settings → Summary → Grok to log in, then retry.",
+            extraAuthPhrases: [],
+            parse: { GrokRunner.parseJSONResult(stdout: $0) },
+            usage: { GrokRunner.parseUsage(stdout: $0) })
+
+        static let cursor = JSONAgent(
+            cliName: "cursor agent",
+            loginReason: "Cursor isn't logged in. Run `cursor agent` once in Terminal to sign in, then retry.",
+            extraAuthPhrases: ["api key"],
+            parse: { CursorAgentRunner.parseJSONResult(stdout: $0) },
+            usage: { CursorAgentRunner.parseUsage(stdout: $0) })
+    }
+
+    /// Runs a JSON-output agent CLI and classifies the result the same way as Claude:
+    /// timeout, usage limit, missing login, or the note body from the final JSON object.
+    private nonisolated static func runJSONAgent(
+        _ agent: JSONAgent,
+        model: String,
+        processHandle: ProcessHandle?,
+        makeProcess: () throws -> (process: Process, stdout: Pipe, stderr: Pipe)
+    ) -> RunResult {
         let built: (process: Process, stdout: Pipe, stderr: Pipe)
         do {
-            built = try GrokRunner.makeRawSummaryProcess(binaryPath: binary, prompt: prompt, model: model)
-        } catch let e as GrokRunner.RunError {
-            if case .binaryNotFound = e {
-                return .failure(reason: e.localizedDescription, setupIssue: .notInstalled)
-            }
-            return .failure(reason: e.localizedDescription, setupIssue: nil)
+            built = try makeProcess()
+        } catch let e as AgentCLI.BinaryNotFound {
+            return .failure(reason: e.localizedDescription, setupIssue: .notInstalled)
         } catch {
             return .failure(reason: error.localizedDescription, setupIssue: nil)
         }
@@ -1151,7 +1177,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             output = try ProcessRun.run(built.process, stdout: built.stdout, stderr: built.stderr,
                                         timeout: runTimeout, handle: processHandle)
         } catch {
-            return .failure(reason: "Failed to launch grok: \(error.localizedDescription)", setupIssue: nil)
+            return .failure(reason: "Failed to launch \(agent.cliName): \(error.localizedDescription)", setupIssue: nil)
         }
         if output.timedOut {
             return .failure(reason: "Summary timed out after \(Int(runTimeout / 60)) min — retry.", setupIssue: nil)
@@ -1165,125 +1191,28 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             return .usageLimited(trip)
         }
 
-        let lower = (out + "\n" + err).lowercased()
-        let looksAuth = lower.contains("not logged in")
-            || lower.contains("please log in")
-            || lower.contains("unauthorized")
-            || lower.contains("authentication")
-            || lower.contains("sign in")
-            || lower.contains("login required")
+        let looksAuth = AgentCLI.looksLikeAuth(out + "\n" + err, extraPhrases: agent.extraAuthPhrases)
+        let notLoggedIn = RunResult.failure(reason: agent.loginReason, setupIssue: .notLoggedIn)
+        let success = { (note: String) in
+            RunResult.success(AgentCLI.sanitizeNoteText(note),
+                              SummaryRunMetrics.merging(parsed: agent.usage(out), wallClock: 0, model: model))
+        }
 
-        switch GrokRunner.parseJSONResult(stdout: out) {
+        switch agent.parse(out) {
         case .text(let note) where code == 0:
-            let parsed = GrokRunner.parseUsage(stdout: out)
-            let metrics = SummaryRunMetrics.merging(parsed: parsed, wallClock: 0, model: model)
-            return .success(GrokRunner.sanitizeNoteText(note), metrics)
+            return success(note)
         case .error(let msg):
-            if looksAuth || Self.looksLikeAuthMessage(msg) {
-                return .failure(
-                    reason: "Grok isn't logged in. Open Settings → Summary → Grok to log in, then retry.",
-                    setupIssue: .notLoggedIn)
-            }
+            if looksAuth || AgentCLI.looksLikeAuth(msg, extraPhrases: ["login"]) { return notLoggedIn }
             return .failure(reason: String(msg.prefix(240)), setupIssue: nil)
         case .text, .unparseable:
             if code != 0 {
-                if looksAuth {
-                    return .failure(
-                        reason: "Grok isn't logged in. Open Settings → Summary → Grok to log in, then retry.",
-                        setupIssue: .notLoggedIn)
-                }
-                let detail = err.isEmpty ? (out.isEmpty ? "grok exited with code \(code)" : out) : err
+                if looksAuth { return notLoggedIn }
+                let detail = err.isEmpty ? (out.isEmpty ? "\(agent.cliName) exited with code \(code)" : out) : err
                 return .failure(reason: String(detail.prefix(240)), setupIssue: nil)
             }
             // Exit 0 but non-JSON: treat raw stdout as the note if it looks like markdown.
-            let plain = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !plain.isEmpty, plain.first != "{" {
-                let parsed = GrokRunner.parseUsage(stdout: out)
-                let metrics = SummaryRunMetrics.merging(parsed: parsed, wallClock: 0, model: model)
-                return .success(GrokRunner.sanitizeNoteText(plain), metrics)
-            }
-            return .failure(reason: "grok produced no usable output.", setupIssue: nil)
-        }
-    }
-
-    nonisolated private static func looksLikeAuthMessage(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        return lower.contains("not logged in")
-            || lower.contains("unauthorized")
-            || lower.contains("authentication")
-            || lower.contains("login")
-    }
-
-    /// Runs `cursor agent -p --mode ask --output-format json` for Composer / Cursor Grok models.
-    private nonisolated static func runCursorAgent(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> RunResult {
-        let built: (process: Process, stdout: Pipe, stderr: Pipe)
-        do {
-            built = try CursorAgentRunner.makeRawSummaryProcess(binaryPath: binary, prompt: prompt, model: model)
-        } catch let e as CursorAgentRunner.RunError {
-            if case .binaryNotFound = e {
-                return .failure(reason: e.localizedDescription, setupIssue: .notInstalled)
-            }
-            return .failure(reason: e.localizedDescription, setupIssue: nil)
-        } catch {
-            return .failure(reason: error.localizedDescription, setupIssue: nil)
-        }
-        let output: ProcessOutput
-        do {
-            output = try ProcessRun.run(built.process, stdout: built.stdout, stderr: built.stderr,
-                                        timeout: runTimeout, handle: processHandle)
-        } catch {
-            return .failure(reason: "Failed to launch cursor agent: \(error.localizedDescription)", setupIssue: nil)
-        }
-        if output.timedOut {
-            return .failure(reason: "Summary timed out after \(Int(runTimeout / 60)) min — retry.", setupIssue: nil)
-        }
-
-        let code = output.exitCode
-        let out = output.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let err = output.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let trip = ClaudeUsageLimit.detect(stdout: out, stderr: err, exitCode: code) {
-            return .usageLimited(trip)
-        }
-
-        let lower = (out + "\n" + err).lowercased()
-        let looksAuth = lower.contains("not logged in")
-            || lower.contains("please log in")
-            || lower.contains("unauthorized")
-            || lower.contains("authentication")
-            || lower.contains("sign in")
-            || lower.contains("login required")
-            || lower.contains("api key")
-
-        switch CursorAgentRunner.parseJSONResult(stdout: out) {
-        case .text(let note) where code == 0:
-            let parsed = CursorAgentRunner.parseUsage(stdout: out)
-            let metrics = SummaryRunMetrics.merging(parsed: parsed, wallClock: 0, model: model)
-            return .success(CursorAgentRunner.sanitizeNoteText(note), metrics)
-        case .error(let msg):
-            if looksAuth || Self.looksLikeAuthMessage(msg) {
-                return .failure(
-                    reason: "Cursor isn't logged in. Run `cursor agent` once in Terminal to sign in, then retry.",
-                    setupIssue: .notLoggedIn)
-            }
-            return .failure(reason: String(msg.prefix(240)), setupIssue: nil)
-        case .text, .unparseable:
-            if code != 0 {
-                if looksAuth {
-                    return .failure(
-                        reason: "Cursor isn't logged in. Run `cursor agent` once in Terminal to sign in, then retry.",
-                        setupIssue: .notLoggedIn)
-                }
-                let detail = err.isEmpty ? (out.isEmpty ? "cursor agent exited with code \(code)" : out) : err
-                return .failure(reason: String(detail.prefix(240)), setupIssue: nil)
-            }
-            let plain = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !plain.isEmpty, plain.first != "{" {
-                let parsed = CursorAgentRunner.parseUsage(stdout: out)
-                let metrics = SummaryRunMetrics.merging(parsed: parsed, wallClock: 0, model: model)
-                return .success(CursorAgentRunner.sanitizeNoteText(plain), metrics)
-            }
-            return .failure(reason: "cursor agent produced no usable output.", setupIssue: nil)
+            if !out.isEmpty, out.first != "{" { return success(out) }
+            return .failure(reason: "\(agent.cliName) produced no usable output.", setupIssue: nil)
         }
     }
 

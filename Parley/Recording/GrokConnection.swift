@@ -185,7 +185,7 @@ final class GrokConnection: ObservableObject {
             switch GrokRunner.parseJSONResult(stdout: r.stdoutText) {
             case .text: return .ok
             case .error(let msg):
-                if Self.looksLikeAuth(msg) { return .notLoggedIn(detail: msg) }
+                if AgentCLI.looksLikeAuth(msg) { return .notLoggedIn(detail: msg) }
                 return .otherError(detail: msg)
             case .unparseable:
                 // Exit 0 with non-JSON is still a good connectivity signal.
@@ -198,20 +198,10 @@ final class GrokConnection: ObservableObject {
         if ClaudeUsageLimit.detect(stdout: r.stdoutText, stderr: r.stderrText, exitCode: r.exitCode) != nil {
             return .limited(resumeAt: nil)
         }
-        if Self.looksLikeAuth(blob) {
+        if AgentCLI.looksLikeAuth(blob) {
             return .notLoggedIn(detail: String(blob.trimmingCharacters(in: .whitespacesAndNewlines).prefix(160)))
         }
         let detail = r.stderrText.isEmpty ? "grok exited with code \(r.exitCode)" : String(r.stderrText.prefix(160))
         return .otherError(detail: detail)
-    }
-
-    nonisolated private static func looksLikeAuth(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        return lower.contains("not logged in")
-            || lower.contains("please log in")
-            || lower.contains("unauthorized")
-            || lower.contains("authentication")
-            || lower.contains("sign in")
-            || lower.contains("login required")
     }
 }

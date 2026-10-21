@@ -54,14 +54,14 @@ final class GrokRunnerTests: XCTestCase {
 
         | Name | Role | Company |
         """
-        let cleaned = GrokRunner.sanitizeNoteText(raw)
+        let cleaned = AgentCLI.sanitizeNoteText(raw)
         XCTAssertTrue(cleaned.hasPrefix("## Attendees"))
         XCTAssertFalse(cleaned.localizedCaseInsensitiveContains("Looking for"))
     }
 
     func testSanitizeNoteTextPassthroughWhenNoMarker() {
         let raw = "# Title\n\nSome body."
-        XCTAssertEqual(GrokRunner.sanitizeNoteText(raw), raw)
+        XCTAssertEqual(AgentCLI.sanitizeNoteText(raw), raw)
     }
 
     func testMakeProcessRejectsMissingBinary() {
@@ -71,7 +71,7 @@ final class GrokRunnerTests: XCTestCase {
                 prompt: "hi",
                 model: "grok-4.6")
         ) { err in
-            guard let e = err as? GrokRunner.RunError, case .binaryNotFound = e else {
+            guard err is AgentCLI.BinaryNotFound else {
                 return XCTFail("expected binaryNotFound, got \(err)")
             }
         }
