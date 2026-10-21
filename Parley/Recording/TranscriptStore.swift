@@ -492,12 +492,9 @@ final class TranscriptStore: ObservableObject {
     }
 
     nonisolated private static func parseStampDate(_ s: String) -> Date? {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        for fmt in ["yyyy-MM-dd-HHmm", "yyyy-MM-dd-HHmmss", "yyyy-MM-dd"] {
-            f.dateFormat = fmt
-            if let d = f.date(from: s) { return d }
-        }
-        return nil
+        stampParsers.lazy.compactMap { $0.date(from: s) }.first
     }
+
+    nonisolated private static let stampParsers = ["yyyy-MM-dd-HHmm", "yyyy-MM-dd-HHmmss", "yyyy-MM-dd"]
+        .map(TranscriptWriter.posixFormatter)
 }

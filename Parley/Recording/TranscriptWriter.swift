@@ -539,14 +539,19 @@ enum TranscriptWriter {
     /// Parses either the full `yyyy-MM-dd HH:mm:ss` timestamp or a legacy date-only
     /// `yyyy-MM-dd` value (older transcripts).
     static func parseISODate(_ s: String) -> Date? {
+        let trimmed = s.trimmingCharacters(in: .whitespaces)
+        return isoDateParsers.lazy.compactMap { $0.date(from: trimmed) }.first
+    }
+
+    /// Never mutated after creation, so safe to share across the background History scan.
+    private static let isoDateParsers = ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"]
+        .map(posixFormatter)
+
+    static func posixFormatter(_ format: String) -> DateFormatter {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
-        let trimmed = s.trimmingCharacters(in: .whitespaces)
-        for fmt in ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"] {
-            f.dateFormat = fmt
-            if let d = f.date(from: trimmed) { return d }
-        }
-        return nil
+        f.dateFormat = format
+        return f
     }
 
     /// Removes characters illegal in filenames (notably `/` and `:` on macOS).

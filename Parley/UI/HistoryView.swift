@@ -1357,18 +1357,22 @@ struct HistoryView: View {
 
     // MARK: Helpers
 
-    private static func dateString(_ date: Date) -> String {
+    private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .short
-        return f.string(from: date)
-    }
+        return f
+    }()
 
-    private static func timeString(_ date: Date) -> String {
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .none
         f.timeStyle = .short
-        return f.string(from: date)
-    }
+        return f
+    }()
+
+    private static func dateString(_ date: Date) -> String { dateFormatter.string(from: date) }
+
+    private static func timeString(_ date: Date) -> String { timeFormatter.string(from: date) }
 
 }

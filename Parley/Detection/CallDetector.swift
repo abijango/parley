@@ -79,7 +79,7 @@ final class CallDetector: ObservableObject {
         guard running, settings.callDetectionEnabled else { return }
         let all = CallProcessProbe.processesCapturingInput()
         let nonSelf = all.filter { $0.pid != ownPID && $0.bundleID?.lowercased() != ownBundleID }
-        capturing = nonSelf
+        if capturing != nonSelf { capturing = nonSelf }
 
         heartbeatIfDue(nonSelf: nonSelf)
         if settings.verboseDetectionLogging {

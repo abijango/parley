@@ -543,8 +543,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let contactsURL = settings.contactsURL
         let terminologyScope = TerminologyStore.customerScope(fromFiling: item.meta.filing)
         let terminology = SummaryPromptBuilder.terminologyBlock(filingScope: terminologyScope)
-        let dbContacts = PeopleStore().contacts()
         let peopleRecords = PeopleStore().all()
+        let dbContacts = peopleRecords.map { $0.asContact() }
         let config = RunnerConfig(settings)
         let staged = Self.stagingURL(for: item.url, backend: backend)
         let failureTrip = settings.summaryFailureTripThreshold
@@ -681,8 +681,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let visionBackend = settings.attachmentVisionBackend
         let terminology = SummaryPromptBuilder.terminologyBlock(
             filingScope: TerminologyStore.customerScope(fromFiling: item.meta.filing))
-        let dbContacts = PeopleStore().contacts()
         let peopleRecords = PeopleStore().all()
+        let dbContacts = peopleRecords.map { $0.asContact() }
         let writer = settings.summaryWriterBackend
         let checker = settings.summaryCheckerBackend
         let staged = Self.v2StagingURL(for: item.url)

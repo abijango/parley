@@ -30,14 +30,15 @@ final class SummaryGroundTruthEval: ObservableObject {
         }
         let terminology = SummaryPromptBuilder.terminologyBlock(
             filingScope: TerminologyStore.customerScope(fromFiling: fixture.destination))
+        let peopleRecords = PeopleStore().all()
         let built = SummaryPromptBuilder.build(
             template: settings.summaryPromptTemplate,
             transcriptURL: fixture.transcriptURL,
             attendees: fixture.attendees,
             destination: fixture.destination,
             contactsURL: settings.contactsURL,
-            contactsFromDB: PeopleStore().contacts(),
-            peopleRecords: PeopleStore().all(),
+            contactsFromDB: peopleRecords.map { $0.asContact() },
+            peopleRecords: peopleRecords,
             terminologyBlock: terminology.isEmpty ? nil : terminology,
             visionDigest: nil,
             attachmentUnderstanding: .off)
