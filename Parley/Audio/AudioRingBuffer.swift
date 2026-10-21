@@ -88,4 +88,23 @@ final class AudioRingBuffer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return filled
     }
+
+    /// Drain both rings and sum into one mono buffer, anchored to the mic ring as the
+    /// real-time clock (the mic tap runs continuously at 16 kHz even during silence).
+    /// Reading the system ring only up to the mic's count keeps the mixed stream at true
+    /// real-time length. `max()` plus zero-padding would over-count when the rings are
+    /// out of phase, stretching the ASR timeline out of sync with the clean mixed file.
+    /// The per-tick cap lets a backlog clear over about a second instead of one huge read.
+    static func mixLive(mic: AudioRingBuffer, system: AudioRingBuffer, maxSamples: Int = 16_000) -> [Float]? {
+        let n = min(mic.availableToRead, maxSamples)
+        guard n > 0 else { return nil }
+        var out = [Float](), sysBuf = [Float]()
+        let rm = mic.read(maxCount: n, into: &out)
+        guard rm > 0 else { return nil }
+        out.removeSubrange(rm...)
+        let rs = system.read(maxCount: rm, into: &sysBuf)
+        for i in 0..<rs { out[i] += sysBuf[i] }
+        for i in 0..<rm { out[i] = max(-1, min(1, out[i])) }
+        return out
+    }
 }

@@ -86,7 +86,7 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
         let mixedRing = self.mixedRing
         mixerTask = Task.detached {
             while !Task.isCancelled {
-                if let mixed = Self.mixLive(mic: micRing, system: systemRing), !mixed.isEmpty {
+                if let mixed = AudioRingBuffer.mixLive(mic: micRing, system: systemRing), !mixed.isEmpty {
                     mixed.withUnsafeBufferPointer { mixedRing.write($0) }
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
@@ -114,24 +114,6 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
         pipelineTasks = []
         livePipeline = nil
         await diarizer.unload()
-    }
-
-    /// Sum the mic + system rings into one mono buffer, anchored to the mic ring as the
-    /// real-time clock (the mic tap runs continuously at 16 kHz even during silence).
-    nonisolated private static let maxMixSamplesPerTick = 16_000
-
-    nonisolated private static func mixLive(mic: AudioRingBuffer, system: AudioRingBuffer) -> [Float]? {
-        let n = min(mic.availableToRead, maxMixSamplesPerTick)
-        guard n > 0 else { return nil }
-        var micBuf = [Float](), sysBuf = [Float]()
-        let rm = mic.read(maxCount: n, into: &micBuf)
-        guard rm > 0 else { return nil }
-        let rs = system.read(maxCount: rm, into: &sysBuf)
-        var out = [Float](repeating: 0, count: rm)
-        for i in 0..<rm { out[i] += micBuf[i] }
-        for i in 0..<min(rs, rm) { out[i] += sysBuf[i] }
-        for i in 0..<rm { out[i] = max(-1, min(1, out[i])) }
-        return out
     }
 
     // MARK: Offline pass

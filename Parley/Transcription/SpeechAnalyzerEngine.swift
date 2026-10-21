@@ -88,7 +88,7 @@ final class SpeechAnalyzerEngine: SpeakerCapableEngine {
         let diarRing = self.diarRing
         mixerTask = Task.detached {
             while !Task.isCancelled {
-                if let mixed = Self.mixLive(mic: micRing, system: systemRing), !mixed.isEmpty {
+                if let mixed = AudioRingBuffer.mixLive(mic: micRing, system: systemRing), !mixed.isEmpty {
                     mixed.withUnsafeBufferPointer { mixedRing.write($0) }
                     mixed.withUnsafeBufferPointer { diarRing.write($0) }
                 }
@@ -534,22 +534,6 @@ final class SpeechAnalyzerEngine: SpeakerCapableEngine {
                 await MainActor.run { self?.publish(immediate: true) }
             }
         }
-    }
-
-    nonisolated private static let maxMixSamplesPerTick = 16_000
-
-    nonisolated private static func mixLive(mic: AudioRingBuffer, system: AudioRingBuffer) -> [Float]? {
-        let n = min(mic.availableToRead, maxMixSamplesPerTick)
-        guard n > 0 else { return nil }
-        var micBuf = [Float](), sysBuf = [Float]()
-        let rm = mic.read(maxCount: n, into: &micBuf)
-        guard rm > 0 else { return nil }
-        let rs = system.read(maxCount: rm, into: &sysBuf)
-        var out = [Float](repeating: 0, count: rm)
-        for i in 0..<rm { out[i] += micBuf[i] }
-        for i in 0..<min(rs, rm) { out[i] += sysBuf[i] }
-        for i in 0..<rm { out[i] = max(-1, min(1, out[i])) }
-        return out
     }
 
     nonisolated private static func formatLabel(_ format: AVAudioFormat) -> String {

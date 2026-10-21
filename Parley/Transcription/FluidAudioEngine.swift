@@ -481,7 +481,7 @@ final class FluidAudioEngine: TranscriptionEngine {
             var lastErrorLog = Date.distantPast
             var tokensSinceLog = 0
             while !Task.isCancelled {
-                if let mixed = Self.mix(mic: micRing, system: systemRing), !mixed.isEmpty {
+                if let mixed = AudioRingBuffer.mixLive(mic: micRing, system: systemRing), !mixed.isEmpty {
                     for v in mixed { windowPeak = max(windowPeak, abs(v)) }
                     if useUnified, let unified {
                         if let buf = Self.makePCMBuffer(mixed) {
@@ -1008,28 +1008,6 @@ final class FluidAudioEngine: TranscriptionEngine {
             if overlap > 0, overlap > (best?.overlap ?? 0) { best = (d.speakerId, overlap) }
         }
         return best?.id
-    }
-
-    /// Drain both rings and sum into one mono buffer, ANCHORED to the mic ring as the
-    /// real-time clock (the mic tap runs continuously at 16 kHz even during silence).
-    /// Reading the system ring up to the mic's count keeps the mixed stream at true
-    /// real-time length — `max()` + zero-pad would over-count when the rings are out
-    /// of phase, stretching the ASR timeline out of sync with the clean mixed file.
-    /// Cap per-tick drain so a ring backlog clears gradually (~1s) instead of one huge read.
-    nonisolated private static let maxMixSamplesPerTick = 16_000
-
-    nonisolated private static func mix(mic: AudioRingBuffer, system: AudioRingBuffer) -> [Float]? {
-        let n = min(mic.availableToRead, maxMixSamplesPerTick)
-        guard n > 0 else { return nil }
-        var micBuf = [Float](), sysBuf = [Float]()
-        let rm = mic.read(maxCount: n, into: &micBuf)
-        guard rm > 0 else { return nil }
-        let rs = system.read(maxCount: rm, into: &sysBuf)   // up to mic's count; system excess waits
-        var out = [Float](repeating: 0, count: rm)
-        for i in 0..<rm { out[i] += micBuf[i] }
-        for i in 0..<min(rs, rm) { out[i] += sysBuf[i] }
-        for i in 0..<rm { out[i] = max(-1, min(1, out[i])) }   // soft clip the summed signal
-        return out
     }
 
     /// Sum the archived mic + system tracks (both continuous from capture start) into
