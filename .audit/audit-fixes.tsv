@@ -23,3 +23,4 @@ ts	phase	decision	why	evidence	result
 2026-10-21T14:49:03Z	strict-3	ModelManager Task<Void>	Task<WhisperKit?> moved a non-Sendable value out of a task	strict 59->47; 587 tests pass	landed dc496aa
 2026-10-21T14:49:04Z	strict-4	'@Sendable progress + publish closures	closures already called off-thread; types now state it	strict 47->35; 587 tests pass	landed 9b5c9ea
 2026-10-21T14:52:59Z	strict-6	Mutex for AppLog/LogRotation statics; watchdog @unchecked Sendable	zipFailures crossed queues; watchdog queue-confined by design	strict 35->26; 587 tests pass; suite 47s traced to sample() variance (13.9/6.9/3.8s same code)	landed d5bc494
+2026-10-21T15:06:08Z	strict-5	weak-self hops rebind self; install callback and activity reporter stay on the main actor	nested closures were reading the detached task's weak self var	strict 26->2; 587 tests pass including addPeopleInBackground and connection helper pins	landed f9a522e
