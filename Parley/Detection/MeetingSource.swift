@@ -100,6 +100,16 @@ struct ScanContext: Sendable {
     let runningApps: RunningApps
     let needs: ScanNeeds
     let tree: any MeetingUITree
+
+    /// Title from the calendar entry overlapping now, read from Teams' rendered schedule.
+    /// Only tried on a couple of ticks because preparing Teams' tree blocks for a second.
+    func calendarFallbackTitle(prepare: ((pid_t) -> Void)? = nil) -> TitleCandidate? {
+        guard [3, 6].contains(tick) else { return nil }
+        if let teamsPid = runningApps.pid(prefix: "com.microsoft.teams") {
+            if let prepare { prepare(teamsPid) } else { tree.prepareRichTree(pid: teamsPid) }
+        }
+        return MeetingParsers.scheduleOverlapTitle(apps: runningApps, tree: tree)
+    }
 }
 
 struct SourceReading: Equatable, Sendable {

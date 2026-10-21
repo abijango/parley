@@ -98,13 +98,17 @@ enum SummaryPromptBuilder {
     }
 
     static func injectSpeakerHints(_ block: String, into prompt: String) -> String {
-        let section = block.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let range = prompt.range(of: "\nTRANSCRIPT:", options: .backwards) {
-            var out = prompt
-            out.insert(contentsOf: "\n\n" + section, at: range.lowerBound)
-            return out
+        insertBeforeTranscript(block.trimmingCharacters(in: .whitespacesAndNewlines), into: prompt)
+    }
+
+    /// Inserts `section` just before the last TRANSCRIPT section, or appends it.
+    private static func insertBeforeTranscript(_ section: String, into prompt: String) -> String {
+        guard let range = prompt.range(of: "\nTRANSCRIPT:", options: .backwards) else {
+            return prompt + "\n\n" + section
         }
-        return prompt + "\n\n" + section
+        var out = prompt
+        out.insert(contentsOf: "\n\n" + section, at: range.lowerBound)
+        return out
     }
 
     /// Injects model-analyzed attachment descriptions before TRANSCRIPT.
@@ -113,22 +117,12 @@ enum SummaryPromptBuilder {
         ATTACHMENT VISION (model-analyzed from images — authoritative for visual content):
         \(block.trimmingCharacters(in: .whitespacesAndNewlines))
         """
-        if let range = prompt.range(of: "\nTRANSCRIPT:", options: .backwards) {
-            var out = prompt
-            out.insert(contentsOf: "\n\n" + section, at: range.lowerBound)
-            return out
-        }
-        return prompt + "\n\n" + section
+        return insertBeforeTranscript(section, into: prompt)
     }
 
     /// Injects attachment captions/paths before the TRANSCRIPT section (or at end).
     static func injectAttachments(_ block: String, into prompt: String) -> String {
-        if let range = prompt.range(of: "\nTRANSCRIPT:", options: .backwards) {
-            var out = prompt
-            out.insert(contentsOf: "\n\n" + block, at: range.lowerBound)
-            return out
-        }
-        return prompt + "\n\n" + block
+        insertBeforeTranscript(block, into: prompt)
     }
 
     /// Injects a terminology glossary block before the TRANSCRIPT section (or at end).
@@ -137,12 +131,7 @@ enum SummaryPromptBuilder {
         Terminology glossary (use these spellings/forms consistently):
         \(block)
         """
-        if let range = prompt.range(of: "\nTRANSCRIPT:", options: .backwards) {
-            var out = prompt
-            out.insert(contentsOf: "\n\n" + section, at: range.lowerBound)
-            return out
-        }
-        return prompt + "\n\n" + section
+        return insertBeforeTranscript(section, into: prompt)
     }
 
     /// Terminology block for prompt injection from the knowledge DB.

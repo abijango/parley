@@ -16,8 +16,8 @@ final class ZoomSource: MeetingSource, @unchecked Sendable {
         if context.needs.title {
             if let (topic, _) = MeetingParsers.zoomHomeNowTitle(context.tree.nodes(pid: context.call.pid)) {
                 title = TitleCandidate(title: topic, authority: .appContext, provenance: "zoomHome")
-            } else if [3, 6].contains(context.tick) {
-                title = renderedCalendarTitle(context)
+            } else {
+                title = context.calendarFallbackTitle()
             }
         }
         let nodes = context.tree.nodes(pid: context.call.pid) {
@@ -29,12 +29,5 @@ final class ZoomSource: MeetingSource, @unchecked Sendable {
             ?? .unreadable(at: context.now)
         if snapshot.coverage != .unreadable { sawRosterSurface = true }
         return SourceReading(title: title, roster: snapshot)
-    }
-
-    private func renderedCalendarTitle(_ context: ScanContext) -> TitleCandidate? {
-        if let teamsPid = context.runningApps.pid(prefix: "com.microsoft.teams") {
-            context.tree.prepareRichTree(pid: teamsPid)
-        }
-        return MeetingParsers.scheduleOverlapTitle(apps: context.runningApps, tree: context.tree)
     }
 }

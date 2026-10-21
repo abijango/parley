@@ -2,11 +2,8 @@ import Foundation
 import AVFoundation
 
 /// Engine-agnostic clean-mix + 16 kHz mono loading for the offline diarization pass.
-///
-/// Ported from `FluidAudioEngine`'s private clean-mix logic (intentionally duplicated,
-/// not refactored, so the FluidAudio path stays untouched). Unlike FluidAudio's
-/// version it resamples via AVFoundation rather than FluidAudio's `AudioConverter`, so
-/// the WhisperKit + SpeakerKit engine doesn't depend on the FluidAudio package.
+/// Decodes via AVFoundation by default so engines without FluidAudio don't depend on it;
+/// FluidAudio passes its own `AudioConverter` decoder.
 enum AudioMix {
 
     /// 16 kHz mono Float32 — the format SpeakerKit (and pyannote) consume.
@@ -37,12 +34,23 @@ enum AudioMix {
         return Array(UnsafeBufferPointer(start: ch[0], count: Int(outBuf.frameLength)))
     }
 
-    /// Sum the archived mic + system tracks into one clean 16 kHz mono file, peak-
-    /// normalized to ~-3 dBFS so it's audible and gives the diarizer a strong signal.
+    /// Sum the archived mic + system tracks (both continuous from capture start) into one
+    /// clean 16 kHz mono file, with no per-tick discontinuities unlike the live mixer.
+    ///
+    /// A mic capture of an acoustic re-recording is often very quiet. That makes playback
+    /// inaudible and starves the whole-file diarizer's speech detection (it returns 0
+    /// segments while the chunked live pass, catching louder bursts, finds speakers). So
+    /// the sum is peak-normalized to ~-3 dBFS, with gain capped so a near-silent file
+    /// isn't amplified into noise.
     @discardableResult
-    static func buildCleanMix(mic: URL?, system: URL?, output: URL) -> Bool {
-        let m = mic.flatMap(loadMono16k) ?? []
-        let s = system.flatMap(loadMono16k) ?? []
+    static func buildCleanMix(mic: URL?, system: URL?, output: URL,
+                              decode: (URL) -> [Float]? = loadMono16k) -> Bool {
+        func load(_ url: URL?) -> [Float] {
+            guard let url, FileManager.default.fileExists(atPath: url.path) else { return [] }
+            return decode(url) ?? []
+        }
+        let m = load(mic)
+        let s = load(system)
         let n = max(m.count, s.count)
         guard n > 0 else { return false }
         var out = [Float](repeating: 0, count: n)

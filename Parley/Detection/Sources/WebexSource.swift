@@ -21,10 +21,7 @@ final class WebexSource: MeetingSource, @unchecked Sendable {
     func read(_ context: ScanContext) -> SourceReading {
         var title: TitleCandidate?
         if context.needs.title {
-            title = callWindowTitle(context)
-            if title == nil, [3, 6].contains(context.tick) {
-                title = calendarTitle(context)
-            }
+            title = callWindowTitle(context) ?? context.calendarFallbackTitle()
         }
         return SourceReading(title: title, roster: .unreadable(at: context.now))
     }
@@ -52,12 +49,5 @@ final class WebexSource: MeetingSource, @unchecked Sendable {
             }
         }
         return nil
-    }
-
-    private func calendarTitle(_ context: ScanContext) -> TitleCandidate? {
-        if let teamsPid = context.runningApps.pid(prefix: "com.microsoft.teams") {
-            context.tree.prepareRichTree(pid: teamsPid)
-        }
-        return MeetingParsers.scheduleOverlapTitle(apps: context.runningApps, tree: context.tree)
     }
 }

@@ -19,9 +19,7 @@ final class TeamsSource: MeetingSource, @unchecked Sendable {
         var title: TitleCandidate?
         if context.needs.title {
             title = callWindowTitle(context)
-            if title == nil, [3, 6].contains(context.tick) {
-                title = renderedCalendarTitle(context)
-            }
+                ?? context.calendarFallbackTitle { self.prepareIfNeeded($0, tree: context.tree) }
         }
         return SourceReading(title: title, roster: roster(context))
     }
@@ -38,13 +36,6 @@ final class TeamsSource: MeetingSource, @unchecked Sendable {
             }
         }
         return nil
-    }
-
-    private func renderedCalendarTitle(_ context: ScanContext) -> TitleCandidate? {
-        if let teamsPid = context.runningApps.pid(prefix: "com.microsoft.teams") {
-            prepareIfNeeded(teamsPid, tree: context.tree)
-        }
-        return MeetingParsers.scheduleOverlapTitle(apps: context.runningApps, tree: context.tree)
     }
 
     /// Roster is found by the Attendees outline, not by a settled call-window title.

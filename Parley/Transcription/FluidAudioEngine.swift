@@ -119,10 +119,6 @@ final class FluidAudioEngine: TranscriptionEngine {
     private let publishMinInterval: TimeInterval = 1.0
     private var publishDeferredTask: Task<Void, Never>?
 
-    /// 16 kHz mono — the format every FluidAudio model consumes.
-    private static let format = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
-
     var onSegmentsChanged: (([Segment]) -> Void)?
     /// Fired when a speaker is auto-identified to a saved voiceprint (the person's name).
     var onSpeakerIdentified: ((String) -> Void)?
@@ -484,7 +480,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                 if let mixed = AudioRingBuffer.mixLive(mic: micRing, system: systemRing), !mixed.isEmpty {
                     for v in mixed { windowPeak = max(windowPeak, abs(v)) }
                     if useUnified, let unified {
-                        if let buf = Self.makePCMBuffer(mixed) {
+                        if let buf = AudioMix.makeBuffer(mixed) {
                             do {
                                 try await unified.appendAudio(buf)
                                 try await unified.processBufferedAudio()
@@ -774,7 +770,10 @@ final class FluidAudioEngine: TranscriptionEngine {
         let pass: OfflinePassResult = await CancellableDetached.run {
             // Build a CLEAN mixed file from the archived tracks (the live per-tick
             // mixer is glitchy — fine for streaming ASR, bad for diarization + playback).
-            let built = Self.buildCleanMix(mic: mic, system: sys, output: url)
+            let converter = AudioConverter()
+            let built = AudioMix.buildCleanMix(mic: mic, system: sys, output: url) {
+                try? converter.resampleAudioFile($0)
+            }
             guard !Task.isCancelled else { return OfflinePassResult(segs: nil, tokens: nil) }
             guard let samples = try? AudioConverter().resampleAudioFile(url), !samples.isEmpty else {
                 AppLog.log("finalizeDiarization: couldn't read clean mix (built=\(built))", category: "record")
@@ -1010,73 +1009,12 @@ final class FluidAudioEngine: TranscriptionEngine {
         return best?.id
     }
 
-    /// Sum the archived mic + system tracks (both continuous from capture start) into
-    /// one clean 16 kHz mono file — no per-tick discontinuities, unlike the live mixer.
-    nonisolated private static func buildCleanMix(mic: URL?, system: URL?, output: URL) -> Bool {
-        let converter = AudioConverter()
-        func decode(_ url: URL?) -> [Float] {
-            guard let url, FileManager.default.fileExists(atPath: url.path),
-                  let samples = try? converter.resampleAudioFile(url) else { return [] }
-            return samples
-        }
-        let m = decode(mic), s = decode(system)
-        let n = max(m.count, s.count)
-        guard n > 0 else { return false }
-        var out = [Float](repeating: 0, count: n)
-        for i in 0..<m.count { out[i] += m[i] }
-        for i in 0..<s.count { out[i] += s[i] }
-        // A mic capture of an acoustic re-recording is often very quiet. That both
-        // makes playback inaudible AND starves the whole-file diarizer's speech
-        // detection (it returns 0 segments while the chunked live pass — catching
-        // louder bursts — finds speakers). Peak-normalize the summed mix to ~-3 dBFS
-        // so the saved file is audible and the offline pass has a strong enough
-        // signal to segment. Gain is capped so a near-silent file isn't amplified
-        // into noise.
-        var peak: Float = 0
-        for v in out { peak = max(peak, abs(v)) }
-        if peak > 0.0001 {
-            let gain = min(20, 0.7 / peak)
-            if gain > 1 { for i in 0..<n { out[i] *= gain } }
-        }
-        for i in 0..<n { out[i] = max(-1, min(1, out[i])) }
-        guard let buffer = makeBuffer(out),
-              let file = try? AVAudioFile(forWriting: output, settings: mixFileSettings) else { return false }
-        do { try file.write(from: buffer); return true } catch { return false }
-    }
-
-    /// `mixed.caf` on-disk format: Int16 LPCM (half the Float32 size, inaudible for
-    /// speech). The in-memory pipeline stays Float32 (`format`); AVAudioFile converts
-    /// on write. `AudioCompactor` later re-encodes the file to ALAC in place.
-    private static let mixFileSettings: [String: Any] = [
-        AVFormatIDKey: kAudioFormatLinearPCM,
-        AVSampleRateKey: 16_000.0,
-        AVNumberOfChannelsKey: 1,
-        AVLinearPCMBitDepthKey: 16,
-        AVLinearPCMIsFloatKey: false,
-        AVLinearPCMIsBigEndianKey: false,
-        AVLinearPCMIsNonInterleaved: false,
-    ]
-
-    nonisolated private static func makeBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
-        guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return nil }
-        pcm.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { src in
-            if let base = src.baseAddress { pcm.floatChannelData![0].update(from: base, count: samples.count) }
-        }
-        return pcm
-    }
-
     private func attachUnifiedPartialCallback(
         _ unified: StreamingUnifiedAsrManager, startElapsed: TimeInterval
     ) async {
         await unified.setPartialTranscriptCallback { [weak self] text in
             Task { @MainActor in self?.applyPartial(text, startElapsed: startElapsed) }
         }
-    }
-
-    /// Build a 16 kHz mono PCM buffer from float samples for unified streaming ASR.
-    nonisolated private static func makePCMBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
-        makeBuffer(samples)
     }
 
     /// Consume a cumulative partial transcript from the streaming ASR. The text is
