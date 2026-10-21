@@ -36,7 +36,7 @@ struct JobProgress: Equatable, Sendable {
 final class JobProgressRelay: @unchecked Sendable {
 
     private let jobID: String
-    private let publish: @MainActor (String, JobProgress) -> Void
+    private let publish: @MainActor @Sendable (String, JobProgress) -> Void
 
     private let lock = NSLock()
 
@@ -52,7 +52,7 @@ final class JobProgressRelay: @unchecked Sendable {
     private var lastPublishTime: Date = .distantPast
     private var pendingPublish = false
 
-    init(jobID: String, publish: @escaping @MainActor (String, JobProgress) -> Void) {
+    init(jobID: String, publish: @escaping @MainActor @Sendable (String, JobProgress) -> Void) {
         self.jobID = jobID
         self.publish = publish
     }

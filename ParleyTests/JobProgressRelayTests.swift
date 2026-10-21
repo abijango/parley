@@ -3,6 +3,7 @@ import XCTest
 
 /// Unit tests for `JobProgressRelay`: throttling correctness, stage-change flushing,
 /// min(asr,diar) semantics, and thread-safety smoke.
+@MainActor
 final class JobProgressRelayTests: XCTestCase {
 
     // MARK: Throttle — a burst of 100 .asr events yields ≤ a handful of publishes

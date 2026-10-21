@@ -67,7 +67,7 @@ final class SpeakerKitDiarizer {
         // SpeakerKit's progressCallback delivers a Foundation `Progress` object; extract
         // `fractionCompleted` and forward it as a plain Double to stay framework-agnostic.
         let progressCallback: (@Sendable (Progress) -> Void)? = progress.map { cb in
-            { p in cb(p.fractionCompleted) }
+            { @Sendable p in cb(p.fractionCompleted) }
         }
         let result = try await sk.diarize(audioArray: samples, options: options,
                                           progressCallback: progressCallback)

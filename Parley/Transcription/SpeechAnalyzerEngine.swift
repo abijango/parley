@@ -158,11 +158,11 @@ final class SpeechAnalyzerEngine: SpeakerCapableEngine {
 
         async let asrWords = Self.transcribeFile(
             url: url, localeIdentifier: localeID,
-            progress: progressCB.map { cb in { f in cb(.asr(f)) } })
+            progress: progressCB.map { cb in { @Sendable f in cb(.asr(f)) } })
         async let diarOut = Self.diarizeLogged(
             samples: samples, clusterThreshold: Float(threshold),
             expectedSpeakers: hint,
-            progress: progressCB.map { cb in { f in cb(.diarization(f)) } })
+            progress: progressCB.map { cb in { @Sendable f in cb(.diarization(f)) } })
 
         let (words, diarResult) = await (asrWords, diarOut)
         AppLog.log("SpeechAnalyzer offline pass: concurrent ASR+diar finished in \(String(format: "%.1fs", Date().timeIntervalSince(concurrentStart)))", category: "record")

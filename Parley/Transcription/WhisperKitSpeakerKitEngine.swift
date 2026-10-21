@@ -215,7 +215,7 @@ final class WhisperKitSpeakerKitEngine: SpeakerCapableEngine {
                 samples,
                 clusterThreshold: clusterThreshold,
                 expectedSpeakers: expectedSpeakers,
-                progress: progressCB.map { cb in { f in cb(.diarization(f)) } })
+                progress: progressCB.map { cb in { @Sendable f in cb(.diarization(f)) } })
             progressCB?(.diarizationDone)
             AppLog.log("SpeakerKit diar stage: \(String(format: "%.1fs", Date().timeIntervalSince(t)))", category: "record")
             return out
