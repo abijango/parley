@@ -159,7 +159,7 @@ final class SummaryV2Tests: XCTestCase {
         let terms = TerminologyStore(database: db)
         let people = PeopleStore(database: db)
         _ = terms.insert(from: "Acme", to: "Acme Corp", source: "test")
-        people.upsert(contact: Contact(name: "Alice", company: "Vanguard", side: .internalTeam,
+        _ = people.upsert(contact: Contact(name: "Alice", company: "Vanguard", side: .internalTeam,
                                        title: "Engineer", linkedin: nil))
         let data = try KnowledgeExportImport.exportJSON(terminology: terms, people: people)
         let db2 = KnowledgeDatabase.openTemporary()

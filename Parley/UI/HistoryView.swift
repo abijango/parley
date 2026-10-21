@@ -287,7 +287,7 @@ struct HistoryView: View {
                         row(item).tag(item.id)
                             .contextMenu { rowMenu(item) }
                     }
-                    .onMove(perform: filter == .processing ? moveProcessingItem : nil)
+                    .onMove(perform: moveAction)
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
@@ -410,6 +410,15 @@ struct HistoryView: View {
 
     private func sessionID(for item: TranscriptItem) -> String? {
         MeetingFiles.sessionDir(forAudioPath: item.meta.audio)?.lastPathComponent
+    }
+
+    /// Drag-to-reorder only in the Processing tab. SwiftUI takes a nonisolated closure,
+    /// but it calls it on the main thread.
+    private var moveAction: ((IndexSet, Int) -> Void)? {
+        guard filter == .processing else { return nil }
+        return { source, destination in
+            MainActor.assumeIsolated { moveProcessingItem(from: source, to: destination) }
+        }
     }
 
     private func moveProcessingItem(from source: IndexSet, to destination: Int) {

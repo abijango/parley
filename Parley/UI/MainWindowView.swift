@@ -912,7 +912,7 @@ struct RecordDetailView: View {
                 }
                 .font(Theme.Typography.caption)
             }
-            if let url = recording.lastTranscriptURL, !recording.isRecording {
+            if recording.lastTranscriptURL != nil, !recording.isRecording {
                 Button("Ready for next") {
                     mode = .live
                     recording.clearForNextMeeting()

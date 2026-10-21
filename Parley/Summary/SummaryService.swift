@@ -1286,7 +1286,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                                                   model: String) -> RunResult {
         let wall = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
         switch result {
-        case .success(let text, var metrics):
+        case .success(let text, let metrics):
             if var m = metrics {
                 m.wallClock = wall
                 if m.model.isEmpty { m.model = model }

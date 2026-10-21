@@ -384,7 +384,7 @@ final class SpeechAnalyzerEngine: SpeakerCapableEngine {
                             "SpeechAnalyzer result #\(count) final=\(result.isFinal) chars=\(preview.count) “\(preview)”",
                             category: "record")
                     }
-                    await self.ingestLiveResult(result)
+                    self.ingestLiveResult(result)
                 }
                 AppLog.log("SpeechAnalyzer live results stream finished (\(count) results)", category: "record")
             } catch {

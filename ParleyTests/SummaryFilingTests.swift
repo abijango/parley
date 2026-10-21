@@ -175,11 +175,11 @@ final class SummaryFilingTests: XCTestCase {
         let (item, sessionDir) = try makeItem(title: "Refile")
         let service = SummaryService(store: TranscriptStore())
 
-        let note1 = try XCTUnwrap(service.commitGeneratedMarkdown(
+        _ = try XCTUnwrap(service.commitGeneratedMarkdown(
             item, destination: "Work", body: "## Summary\nFirst", overwriteExisting: false))
         XCTAssertFalse(FileManager.default.fileExists(atPath: sessionDir.path))
 
-        var processed = AppPaths.processedURL(vault: tmpVault)
+        let processed = AppPaths.processedURL(vault: tmpVault)
             .appendingPathComponent(item.url.lastPathComponent)
         var meta = try XCTUnwrap(TranscriptWriter.parseFrontmatter(processed))
         let refiled = TranscriptItem(url: processed, meta: meta, isProcessed: true)

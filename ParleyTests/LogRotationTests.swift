@@ -85,7 +85,7 @@ final class LogRotationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("freeze-2026-09-07-175227.txt").path))
         let zipped = directory.appendingPathComponent("freeze-2026-09-07-175227.txt.zip")
         XCTAssertEqual(try String(data: unzip(zipped), encoding: .utf8), "old")
-        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("notes.txt")), "keep")
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("notes.txt"), encoding: .utf8), "keep")
     }
 
     func testZippedFreezeCapturesCountTowardRetention() throws {

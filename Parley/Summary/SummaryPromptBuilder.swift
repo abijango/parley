@@ -79,7 +79,7 @@ enum SummaryPromptBuilder {
                             attachmentUnderstanding: AttachmentUnderstanding = .captionsOnly,
                             speakerHints: String? = nil) -> Built {
         let renameLines = renames.map { old, new in "- \(old) → \(new)" }.sorted().joined(separator: "\n")
-        var body = template
+        let body = template
             .replacingOccurrences(of: "{{previous_note}}", with: previousNote)
             .replacingOccurrences(of: "{{rename_map}}", with: renameLines.isEmpty ? "(none)" : renameLines)
         let built = build(

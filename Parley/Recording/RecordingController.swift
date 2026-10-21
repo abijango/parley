@@ -2319,7 +2319,7 @@ final class RecordingController: ObservableObject {
             enrollVoiceprint(name: clean, centroid: centroid, model: cache.embeddingModelID,
                              overridingAutoName: previousAuto)
         }
-        if var meta = TranscriptWriter.parseFrontmatter(transcript) {
+        if let meta = TranscriptWriter.parseFrontmatter(transcript) {
             var names = meta.attendees
             if !names.contains(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
                 names.append(clean)

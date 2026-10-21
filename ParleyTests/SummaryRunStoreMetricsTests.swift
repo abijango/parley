@@ -30,7 +30,7 @@ final class SummaryRunStoreMetricsTests: XCTestCase {
 
     func testExistingRowsDefaultToV2Pipeline() throws {
         let db = KnowledgeDatabase.openTemporary()
-        db.withDB { sqlite in
+        _ = db.withDB { sqlite in
             sqlite3_exec(sqlite, """
                 INSERT INTO summary_runs(id, transcript_id, transcript_path, created_at,
                     writer_backend, checker_backend, draft_markdown, checker_raw, checker_parse_ok)

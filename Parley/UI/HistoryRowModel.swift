@@ -188,7 +188,6 @@ final class HistoryRowIndex: ObservableObject {
     ) -> ContentScanResult {
         var ids = Set<String>()
         var nextCache = cache
-        let fm = FileManager.default
         for url in urls {
             let key = url.path
             let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?

@@ -10,7 +10,7 @@ final class PeopleStoreTests: XCTestCase {
 
     func testAdrianStyleRoleHistoryRoundTrip() {
         let (db, store) = tempStore()
-        var adrian = PersonRecord(
+        let adrian = PersonRecord(
             id: UUID().uuidString,
             name: "Adrian Roberts",
             linkedin: nil,
@@ -45,7 +45,7 @@ final class PeopleStoreTests: XCTestCase {
 
     func testUpsertContactUpdatingTitlePreservesClosedRole() {
         let (_, store) = tempStore()
-        var adrian = PersonRecord(
+        let adrian = PersonRecord(
             id: UUID().uuidString,
             name: "Adrian Roberts",
             linkedin: nil,
@@ -109,7 +109,7 @@ final class PeopleStoreTests: XCTestCase {
 
     func testOriginRoundTrip() {
         let (_, store) = tempStore()
-        var record = PersonRecord(
+        let record = PersonRecord(
             id: UUID().uuidString,
             name: "Adrian Roberts",
             linkedin: nil,
@@ -219,7 +219,7 @@ final class PeopleStoreTests: XCTestCase {
 
     func testUpsertByAliasPreservesCanonicalName() {
         let (_, store) = tempStore()
-        var record = PersonRecord(
+        let record = PersonRecord(
             id: UUID().uuidString,
             name: "Adrian Roberts",
             linkedin: nil,

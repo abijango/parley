@@ -494,7 +494,7 @@ final class FluidAudioEngine: TranscriptionEngine {
                             }
                         }
                     } else if let nemotron {
-                        try? await nemotron.process(samples: mixed)
+                        _ = try? await nemotron.process(samples: mixed)
                     }
                     mixed.withUnsafeBufferPointer { diarRing.write($0) }
                     fedSamples += mixed.count
@@ -547,7 +547,7 @@ final class FluidAudioEngine: TranscriptionEngine {
 
     /// Load diarization models and build a session-long manager (owned by the diarTask).
     nonisolated private static func makeDiarizer(clusterThreshold: Float) async throws -> DiarizerManager {
-        var mlConfig = MLModelConfiguration()
+        let mlConfig = MLModelConfiguration()
         mlConfig.computeUnits = .all
         let models = try await DiarizerModels.downloadIfNeeded(configuration: mlConfig)
         var config = DiarizerConfig()
