@@ -27,39 +27,31 @@ it rebuilds a clean mix, re-detects speakers across the full call, matches voice
 against saved voiceprints, asks you to name anyone new, and losslessly shrinks the audio
 archives (~4–6× smaller).
 
-## Transcription engines
+## Transcription
 
-Two interchangeable engines sit behind one `TranscriptionEngine` protocol. Pick one in
-**Settings → Transcription**; the choice applies to the next recording.
+Parley transcribes with FluidAudio
+([FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio),
+Apache-2.0, from `0.15.6`). It mixes the microphone and system tracks into one
+16 kHz stream.
 
-| Engine | ASR | Speaker labels | Latency |
-|--------|-----|----------------|---------|
-| **FluidAudio** *(default)* | Parakeet TDT 0.6b v3 (multilingual) | Live diarization + cross-session voiceprint ID | ~11 s to first text; corrected at stop |
-| **WhisperKit + SpeakerKit** | OpenAI Whisper (small / medium / large-v3 / turbo) | Diarization + voiceprint ID at stop | **~1 s live text**; speakers at stop |
+English live sessions use Parakeet Unified. Other languages use Nemotron for the
+live stream and Parakeet v3 for the offline pass. Batch mode records audio only
+and transcribes after the call. English batch sessions use Parakeet Unified.
+Other languages use Parakeet v3.
 
-- **FluidAudio** ([FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio),
-  Apache-2.0, pinned to `0.14.8`) is a self-contained native stack. It mixes both tracks
-  into one 16 kHz stream and runs Parakeet for text (sliding ~11 s windows, so the first
-  words take a moment) alongside pyannote + WeSpeaker diarization for live speaker
-  labels. `v3` is multilingual; `v2` is English-only.
-- **WhisperKit + SpeakerKit** transcribes live with WhisperKit (~1 s). At stop,
-  SpeakerKit ([Argmax `argmax-oss-swift`](https://github.com/argmaxinc/argmax-oss-swift),
-  MIT, pyannote v4 on the Neural Engine) diarizes the whole call and the transcript is
-  re-attributed to speakers.
-- In both engines the diarized speaker turns are authoritative — ASR words are grouped
-  onto them, not the other way around. The original WhisperKit-only engine is still in
-  the tree but no longer selectable.
+When you stop a live recording, an optional full-recording pass rewrites the
+transcript. Speaker turns come from FluidAudio diarization. Saved voiceprints
+use the WeSpeaker embedding model.
 
-Models download on first use: Whisper models to
-`~/Library/Application Support/Parley/models`, FluidAudio models to
-`~/Library/Application Support/FluidAudio/Models/`. Settings shows download progress and
-an Active marker for each.
+Models download on first use to
+`~/Library/Application Support/FluidAudio/Models/`. Settings shows download
+progress.
 
 > **Voiceprints are biometric data.** Each one is encrypted at rest (AES-GCM, key in
 > your Keychain) and tagged with the embedding model that produced it, so prints from
 > different models never cross-match. Embeddings don't survive a model upgrade, so short
 > enrollment clips are kept alongside each voiceprint — the **People** tab can
-> rebuild voiceprints from those clips without re-recording anyone.
+> re-enroll a FluidAudio voiceprint from the kept clip without re-recording anyone.
 > Two thresholds, two jobs: the diarization threshold groups voices *within* one
 > recording; the identification threshold matches a voice to a saved person *across*
 > recordings. Both default to 0.6 and live in Settings → Transcription.
