@@ -248,62 +248,9 @@ final class SummaryComparison: ObservableObject {
 
     /// Runs one backend off the main actor; measures wall time around the call.
     private nonisolated static func generate(backend: SummaryBackend, prompt: String, processHandle: ProcessHandle) async -> GenOutcome {
-        let settings = await MainActor.run { (
-            claudeBinary: AppSettings.shared.claudeBinaryPath,
-            claudeModel: AppSettings.shared.claudeModel,
-            grokBinary: AppSettings.shared.grokBinaryPath,
-            grokModel: AppSettings.shared.grokModel,
-            cursorBinary: AppSettings.shared.cursorBinaryPath
-        ) }
+        let config = await MainActor.run { SummaryService.RunnerConfig(AppSettings.shared) }
         let start = Date()
-        switch backend {
-        case .claude:
-            let r = await Task.detached {
-                SummaryService.runClaudeForCompare(
-                    binary: settings.claudeBinary,
-                    prompt: prompt,
-                    model: settings.claudeModel,
-                    processHandle: processHandle)
-            }.value
-            return map(r, start: start)
-        case .grok:
-            let r = await Task.detached {
-                SummaryService.runGrokForCompare(
-                    binary: settings.grokBinary,
-                    prompt: prompt,
-                    model: settings.grokModel,
-                    processHandle: processHandle)
-            }.value
-            return map(r, start: start)
-        case .local:
-            let startLocal = start
-            do {
-                let text: String = try await Task { @MainActor in
-                    await RecordingController.shared.prepareForLocalSummary()
-                    return try await LocalSummaryRunner.shared.summarize(prompt: prompt)
-                }.value
-                let elapsed = Date().timeIntervalSince(startLocal)
-                let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                return cleaned.isEmpty
-                    ? .failure("Local model produced no output.", elapsed)
-                    : .success(cleaned, elapsed)
-            } catch {
-                return .failure(error.localizedDescription, Date().timeIntervalSince(startLocal))
-            }
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-            let model = backend.rawValue
-            let r = await Task.detached {
-                SummaryService.runCursorForCompare(
-                    binary: settings.cursorBinary,
-                    prompt: prompt,
-                    model: model,
-                    processHandle: processHandle)
-            }.value
-            return map(r, start: start)
-        }
-    }
-
-    private nonisolated static func map(_ r: SummaryService.CompareGenerateResult, start: Date) -> GenOutcome {
+        let r = await SummaryService.runForCompare(backend, prompt: prompt, config: config, processHandle: processHandle)
         let elapsed = Date().timeIntervalSince(start)
         switch r {
         case .ok(let text): return .success(text, elapsed)

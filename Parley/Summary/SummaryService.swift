@@ -528,42 +528,28 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }
         let backend = settings.summaryBackend
         runningActivity = {
-            switch backend {
+            switch backend.provider {
             case .claude: return "Starting Claude…"
             case .grok: return "Starting Grok…"
             case .local: return "Starting local Qwen…"
-            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-                return "Starting \(backend.statusName)…"
+            case .cursor: return "Starting \(backend.statusName)…"
             }
         }()
         setSummaryStatus(.running, for: item)
         let vault = settings.vaultURL
         let attachmentUnderstanding = settings.attachmentUnderstanding
         let visionBackend = settings.attachmentVisionBackend
-        let cursorBinary = settings.cursorBinaryPath
         let summaryPromptTemplate = settings.summaryPromptTemplate
         let contactsURL = settings.contactsURL
         let terminologyScope = TerminologyStore.customerScope(fromFiling: item.meta.filing)
         let terminology = SummaryPromptBuilder.terminologyBlock(filingScope: terminologyScope)
         let dbContacts = PeopleStore().contacts()
         let peopleRecords = PeopleStore().all()
-        let claudeBinary = settings.claudeBinaryPath
-        let claudeModel = settings.claudeModel
-        let grokBinary = settings.grokBinaryPath
-        let grokModel = settings.grokModel
+        let config = RunnerConfig(settings)
         let staged = Self.stagingURL(for: item.url, backend: backend)
         let failureTrip = settings.summaryFailureTripThreshold
         let backendLabel = backend.displayName
-        let modelLabel: String = {
-            switch backend {
-            case .claude: return claudeModel
-            case .grok: return grokModel
-            case .local: return settings.localSummaryModelId
-            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-                return backend.rawValue
-            }
-        }()
-        AppLog.log("Summary: started for \(item.url.lastPathComponent) (backend=\(backend.rawValue), model=\(modelLabel))", category: "summary")
+        AppLog.log("Summary: started for \(item.url.lastPathComponent) (backend=\(backend.rawValue), model=\(config.model(for: backend)))", category: "summary")
 
         let sessionDir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio)
         let speakerHints = SpeakerGuessResolver.readPromptBlock(
@@ -585,7 +571,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 transcriptURL: item.url, vault: vault,
                 understanding: attachmentUnderstanding,
                 visionBackend: visionBackend,
-                cursorBinary: cursorBinary)
+                cursorBinary: config.cursorBinary)
             let built: SummaryPromptBuilder.Built
             if let repairJob {
                 built = SummaryPromptBuilder.buildRepair(
@@ -617,25 +603,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     speakerHints: speakerHints)
             }
             let runStart = DispatchTime.now().uptimeNanoseconds
-            let result: RunResult
-            switch backend {
-            case .claude:
-                result = Self.runClaudeStreaming(binary: claudeBinary, prompt: built.prompt, model: claudeModel,
-                    onActivity: { line in
-                        Task { @MainActor [weak self] in self?.runningActivity = line }
-                    }, processHandle: handle)
-            case .grok:
-                Task { @MainActor [weak self] in self?.runningActivity = "Grok is writing…" }
-                result = Self.runGrok(binary: grokBinary, prompt: built.prompt, model: grokModel, processHandle: handle)
-            case .local:
-                result = await Self.runLocal(prompt: built.prompt, model: modelLabel) { line in
-                    Task { @MainActor [weak self] in self?.runningActivity = line }
-                }
-            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-                Task { @MainActor [weak self] in self?.runningActivity = "\(backend.statusName) is writing…" }
-                result = Self.runCursorAgent(binary: cursorBinary, prompt: built.prompt, model: backend.rawValue, processHandle: handle)
+            let result = await Self.runBackend(backend, prompt: built.prompt, config: config, processHandle: handle) { line in
+                Task { @MainActor [weak self] in self?.runningActivity = line }
             }
-            let timed = Self.withWallClock(runStart, result, model: modelLabel)
+            let timed = Self.withWallClock(runStart, result, model: config.model(for: backend))
             let attachments = item.meta.attachments
             await MainActor.run {
                 guard let self else { return }
@@ -655,19 +626,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                         self.setSummaryStatus(.done, for: item)
                         self.consecutiveFailures = 0
                         self.backoffAttempt = 0
-                        switch backend {
-                        case .claude:
-                            if let usage = metrics.flatMap({ Self.claudeUsage(from: $0) }) {
-                                ClaudeUsageStore.shared.record(usage)
-                            }
-                            ClaudeConnection.shared.noteRunSucceeded()
-                        case .grok:
-                            GrokConnection.shared.noteRunSucceeded()
-                        case .local:
-                            break
-                        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-                            CursorConnection.shared.noteRunSucceeded()
-                        }
+                        Self.noteConnection(backend, timed)
                         let run = SummaryRunRecord(
                             id: UUID().uuidString,
                             transcriptID: item.url.path,
@@ -691,37 +650,13 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     self.queue.insert(item, at: 0)
                     self.jobs[item.id] = .pending(since: Date())
                     self.setSummaryStatus(.paused, for: item)
-                    switch backend {
-                    case .claude:
-                        ClaudeConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
-                    case .grok:
-                        GrokConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
-                    case .local:
-                        break
-                    case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-                        break
-                    }
+                    Self.noteConnection(backend, timed)
                     AppLog.log("Summary: \(backendLabel) usage/rate limit hit (\(trip.matchedPhrase)) — pausing queue", category: "summary")
                     self.tripThrottle(reason: .usageLimit, resumeAt: trip.resumeAt)
-                case .failure(let reason, let setupIssue):
+                case .failure(let reason, _):
                     self.noteFailedRun(item, reason: reason)
                     self.consecutiveFailures += 1
-                    // Keep the connection badge honest so the user is pointed at setup.
-                    switch (backend, setupIssue) {
-                    case (.claude, .notInstalled):  ClaudeConnection.shared.refresh()
-                    case (.claude, .notLoggedIn):   ClaudeConnection.shared.noteAuthFailure(detail: reason)
-                    case (.grok, .notInstalled):    GrokConnection.shared.refresh()
-                    case (.grok, .notLoggedIn):     GrokConnection.shared.noteAuthFailure(detail: reason)
-                    case (.composer25, .notInstalled), (.composer25Fast, .notInstalled),
-                         (.cursorGrok46Fast, .notInstalled), (.cursorGrok47Low, .notInstalled),
-                         (.cursorGrok47Medium, .notInstalled), (.cursorGrok47MediumFast, .notInstalled):
-                        CursorConnection.shared.refresh()
-                    case (.composer25, .notLoggedIn), (.composer25Fast, .notLoggedIn),
-                         (.cursorGrok46Fast, .notLoggedIn), (.cursorGrok47Low, .notLoggedIn),
-                         (.cursorGrok47Medium, .notLoggedIn), (.cursorGrok47MediumFast, .notLoggedIn):
-                        CursorConnection.shared.noteAuthFailure(detail: reason)
-                    default: break
-                    }
+                    Self.noteConnection(backend, timed)
                     AppLog.log("Summary: failed for \(item.url.lastPathComponent) (\(backendLabel)) — \(reason)", category: "summary")
                     if self.consecutiveFailures >= failureTrip {
                         self.tripThrottle(reason: .repeatedFailures, resumeAt: nil)
@@ -752,11 +687,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let checker = settings.summaryCheckerBackend
         let staged = Self.v2StagingURL(for: item.url)
         let failureTrip = settings.summaryFailureTripThreshold
-        let claudeBinary = settings.claudeBinaryPath
-        let claudeModel = settings.claudeModel
-        let grokBinary = settings.grokBinaryPath
-        let grokModel = settings.grokModel
-        let cursorBinary = settings.cursorBinaryPath
+        let config = RunnerConfig(settings)
+        let cursorBinary = config.cursorBinary
         let summaryPromptTemplate = settings.summaryPromptTemplate
         let contactsURL = settings.contactsURL
         let transcriptText = SummaryPromptBuilder.readTranscript(item.url)
@@ -804,15 +736,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             let writerStart = DispatchTime.now().uptimeNanoseconds
             let draftResult = Self.withWallClock(
                 writerStart,
-                Self.runBackend(
-                    writer, prompt: built.prompt,
-                    claudeBinary: claudeBinary, claudeModel: claudeModel,
-                    grokBinary: grokBinary, grokModel: grokModel,
-                    cursorBinary: cursorBinary,
-                    processHandle: handle,
-                    onActivity: { line in Task { @MainActor [weak self] in self?.runningActivity = line } }
-                ),
-                model: writer.rawValue
+                await Self.runV2Role(writer, prompt: built.prompt, config: config, processHandle: handle) { line in
+                    Task { @MainActor [weak self] in self?.runningActivity = line }
+                },
+                model: config.model(for: writer)
             )
             switch draftResult {
             case .success:
@@ -824,6 +751,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     self.queue.insert(item, at: 0)
                     self.jobs[item.id] = .pending(since: Date())
                     self.setSummaryStatus(.paused, for: item)
+                    Self.noteConnection(writer, draftResult)
                     self.tripThrottle(reason: .usageLimit, resumeAt: trip.resumeAt)
                     self.isRunning = false
                     self.runningID = nil
@@ -857,15 +785,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             let checkerStart = DispatchTime.now().uptimeNanoseconds
             let checkerResult = Self.withWallClock(
                 checkerStart,
-                Self.runBackend(
-                    checker, prompt: checkerPrompt,
-                    claudeBinary: claudeBinary, claudeModel: claudeModel,
-                    grokBinary: grokBinary, grokModel: grokModel,
-                    cursorBinary: cursorBinary,
-                    processHandle: handle,
-                    onActivity: { _ in }
-                ),
-                model: checker.rawValue
+                await Self.runV2Role(checker, prompt: checkerPrompt, config: config, processHandle: handle) { _ in },
+                model: config.model(for: checker)
             )
 
             let runID = UUID().uuidString
@@ -915,8 +836,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     self.setSummaryStatus(.done, for: item)
                     self.consecutiveFailures = 0
                     self.backoffAttempt = 0
-                    Self.noteBackendSuccess(writer)
-                    if case .success = checkerResult { Self.noteBackendSuccess(checker) }
+                    Self.noteConnection(writer, draftResult)
+                    if case .success = checkerResult { Self.noteConnection(checker, checkerResult) }
                     Self.notifyReady(title: item.meta.title)
                     AppLog.log("Summary v2: ready for review — \(staged.lastPathComponent)", category: "summary")
                 } catch {
@@ -936,21 +857,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         if parkIfPreempted(item) { return }
         noteFailedRun(item, reason: reason)
         consecutiveFailures += 1
-        switch (backend, setupIssue) {
-        case (.claude, .notInstalled): ClaudeConnection.shared.refresh()
-        case (.claude, .notLoggedIn): ClaudeConnection.shared.noteAuthFailure(detail: reason)
-        case (.grok, .notInstalled): GrokConnection.shared.refresh()
-        case (.grok, .notLoggedIn): GrokConnection.shared.noteAuthFailure(detail: reason)
-        case (.composer25, .notInstalled), (.composer25Fast, .notInstalled),
-             (.cursorGrok46Fast, .notInstalled), (.cursorGrok47Low, .notInstalled),
-             (.cursorGrok47Medium, .notInstalled), (.cursorGrok47MediumFast, .notInstalled):
-            CursorConnection.shared.refresh()
-        case (.composer25, .notLoggedIn), (.composer25Fast, .notLoggedIn),
-             (.cursorGrok46Fast, .notLoggedIn), (.cursorGrok47Low, .notLoggedIn),
-             (.cursorGrok47Medium, .notLoggedIn), (.cursorGrok47MediumFast, .notLoggedIn):
-            CursorConnection.shared.noteAuthFailure(detail: reason)
-        default: break
-        }
+        Self.noteConnection(backend, .failure(reason: reason, setupIssue: setupIssue))
         AppLog.log("Summary: failed for \(item.url.lastPathComponent) (\(backend.displayName)) — \(reason)", category: "summary")
         if consecutiveFailures >= failureTrip {
             tripThrottle(reason: .repeatedFailures, resumeAt: nil)
@@ -962,37 +869,100 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         requestPump()
     }
 
-    private static func noteBackendSuccess(_ backend: SummaryBackend) {
-        switch backend {
-        case .claude: ClaudeConnection.shared.noteRunSucceeded()
-        case .grok: GrokConnection.shared.noteRunSucceeded()
-        case .local: break
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
+    /// Keeps each provider's connection badge honest after a run, so a broken setup
+    /// points the user at Settings and a success clears a stale warning.
+    private static func noteConnection(_ backend: SummaryBackend, _ result: RunResult) {
+        switch (backend.provider, result) {
+        case (.local, _):
+            break
+        case (.claude, .success(_, let metrics)):
+            if let usage = metrics.flatMap({ claudeUsage(from: $0) }) {
+                ClaudeUsageStore.shared.record(usage)
+            }
+            ClaudeConnection.shared.noteRunSucceeded()
+        case (.grok, .success):
+            GrokConnection.shared.noteRunSucceeded()
+        case (.cursor, .success):
             CursorConnection.shared.noteRunSucceeded()
+        case (.claude, .usageLimited(let trip)):
+            ClaudeConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
+        case (.grok, .usageLimited(let trip)):
+            GrokConnection.shared.noteUsageLimited(resumeAt: trip.resumeAt)
+        case (.cursor, .usageLimited):
+            break
+        case (.claude, .failure(_, .notInstalled)): ClaudeConnection.shared.refresh()
+        case (.claude, .failure(let reason, .notLoggedIn)): ClaudeConnection.shared.noteAuthFailure(detail: reason)
+        case (.grok, .failure(_, .notInstalled)): GrokConnection.shared.refresh()
+        case (.grok, .failure(let reason, .notLoggedIn)): GrokConnection.shared.noteAuthFailure(detail: reason)
+        case (.cursor, .failure(_, .notInstalled)): CursorConnection.shared.refresh()
+        case (.cursor, .failure(let reason, .notLoggedIn)): CursorConnection.shared.noteAuthFailure(detail: reason)
+        case (_, .failure(_, nil)):
+            break
+        }
+    }
+
+    /// Settings a background run needs, read once on the main actor.
+    struct RunnerConfig: Sendable {
+        var claudeBinary: String
+        var claudeModel: String
+        var grokBinary: String
+        var grokModel: String
+        var cursorBinary: String
+        var localModel: String
+
+        @MainActor init(_ settings: AppSettings) {
+            claudeBinary = settings.claudeBinaryPath
+            claudeModel = settings.claudeModel
+            grokBinary = settings.grokBinaryPath
+            grokModel = settings.grokModel
+            cursorBinary = settings.cursorBinaryPath
+            localModel = settings.localSummaryModelId
+        }
+
+        func model(for backend: SummaryBackend) -> String {
+            switch backend.provider {
+            case .claude: return claudeModel
+            case .grok: return grokModel
+            case .cursor: return backend.rawValue
+            case .local: return localModel
+            }
         }
     }
 
     nonisolated private static func runBackend(
         _ backend: SummaryBackend,
         prompt: String,
-        claudeBinary: String,
-        claudeModel: String,
-        grokBinary: String,
-        grokModel: String,
-        cursorBinary: String,
+        config: RunnerConfig,
         processHandle: ProcessHandle? = nil,
         onActivity: @escaping @Sendable (String) -> Void
-    ) -> RunResult {
-        switch backend {
+    ) async -> RunResult {
+        let model = config.model(for: backend)
+        switch backend.provider {
         case .claude:
-            return runClaudeStreaming(binary: claudeBinary, prompt: prompt, model: claudeModel, onActivity: onActivity, processHandle: processHandle)
+            return runClaudeStreaming(binary: config.claudeBinary, prompt: prompt, model: model,
+                                      onActivity: onActivity, processHandle: processHandle)
         case .grok:
-            return runGrok(binary: grokBinary, prompt: prompt, model: grokModel, processHandle: processHandle)
+            onActivity("Grok is writing…")
+            return runGrok(binary: config.grokBinary, prompt: prompt, model: model, processHandle: processHandle)
+        case .cursor:
+            onActivity("\(backend.statusName) is writing…")
+            return runCursorAgent(binary: config.cursorBinary, prompt: prompt, model: model, processHandle: processHandle)
         case .local:
-            return .failure(reason: "Local Qwen is not supported in the v2 writer/checker roles yet.", setupIssue: nil)
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-            return runCursorAgent(binary: cursorBinary, prompt: prompt, model: backend.rawValue, processHandle: processHandle)
+            return await runLocal(prompt: prompt, model: model, onActivity: onActivity)
         }
+    }
+
+    nonisolated private static func runV2Role(
+        _ backend: SummaryBackend,
+        prompt: String,
+        config: RunnerConfig,
+        processHandle: ProcessHandle,
+        onActivity: @escaping @Sendable (String) -> Void
+    ) async -> RunResult {
+        if backend.provider == .local {
+            return .failure(reason: "Local Qwen is not supported in the v2 writer/checker roles yet.", setupIssue: nil)
+        }
+        return await runBackend(backend, prompt: prompt, config: config, processHandle: processHandle, onActivity: onActivity)
     }
 
     /// Refresh v2 staging file after hunk status changes in the markup UI.
@@ -1329,7 +1299,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 await RecordingController.shared.prepareForLocalSummary()
                 onActivity("Qwen is writing…")
                 return try await LocalSummaryRunner.shared.summarize(prompt: prompt)
-            }.value
+            }.value.trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty
                 ? .failure(reason: "Local model produced no output.", setupIssue: nil)
                 : .success(text, SummaryRunMetrics(wallClock: 0, model: model))
@@ -1345,35 +1315,11 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     nonisolated static func generateForEval(
         backend: SummaryBackend,
         prompt: String,
-        claudeBinary: String,
-        claudeModel: String,
-        grokBinary: String,
-        grokModel: String,
-        cursorBinary: String,
-        localModel: String
+        config: RunnerConfig
     ) async -> SummaryEvalRunResult {
-        let modelLabel: String = {
-            switch backend {
-            case .claude: return claudeModel
-            case .grok: return grokModel
-            case .local: return localModel
-            case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-                return backend.rawValue
-            }
-        }()
+        let modelLabel = config.model(for: backend)
         let start = DispatchTime.now().uptimeNanoseconds
-        let result: RunResult
-        switch backend {
-        case .claude:
-            result = runClaudeStreaming(
-                binary: claudeBinary, prompt: prompt, model: claudeModel, onActivity: { _ in })
-        case .grok:
-            result = runGrok(binary: grokBinary, prompt: prompt, model: grokModel)
-        case .local:
-            result = await runLocal(prompt: prompt, model: localModel, onActivity: { _ in })
-        case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-            result = runCursorAgent(binary: cursorBinary, prompt: prompt, model: backend.rawValue)
-        }
+        let result = await runBackend(backend, prompt: prompt, config: config) { _ in }
         switch withWallClock(start, result, model: modelLabel) {
         case .success(let text, let metrics):
             return .success(text, metrics ?? SummaryRunMetrics(wallClock: 0, model: modelLabel))
@@ -1392,26 +1338,11 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         case failed(String)
     }
 
-    /// Thin wrappers used by `SummaryComparison` so the compare window and the queue
-    /// share the same CLI invocation + parsing.
-    nonisolated static func runClaudeForCompare(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> CompareGenerateResult {
-        switch runClaudeStreaming(binary: binary, prompt: prompt, model: model, onActivity: { _ in }, processHandle: processHandle) {
-        case .success(let text, _): return .ok(text)
-        case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
-        case .failure(let reason, _): return .failed(reason)
-        }
-    }
-
-    nonisolated static func runGrokForCompare(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> CompareGenerateResult {
-        switch runGrok(binary: binary, prompt: prompt, model: model, processHandle: processHandle) {
-        case .success(let text, _): return .ok(text)
-        case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
-        case .failure(let reason, _): return .failed(reason)
-        }
-    }
-
-    nonisolated static func runCursorForCompare(binary: String, prompt: String, model: String, processHandle: ProcessHandle? = nil) -> CompareGenerateResult {
-        switch runCursorAgent(binary: binary, prompt: prompt, model: model, processHandle: processHandle) {
+    /// Used by `SummaryComparison` so the compare window and the queue share the same
+    /// CLI invocation and parsing.
+    nonisolated static func runForCompare(_ backend: SummaryBackend, prompt: String, config: RunnerConfig,
+                                          processHandle: ProcessHandle? = nil) async -> CompareGenerateResult {
+        switch await runBackend(backend, prompt: prompt, config: config, processHandle: processHandle, onActivity: { _ in }) {
         case .success(let text, _): return .ok(text)
         case .usageLimited(let trip): return .failed("Usage limit: \(trip.matchedPhrase)")
         case .failure(let reason, _): return .failed(reason)

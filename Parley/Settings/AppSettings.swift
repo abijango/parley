@@ -164,14 +164,21 @@ enum SummaryBackend: String, CaseIterable, Identifiable {
         }
     }
 
-    /// True when this backend is invoked via the Cursor Agent CLI.
-    var isCursorAgent: Bool {
+    /// The CLI (or on-device runner) that executes this backend.
+    enum Provider { case claude, grok, cursor, local }
+
+    var provider: Provider {
         switch self {
+        case .claude: return .claude
+        case .grok: return .grok
+        case .local: return .local
         case .composer25, .composer25Fast, .cursorGrok46Fast, .cursorGrok47Low, .cursorGrok47Medium, .cursorGrok47MediumFast:
-            return true
-        default: return false
+            return .cursor
         }
     }
+
+    /// True when this backend is invoked via the Cursor Agent CLI.
+    var isCursorAgent: Bool { provider == .cursor }
 
     /// CLI `--model` id (same as `rawValue` for Cursor backends).
     var cursorModelID: String? { isCursorAgent ? rawValue : nil }

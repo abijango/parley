@@ -43,13 +43,7 @@ final class SummaryGroundTruthEval: ObservableObject {
             attachmentUnderstanding: .off)
         let gold = fixture.goldSummary
         let backendName = backend.displayName
-        let launch = (
-            claudeBinary: settings.claudeBinaryPath,
-            claudeModel: settings.claudeModel,
-            grokBinary: settings.grokBinaryPath,
-            grokModel: settings.grokModel,
-            cursorBinary: settings.cursorBinaryPath,
-            localModel: settings.localSummaryModelId)
+        let config = SummaryService.RunnerConfig(settings)
         phase = .running
         report = nil
         let token = UUID()
@@ -58,12 +52,7 @@ final class SummaryGroundTruthEval: ObservableObject {
             let result = await SummaryService.generateForEval(
                 backend: backend,
                 prompt: built.prompt,
-                claudeBinary: launch.claudeBinary,
-                claudeModel: launch.claudeModel,
-                grokBinary: launch.grokBinary,
-                grokModel: launch.grokModel,
-                cursorBinary: launch.cursorBinary,
-                localModel: launch.localModel)
+                config: config)
             let finished: Report?
             let failure: String?
             switch result {
