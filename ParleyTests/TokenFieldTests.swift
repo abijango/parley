@@ -4,6 +4,7 @@ import XCTest
 /// Covers the one piece of real logic in the pure-SwiftUI `TokenField`: how a committed
 /// name is classified (dedupe / add-known / route-new). The rest of the field is plain
 /// SwiftUI views over a single `[String]` binding, so there's no sync logic to test.
+@MainActor
 final class TokenFieldTests: XCTestCase {
 
     private let contacts = ["Naufal Mir", "Andre Nedelcoux", "Vitalii Yuryev"]

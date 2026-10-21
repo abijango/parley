@@ -86,7 +86,7 @@ final class SummaryV2Tests: XCTestCase {
         XCTAssertFalse(other.contains("Maya"))
     }
 
-    func testWholeWordReplace() {
+    @MainActor func testWholeWordReplace() {
         let text = "Maya agents; Mayan history; talk to Maya."
         let (out, n) = SummaryMarkupReviewView.replacingWholeWords(in: text, from: "Maya", to: "Maia")
         XCTAssertEqual(n, 2)

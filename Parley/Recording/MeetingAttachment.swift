@@ -254,7 +254,7 @@ enum MeetingAttachmentStore {
         return lines.joined(separator: "\n")
     }
 
-    static func openImagePicker() -> [URL] {
+    @MainActor static func openImagePicker() -> [URL] {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false

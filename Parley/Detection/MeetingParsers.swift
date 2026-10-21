@@ -258,6 +258,8 @@ enum MeetingParsers {
     /// on the `, HH:MM to HH:MM, ` time pattern — never naive comma-splitting.
     /// `Canceled:` events and all-day events (no time anchor) are skipped.
     static func outlookCalendarEvents(_ nodes: [AXNode], calendar: Calendar = .current) -> [CalendarEvent] {
+        // Capture groups: start time, end time. Local because `Regex` isn't Sendable.
+        let timeAnchor = #/, (\d{1,2}:\d{2}) to (\d{1,2}:\d{2}), /#
         var events: [CalendarEvent] = []
         for node in nodes where node.role == "AXButton" {
             guard let desc = node.desc, !desc.hasPrefix("Canceled:"),
@@ -336,10 +338,6 @@ enum MeetingParsers {
     }
 
     // MARK: helpers
-
-    /// `", HH:MM to HH:MM, "` — the structural anchor for Outlook-web event
-    /// descriptions (capture groups: start time, end time).
-    private static let timeAnchor = #/, (\d{1,2}:\d{2}) to (\d{1,2}:\d{2}), /#
 
     /// The run of nodes inside the first node matching `anchor` (depth-scoped).
     private static func subtree(of nodes: [AXNode], anchor: (AXNode) -> Bool) -> ArraySlice<AXNode> {

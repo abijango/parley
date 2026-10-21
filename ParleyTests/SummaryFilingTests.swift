@@ -11,7 +11,7 @@ final class SummaryFilingTests: XCTestCase {
     private var origSummaryBackend: SummaryBackend!
     private var sessionDirs: [URL] = []
 
-    override func setUp() {
+    override func setUp() async throws {
         tmpVault = FileManager.default.temporaryDirectory
             .appendingPathComponent("parley-filing-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: tmpVault, withIntermediateDirectories: true)
@@ -25,7 +25,7 @@ final class SummaryFilingTests: XCTestCase {
         AppSettings.shared.summaryBackend = .claude
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         AppSettings.shared.vaultPath = origVaultPath
         AppSettings.shared.deleteAudioAfterFiling = origDeleteAudio
         AppSettings.shared.summaryPipeline = origSummaryPipeline

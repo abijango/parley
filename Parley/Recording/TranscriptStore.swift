@@ -432,7 +432,7 @@ final class TranscriptStore: ObservableObject {
     }
 
     /// Whether a transcript body still carries generic (unassigned) speaker labels.
-    static func hasGenericSpeakerLabels(_ text: String) -> Bool {
+    nonisolated static func hasGenericSpeakerLabels(_ text: String) -> Bool {
         text.contains("] Speaker ") || text.contains("] Me:") || text.contains("] Remote:")
     }
 

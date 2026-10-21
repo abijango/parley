@@ -61,7 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 NSApp.activate(ignoringOtherApps: true)
             }
         } else if id == UNNotificationDefaultActionIdentifier {
-            NSApp.activate(ignoringOtherApps: true)
+            Task { @MainActor in NSApp.activate(ignoringOtherApps: true) }
         }
         completionHandler()
     }

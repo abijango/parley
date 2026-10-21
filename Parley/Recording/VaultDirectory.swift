@@ -93,9 +93,9 @@ final class VaultDirectory: ObservableObject {
     private let peopleStore: PeopleStore
 
     private let settings = AppSettings.shared
-    private static let maxDepth = 4
+    nonisolated private static let maxDepth = 4
     /// Folders never offered as destinations.
-    private static let excludedNames: Set<String> = [
+    nonisolated private static let excludedNames: Set<String> = [
         "Unsorted Transcripts", "Processed Transcripts", "Raw Transcripts", "Attachments", "_attachments",
     ]
 

@@ -80,7 +80,7 @@ struct ClayButtonStyle: ButtonStyle {
         /// Padding + font per control size, on the design-system scales.
         private struct Metrics {
             let hPad: CGFloat, vPad: CGFloat, font: Font
-            init(_ size: ControlSize) {
+            @MainActor init(_ size: ControlSize) {
                 switch size {
                 case .mini:
                     hPad = Theme.Spacing.small;  vPad = Theme.Spacing.xxSmall; font = Theme.Typography.captionSecondary

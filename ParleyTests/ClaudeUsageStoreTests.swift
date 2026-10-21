@@ -8,12 +8,12 @@ final class ClaudeUsageStoreTests: XCTestCase {
 
     private var fileURL: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("parley-usage-\(UUID().uuidString).json")
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: fileURL)
     }
 

@@ -1,6 +1,7 @@
 import XCTest
 @testable import Parley
 
+@MainActor
 final class HistorySelectionTests: XCTestCase {
     func testRemovingMiddleRowSelectsFollowingRow() {
         XCTAssertEqual(

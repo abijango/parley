@@ -112,7 +112,7 @@ enum Theme {
     // These are computed (not `static let`) so flipping the store reskins live; the
     // read is tracked by Observation when it happens inside a view's `body`.
 
-    enum Palette {
+    @MainActor enum Palette {
         static var accent: Color      { ThemeStore.shared.tokens.accent }
         static var accentText: Color  { ThemeStore.shared.tokens.accentText }
         static var windowBg: Color    { ThemeStore.shared.tokens.windowBg }
@@ -134,7 +134,7 @@ enum Theme {
     enum Severity {
         case info, success, warning, danger
 
-        var color: Color {
+        @MainActor var color: Color {
             switch self {
             case .info:    return Theme.Palette.accent
             case .success: return .green
@@ -169,7 +169,7 @@ enum Theme {
     // keeps SF Pro chrome + New York serif reading; Cursor swaps the whole scale to
     // Geist (one family, weight-driven hierarchy). Sizes/roles are unchanged across
     // looks — only the typeface differs — so layout stays stable when switching.
-    enum Typography {
+    @MainActor enum Typography {
         /// Top-of-window / primary screen title.
         static var screenTitle: Font { ThemeStore.shared.tokens.screenTitle }       // ~22
         /// Sheet & dialog titles.

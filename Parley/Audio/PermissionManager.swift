@@ -100,7 +100,8 @@ enum PermissionManager {
     /// Shows the one-time system dialog that offers to open System Settings →
     /// Accessibility (the closest thing AX has to a permission prompt).
     static func promptForAccessibility() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        // The value of `kAXTrustedCheckOptionPrompt`, a C global Swift 6 treats as mutable.
+        let opts = ["AXTrustedCheckOptionPrompt": true]
         _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
     }
 

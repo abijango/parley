@@ -164,7 +164,7 @@ struct ThemeTokens {
 // read `shared.tokens`; the button/surface helpers read `shared.kind`. Flipping
 // `kind` reskins the whole app live (Observation re-renders the readers).
 
-@Observable
+@MainActor @Observable
 final class ThemeStore {
     static let shared = ThemeStore()
 

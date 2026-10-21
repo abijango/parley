@@ -8,8 +8,8 @@ import UserNotifications
 final class CallNotifier {
     static let shared = CallNotifier()
 
-    static let categoryID = "CALL_DETECTED"
-    static let startActionID = "START_RECORDING"
+    nonisolated static let categoryID = "CALL_DETECTED"
+    nonisolated static let startActionID = "START_RECORDING"
 
     private let center = UNUserNotificationCenter.current()
 
