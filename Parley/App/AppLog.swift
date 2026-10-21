@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import OSLog
 
 /// Lightweight file logger for investigating issues, plus OSLog mirroring.
@@ -17,7 +18,7 @@ enum AppLog {
 
     private static let queue = DispatchQueue(label: "\(AppInfo.name).applog")
     private static let osLog = Logger(subsystem: AppInfo.name, category: "app")
-    private static var didScheduleLaunchCompression = false
+    private static let didScheduleLaunchCompression = Mutex(false)
     private static let stamp: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
@@ -40,8 +41,11 @@ enum AppLog {
             } else {
                 try? data.write(to: fileURL)
             }
-            if rotated || !didScheduleLaunchCompression {
-                didScheduleLaunchCompression = true
+            let firstWrite = didScheduleLaunchCompression.withLock { done in
+                defer { done = true }
+                return !done
+            }
+            if rotated || firstWrite {
                 LogRotation.scheduleCompression(of: directory)
             }
         }

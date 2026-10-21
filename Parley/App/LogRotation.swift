@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import OSLog
 
 /// Rotates the live logs and zips what they replace.
@@ -35,8 +36,8 @@ enum LogRotation {
 
     private static let osLog = Logger(subsystem: AppInfo.name, category: "log")
     private static let compressQueue = DispatchQueue(label: "\(AppInfo.name).logcompress", qos: .utility)
-    private static var compressPending = false
-    private static var zipFailures = Set<String>()
+    private static let compressPending = Mutex(false)
+    private static let zipFailures = Mutex(Set<String>())
 
     /// Comparable identity for a freeze stack dump, plain or zipped.
     /// `freeze-2026-09-07-175227.txt` and the `.txt.zip` beside it share a key.
@@ -138,10 +139,13 @@ enum LogRotation {
     /// Zip older logs on a utility queue. Coalesced, so a burst of log lines schedules one pass.
     static func scheduleCompression(of directory: URL, limits: Limits = .production) {
         compressQueue.async {
-            guard !compressPending else { return }
-            compressPending = true
+            let alreadyPending = compressPending.withLock { pending in
+                defer { pending = true }
+                return pending
+            }
+            guard !alreadyPending else { return }
             compressQueue.async {
-                compressPending = false
+                compressPending.withLock { $0 = false }
                 compressSettled(directory: directory, limits: limits)
             }
         }
@@ -202,7 +206,7 @@ enum LogRotation {
     private static func zipReplacing(_ file: URL) {
         let fm = FileManager.default
         guard fm.fileExists(atPath: file.path), !file.path.hasSuffix(".zip") else { return }
-        if zipFailures.contains(file.path) { return }
+        if zipFailures.withLock({ $0.contains(file.path) }) { return }
         let zipURL = file.appendingPathExtension("zip")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
@@ -214,12 +218,12 @@ enum LogRotation {
             try process.run()
             process.waitUntilExit()
             guard process.terminationStatus == 0, fm.fileExists(atPath: zipURL.path) else {
-                zipFailures.insert(file.path)
+                zipFailures.withLock { _ = $0.insert(file.path) }
                 osLog.error("log zip failed (\(process.terminationStatus)) for \(file.lastPathComponent, privacy: .public)")
                 return
             }
         } catch {
-            zipFailures.insert(file.path)
+            zipFailures.withLock { _ = $0.insert(file.path) }
             osLog.error("log zip failed: \(error.localizedDescription, privacy: .public)")
         }
     }

@@ -20,7 +20,7 @@ import Foundation
 /// Findings go to `~/Library/Logs/<App>/freeze.log` with a **synchronous** write, not
 /// through `AppLog`: that logger enqueues on a serial queue, and anything still queued
 /// is discarded on SIGKILL — which is exactly how these sessions end.
-final class MainActorWatchdog {
+final class MainActorWatchdog: @unchecked Sendable {
     static let shared = MainActorWatchdog()
 
     // MARK: - Tuning
