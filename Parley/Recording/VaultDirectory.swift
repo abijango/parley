@@ -1497,11 +1497,12 @@ final class VaultDirectory: ObservableObject {
                                                   title: nil, linkedin: nil))
                 added += 1
             }
-            guard added > 0 else { return }
-            await MainActor.run {
+            let count = added
+            guard count > 0 else { return }
+            await MainActor.run { [weak self] in
                 self?.exportContactsMarkdown()
                 self?.refreshAfterMutation()
-                AppLog.log("Added \(added) contacts under \(VaultDirectory.otherSection)", category: "vault")
+                AppLog.log("Added \(count) contacts under \(VaultDirectory.otherSection)", category: "vault")
             }
         }
     }

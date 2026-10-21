@@ -36,7 +36,7 @@ final class CursorConnection: ObservableObject {
                 configured: configured,
                 candidates: Self.fallbackPaths)
             let ok = resolved.map { Self.runsOK($0) } ?? false
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.resolvedBinaryPath = resolved
                 self.status = (resolved != nil && ok) ? .ready : .notInstalled

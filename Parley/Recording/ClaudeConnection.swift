@@ -55,7 +55,7 @@ final class ClaudeConnection: ObservableObject {
                 isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
             let runs = resolved.map { Self.runsOK($0) } ?? false
             let login = Self.accountFromClaudeJSON()
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.resolvedBinaryPath = resolved
                 if resolved == nil || !runs {
@@ -84,7 +84,7 @@ final class ClaudeConnection: ObservableObject {
                 candidates: Self.fallbackPaths,
                 isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
             guard let binary = resolved else {
-                await MainActor.run {
+                await MainActor.run { [weak self] in
                     self?.resolvedBinaryPath = nil
                     self?.status = .notInstalled
                     self?.isChecking = false
@@ -93,7 +93,7 @@ final class ClaudeConnection: ObservableObject {
             }
             let outcome = Self.runProbe(binary: binary)
             let login = Self.accountFromClaudeJSON()
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.resolvedBinaryPath = binary
                 switch outcome {

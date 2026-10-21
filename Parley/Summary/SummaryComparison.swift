@@ -180,7 +180,7 @@ final class SummaryComparison: ObservableObject {
         let prompt = buildPrompt(transcriptURL)
         Task.detached(priority: .userInitiated) { [weak self] in
             let outcome = await Self.generate(backend: backend, prompt: prompt, processHandle: handle)
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self, self.runTokens[backend] == token else { return }
                 switch outcome {
                 case .success(let text, let elapsed):

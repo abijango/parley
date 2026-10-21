@@ -21,6 +21,8 @@ final class ClaudeInstaller: ObservableObject {
     @Published private(set) var isInstalling = false
     /// Set when an install finishes: true on a clean exit, false otherwise. nil while idle.
     @Published private(set) var lastInstallSucceeded: Bool?
+    /// The caller's callback. Kept on this actor so the install task never captures it.
+    private var onInstallFinished: ((Bool) -> Void)?
 
     /// Run the native installer in a login shell, streaming combined stdout/stderr into
     /// `log`. `completion` fires with the success flag on the main actor.
@@ -29,6 +31,7 @@ final class ClaudeInstaller: ObservableObject {
         isInstalling = true
         lastInstallSucceeded = nil
         log = "$ \(Self.installCommand)\n"
+        onInstallFinished = completion
 
         Task.detached { [weak self] in
             let process = Process()
@@ -41,10 +44,10 @@ final class ClaudeInstaller: ObservableObject {
             process.standardInput = FileHandle.nullDevice
 
             do { try process.run() } catch {
-                await MainActor.run {
+                await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.append("\nFailed to start the installer: \(error.localizedDescription)\n")
-                    self.finish(success: false, completion: completion)
+                    self.finish(success: false)
                 }
                 return
             }
@@ -55,26 +58,28 @@ final class ClaudeInstaller: ObservableObject {
                 let chunk = handle.availableData
                 if chunk.isEmpty { break }
                 if let text = String(data: chunk, encoding: .utf8) {
-                    await MainActor.run { self?.append(text) }
+                    await MainActor.run { [weak self] in self?.append(text) }
                 }
             }
             process.waitUntilExit()
             let ok = process.terminationStatus == 0
             let code = process.terminationStatus
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.append(ok ? "\n✓ Install finished.\n" : "\n✗ Installer exited with code \(code).\n")
-                self.finish(success: ok, completion: completion)
+                self.finish(success: ok)
             }
         }
     }
 
     private func append(_ text: String) { log += text }
 
-    private func finish(success: Bool, completion: @escaping (Bool) -> Void) {
+    private func finish(success: Bool) {
         isInstalling = false
         lastInstallSucceeded = success
-        completion(success)
+        let completion = onInstallFinished
+        onInstallFinished = nil
+        completion?(success)
     }
 
     /// Open Terminal.app running the `claude` binary so the user can complete login. First

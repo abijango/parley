@@ -557,6 +557,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let repairJob = pendingRepair(for: item)
         let repairTemplate = settings.summaryRepairPromptTemplate
 
+        let reportActivity: @Sendable (String) -> Void = { [weak self] line in
+            Task { @MainActor in self?.runningActivity = line }
+        }
         let handle = ProcessHandle()
         runningProcessHandle = handle
         preemptRequested = false
@@ -602,12 +605,10 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     speakerHints: speakerHints)
             }
             let runStart = DispatchTime.now().uptimeNanoseconds
-            let result = await Self.runBackend(backend, prompt: built.prompt, config: config, processHandle: handle) { line in
-                Task { @MainActor [weak self] in self?.runningActivity = line }
-            }
+            let result = await Self.runBackend(backend, prompt: built.prompt, config: config, processHandle: handle, onActivity: reportActivity)
             let timed = Self.withWallClock(runStart, result, model: config.model(for: backend))
             let attachments = item.meta.attachments
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 if self.parkIfPreempted(item) { return }
                 switch timed {
@@ -702,6 +703,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             sessionDir: MeetingFiles.sessionDir(forAudioPath: item.meta.audio),
             attendees: item.meta.attendees.joined(separator: ", "))
 
+        let reportActivity: @Sendable (String) -> Void = { [weak self] line in
+            Task { @MainActor in self?.runningActivity = line }
+        }
         let handle = ProcessHandle()
         runningProcessHandle = handle
         preemptRequested = false
@@ -735,9 +739,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             let writerStart = DispatchTime.now().uptimeNanoseconds
             let draftResult = Self.withWallClock(
                 writerStart,
-                await Self.runBackend(writer, prompt: built.prompt, config: config, processHandle: handle) { line in
-                    Task { @MainActor [weak self] in self?.runningActivity = line }
-                },
+                await Self.runBackend(writer, prompt: built.prompt, config: config, processHandle: handle, onActivity: reportActivity),
                 model: config.model(for: writer)
             )
             switch draftResult {
