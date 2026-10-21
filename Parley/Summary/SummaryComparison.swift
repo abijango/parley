@@ -31,7 +31,6 @@ final class SummaryComparison: ObservableObject {
         case done
         case seeded          // loaded from filed note or staging — not timed
         case failed(String)
-        case unavailable(String)
     }
 
     /// Where a seeded Claude column came from.

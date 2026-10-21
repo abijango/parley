@@ -359,15 +359,6 @@ struct SettingsView: View {
                     }
                     helpText("Runs `grok -p` (raw prompt, no vault tools; JSON on stdout). The status above shows whether the CLI is installed and logged in.")
                 }
-            } else if settings.summaryPipeline == .classic && settings.summaryBackend == .local {
-                Section("Local Qwen (MLX)") {
-                    LocalSummarizerStatusView()
-                    LabeledContent("Model id") {
-                        TextField("mlx-community/Qwen3-4B-4bit", text: $settings.localSummaryModelId)
-                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
-                    }
-                    helpText("Downloads into Application Support/Parley/SummaryModels on first use (Metal Toolchain required: `xcodebuild -downloadComponent MetalToolchain`). Fully offline once loaded.")
-                }
             }
 
             Section("Attachments") {
@@ -1197,35 +1188,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-    }
-}
-
-/// Status + load/unload controls for the on-device MLX summarizer.
-private struct LocalSummarizerStatusView: View {
-    @ObservedObject private var runner = LocalSummaryRunner.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.small) {
-            switch runner.manager.status {
-            case .idle:
-                Text("Model idle (loads on first summary).")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
-            case .downloading(let fraction):
-                ProgressView(value: fraction) { Text("Downloading…") }
-            case .loading:
-                HStack(spacing: Theme.Spacing.small) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading weights…").font(Theme.Typography.caption)
-                }
-            case .ready(let id):
-                Text("Ready — \(id)")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                Button("Unload") { runner.unload() }
-            case .failed(let reason):
-                Text(reason)
-                    .font(Theme.Typography.caption).foregroundStyle(.red)
-            }
-        }
     }
 }
 

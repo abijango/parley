@@ -153,11 +153,8 @@ final class RecordingController: ObservableObject {
     let voiceprints = VoiceprintStore()
     let vault = VaultDirectory()
     let store = TranscriptStore()
-    /// Holds the local MLX summary model across compare runs (download/load/unload).
-    /// Drives the background summary → review → commit flow (Claude / Grok / local).
+    /// Drives the background summary → review → commit flow (Claude / Grok / Cursor).
     private(set) lazy var summaryService = SummaryService(store: store)
-    /// Local MLX summarizer lifecycle (shared with Settings + SummaryService).
-    var localSummarizer: LocalSummaryRunner { LocalSummaryRunner.shared }
     /// Background offline pass (ASR + speaker detect + compaction) for finalized
     /// recordings — serialized and idle-gated so it never competes with live recording.
     private(set) lazy var offlineService = OfflineProcessingService(
@@ -1982,15 +1979,6 @@ final class RecordingController: ObservableObject {
     /// its ~1 GB+ of resident memory. Reset whenever activity resumes. The model
     /// reloads on the next call/record while capture proceeds, so the only cost
     /// is a short catch-up at the start of that meeting.
-    /// Free WhisperKit GPU/ANE memory before a local LLM summary so Qwen can load.
-    /// No-op while recording. Also drops a Fluid warmup session that nobody took.
-    func prepareForLocalSummary() async {
-        guard !isRecording else { return }
-        await models.unload()
-        await fluidModels.unload()
-        AppLog.log("Summary(local): unloaded WhisperKit / Fluid warmup ahead of MLX summary", category: "summary")
-    }
-
     private func scheduleIdleUnload() {
         idleUnloadTimer?.invalidate(); idleUnloadTimer = nil
         guard settings.idleUnloadEnabled else { return }

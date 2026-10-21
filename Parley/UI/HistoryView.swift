@@ -979,7 +979,7 @@ struct HistoryView: View {
                 Label("Compare models\u{2026}", systemImage: "rectangle.split.3x1")
             }
             .glassButton()
-            .help("Side-by-side summaries from Claude, Cursor, Grok, and local Qwen")
+            .help("Side-by-side summaries from Claude, Cursor, and Grok")
 
             if audioAvailable(item) {
                 if item.hasUnnamedSpeakers {

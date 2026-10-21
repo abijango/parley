@@ -8,7 +8,6 @@ import MarkdownUI
 struct SummaryCompareView: View {
     @StateObject private var comparison = SummaryComparison()
     @ObservedObject private var settings = AppSettings.shared
-    @ObservedObject private var summarizer = LocalSummaryRunner.shared
     @Environment(\.dismiss) private var dismiss
 
     private let item: TranscriptItem
@@ -197,23 +196,6 @@ struct SummaryCompareView: View {
                 .frame(height: 120)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
             HStack(spacing: Theme.Spacing.small) {
-                Text("Qwen model").font(Theme.Typography.caption).foregroundStyle(.secondary)
-                TextField("mlx-community/…", text: $settings.localSummaryModelId)
-                    .textFieldStyle(.roundedBorder)
-                    .font(Theme.Typography.mono)
-                    .frame(maxWidth: 360)
-                switch summarizer.manager.status {
-                case .downloading(let p):
-                    ProgressView(value: p).frame(width: 80)
-                case .loading:
-                    ProgressView().controlSize(.small)
-                case .ready(let id):
-                    Text("loaded \(id)").font(Theme.Typography.caption).foregroundStyle(.secondary)
-                default:
-                    EmptyView()
-                }
-            }
-            HStack(spacing: Theme.Spacing.small) {
                 Text("File to:").font(Theme.Typography.caption).foregroundStyle(.secondary)
                 TextField("destination", text: $approveDestination)
                     .textFieldStyle(.roundedBorder)
@@ -332,12 +314,6 @@ struct SummaryCompareView: View {
                 Text(reason).font(Theme.Typography.caption).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
-        case .unavailable(let reason):
-            placeholder {
-                Image(systemName: "moon.zzz").foregroundStyle(.secondary)
-                Text(reason).font(Theme.Typography.caption).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
         case .idle:
             placeholder {
                 Image(systemName: "text.append").foregroundStyle(.tertiary)
@@ -358,7 +334,6 @@ struct SummaryCompareView: View {
         case .done: Image(systemName: "checkmark.circle.fill").font(.caption2).foregroundStyle(.green)
         case .seeded: Image(systemName: "doc.circle.fill").font(.caption2).foregroundStyle(.blue)
         case .failed: Image(systemName: "xmark.circle.fill").font(.caption2).foregroundStyle(.red)
-        case .unavailable: Image(systemName: "minus.circle").font(.caption2).foregroundStyle(.secondary)
         case .idle: EmptyView()
         }
     }

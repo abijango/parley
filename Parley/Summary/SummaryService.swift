@@ -531,7 +531,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             switch backend.provider {
             case .claude: return "Starting Claude…"
             case .grok: return "Starting Grok…"
-            case .local: return "Starting local Qwen…"
             case .cursor: return "Starting \(backend.statusName)…"
             }
         }()
@@ -736,7 +735,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             let writerStart = DispatchTime.now().uptimeNanoseconds
             let draftResult = Self.withWallClock(
                 writerStart,
-                await Self.runV2Role(writer, prompt: built.prompt, config: config, processHandle: handle) { line in
+                await Self.runBackend(writer, prompt: built.prompt, config: config, processHandle: handle) { line in
                     Task { @MainActor [weak self] in self?.runningActivity = line }
                 },
                 model: config.model(for: writer)
@@ -785,7 +784,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             let checkerStart = DispatchTime.now().uptimeNanoseconds
             let checkerResult = Self.withWallClock(
                 checkerStart,
-                await Self.runV2Role(checker, prompt: checkerPrompt, config: config, processHandle: handle) { _ in },
+                await Self.runBackend(checker, prompt: checkerPrompt, config: config, processHandle: handle) { _ in },
                 model: config.model(for: checker)
             )
 
@@ -873,8 +872,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
     /// points the user at Settings and a success clears a stale warning.
     private static func noteConnection(_ backend: SummaryBackend, _ result: RunResult) {
         switch (backend.provider, result) {
-        case (.local, _):
-            break
         case (.claude, .success(_, let metrics)):
             if let usage = metrics.flatMap({ claudeUsage(from: $0) }) {
                 ClaudeUsageStore.shared.record(usage)
@@ -908,7 +905,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         var grokBinary: String
         var grokModel: String
         var cursorBinary: String
-        var localModel: String
 
         @MainActor init(_ settings: AppSettings) {
             claudeBinary = settings.claudeBinaryPath
@@ -916,7 +912,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             grokBinary = settings.grokBinaryPath
             grokModel = settings.grokModel
             cursorBinary = settings.cursorBinaryPath
-            localModel = settings.localSummaryModelId
         }
 
         func model(for backend: SummaryBackend) -> String {
@@ -924,7 +919,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             case .claude: return claudeModel
             case .grok: return grokModel
             case .cursor: return backend.rawValue
-            case .local: return localModel
             }
         }
     }
@@ -951,22 +945,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             return runJSONAgent(.cursor, model: model, processHandle: processHandle) {
                 try CursorAgentRunner.makeRawSummaryProcess(binaryPath: config.cursorBinary, prompt: prompt, model: model)
             }
-        case .local:
-            return await runLocal(prompt: prompt, model: model, onActivity: onActivity)
         }
-    }
-
-    nonisolated private static func runV2Role(
-        _ backend: SummaryBackend,
-        prompt: String,
-        config: RunnerConfig,
-        processHandle: ProcessHandle,
-        onActivity: @escaping @Sendable (String) -> Void
-    ) async -> RunResult {
-        if backend.provider == .local {
-            return .failure(reason: "Local Qwen is not supported in the v2 writer/checker roles yet.", setupIssue: nil)
-        }
-        return await runBackend(backend, prompt: prompt, config: config, processHandle: processHandle, onActivity: onActivity)
     }
 
     /// Refresh v2 staging file after hunk status changes in the markup UI.
@@ -1213,29 +1192,6 @@ final class SummaryService: ObservableObject, ProcessingQueue {
             // Exit 0 but non-JSON: treat raw stdout as the note if it looks like markdown.
             if !out.isEmpty, out.first != "{" { return success(out) }
             return .failure(reason: "\(agent.cliName) produced no usable output.", setupIssue: nil)
-        }
-    }
-
-    /// Runs the on-device MLX/Qwen summarizer. Unloads WhisperKit first when possible to free GPU RAM.
-    private nonisolated static func runLocal(
-        prompt: String,
-        model: String,
-        onActivity: @escaping @Sendable (String) -> Void
-    ) async -> RunResult {
-        onActivity("Loading local model…")
-        do {
-            let text = try await Task { @MainActor in
-                await RecordingController.shared.prepareForLocalSummary()
-                onActivity("Qwen is writing…")
-                return try await LocalSummaryRunner.shared.summarize(prompt: prompt)
-            }.value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty
-                ? .failure(reason: "Local model produced no output.", setupIssue: nil)
-                : .success(text, SummaryRunMetrics(wallClock: 0, model: model))
-        } catch let e as SummaryError {
-            return .failure(reason: e.localizedDescription, setupIssue: nil)
-        } catch {
-            return .failure(reason: error.localizedDescription, setupIssue: nil)
         }
     }
 

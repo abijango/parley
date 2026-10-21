@@ -90,13 +90,6 @@ final class SummaryComposeNoteTests: XCTestCase {
         XCTAssertFalse(note.contains("stale"))
     }
 
-    func testStripReasoningRemovesThinkBlock() {
-        let raw = "<think>planning…</think>\n\n## Attendees\n\n| Name | Role | Company |\n"
-        let cleaned = QwenLocalSummaryEngine.stripReasoning(raw)
-        XCTAssertFalse(cleaned.contains("<think>"))
-        XCTAssertTrue(cleaned.hasPrefix("## Attendees"))
-    }
-
     func testInferredParserIgnoresTrailingRawTranscript() {
         let markdown = """
         ## Attendees

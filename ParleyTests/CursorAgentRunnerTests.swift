@@ -58,6 +58,7 @@ final class CursorAgentRunnerTests: XCTestCase {
         XCTAssertTrue(SummaryBackend.checkerBackends.contains(.cursorGrok47MediumFast))
         XCTAssertEqual(SummaryBackend.resolved("cursor-grok-4.5-high"), .cursorGrok46Fast)
         XCTAssertEqual(SummaryBackend.resolved("cursor-grok-4.5-high-fast"), .cursorGrok46Fast)
+        XCTAssertNil(SummaryBackend.resolved("local"), "retired local Qwen falls back to the default backend")
         XCTAssertTrue(SummaryBackend.composer25.isCursorAgent)
         XCTAssertFalse(SummaryBackend.claude.isCursorAgent)
     }

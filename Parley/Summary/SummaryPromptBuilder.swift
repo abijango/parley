@@ -1,7 +1,7 @@
 import Foundation
 
-/// Builds the single shared prompt fed to every comparison engine, so Claude / Apple /
-/// Qwen are evaluated on identical input. Injects the transcript (frontmatter stripped),
+/// Builds the single shared prompt fed to every comparison engine, so Claude / Grok /
+/// Cursor are evaluated on identical input. Injects the transcript (frontmatter stripped),
 /// the Rolodex contacts, the supplied attendees, and the intended filing location into
 /// `settings.summaryPromptTemplate`. The same builder is used for every engine — the only
 /// variable in the comparison is the model, not the prompt.
