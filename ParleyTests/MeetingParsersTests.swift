@@ -177,6 +177,22 @@ final class MeetingParsersTests: XCTestCase {
         XCTAssertNil(MeetingParsers.outlookNativeJoinableTitle(nodes))
     }
 
+    /// Live labels from 2026-10-22: Outlook now appends the event location after the subject.
+    private let webexInviteLabel = "sec eng // intellias standup, https://mangroup.webex.com/mangroup/j.php?MTID=mcd2a0ea3c6b9b57c0d2455b35438d1ad; SOF.10N10 (4P Meeting)"
+
+    private func joinable(_ label: String) -> [AXNode] {
+        [node("AXButton", desc: label, depth: 6), node("AXButton", desc: "Join", depth: 7)]
+    }
+
+    func testOutlookNativeJoinableTitleDropsTheLocation() {
+        XCTAssertEqual(MeetingParsers.outlookNativeJoinableTitle(joinable(webexInviteLabel)),
+                       "sec eng // intellias standup")
+    }
+
+    func testOutlookNativeJoinableTitleRejectsSubjectlessEvent() {
+        XCTAssertNil(MeetingParsers.outlookNativeJoinableTitle(joinable(", Microsoft Teams Meeting")))
+    }
+
     // MARK: Zoom home "Now" entry
 
     func testZoomHomeNowTitle() {

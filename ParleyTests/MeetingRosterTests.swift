@@ -99,6 +99,19 @@ final class MeetingRosterTests: XCTestCase {
         XCTAssertTrue(AttendeePolicy.uncertainChips(in: roster).isEmpty)
     }
 
+    func testWebexRoomSystemIsAnUncertainRoomNotAnAttendee() {
+        var roster = MeetingRoster()
+        roster.apply(RosterSnapshot(
+            observedAt: Date(), coverage: .sightings, isFirstSighting: true,
+            participants: [
+                Participant(name: name("Petya Dimkina"), presence: .inCall(.participantTile), role: nil),
+                Participant(name: name("SOF.10S02"), presence: .inCall(.participantTile), role: nil),
+            ]))
+        XCTAssertEqual(AttendeePolicy.admissions(in: roster).map(\.value), ["Petya Dimkina"])
+        XCTAssertEqual(AttendeePolicy.uncertainChips(in: roster).map(\.name.value), ["SOF.10S02"])
+        XCTAssertNil(NameClassifier.kind(name("Dr. Smith")))
+    }
+
     @MainActor
     func testAttendeeFieldAppendsJoinersAndKeepsLeavers() {
         let meeting = MeetingSessionState()
