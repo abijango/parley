@@ -17,7 +17,7 @@ final class ZoomSource: MeetingSource, @unchecked Sendable {
             if let (topic, _) = MeetingParsers.zoomHomeNowTitle(context.tree.nodes(pid: context.call.pid)) {
                 title = TitleCandidate(title: topic, authority: .appContext, provenance: "zoomHome")
             } else {
-                title = context.calendarFallbackTitle()
+                title = context.calendarFallbackTitle(for: .zoom)
             }
         }
         let nodes = context.tree.nodes(pid: context.call.pid) {

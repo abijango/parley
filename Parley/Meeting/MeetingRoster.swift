@@ -145,7 +145,8 @@ enum NameClassifier {
             return .device
         }
         if lower.contains("conference") || lower.contains("conf room")
-            || lower.contains("meeting room") || lower.range(of: #"\broom\s+\d+"#, options: .regularExpression) != nil {
+            || lower.contains("meeting room") || lower.range(of: #"\broom\s+\d+"#, options: .regularExpression) != nil
+            || t.range(of: #"^[A-Za-z]{2,5}\.\d+[A-Za-z]\d+$"#, options: .regularExpression) != nil {
             return .room
         }
         return nil

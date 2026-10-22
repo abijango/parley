@@ -119,6 +119,19 @@ enum TitleAuthority: Int, Comparable, Sendable {
     static func < (l: TitleAuthority, r: TitleAuthority) -> Bool { l.rawValue < r.rawValue }
 }
 
+enum MeetingPlatform: Equatable, Sendable {
+    case teams, zoom, webex
+
+    /// The service a calendar location or join link points at.
+    static func mentioned(in text: String) -> MeetingPlatform? {
+        let lower = text.lowercased()
+        if lower.contains("webex.com") { return .webex }
+        if lower.contains("zoom.us") { return .zoom }
+        if lower.contains("microsoft teams meeting") || lower.contains("teams.microsoft.com") { return .teams }
+        return nil
+    }
+}
+
 struct TitleCandidate: Equatable, Sendable {
     let title: String
     let authority: TitleAuthority

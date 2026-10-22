@@ -19,7 +19,7 @@ final class TeamsSource: MeetingSource, @unchecked Sendable {
         var title: TitleCandidate?
         if context.needs.title {
             title = callWindowTitle(context)
-                ?? context.calendarFallbackTitle { self.prepareIfNeeded($0, tree: context.tree) }
+                ?? context.calendarFallbackTitle(for: .teams) { self.prepareIfNeeded($0, tree: context.tree) }
         }
         return SourceReading(title: title, roster: roster(context))
     }

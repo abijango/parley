@@ -1,8 +1,7 @@
 import Foundation
 
-/// Title uses the meeting window, then the same calendar fallback as Teams and Zoom.
-/// The participant list stays unreadable until a live call exposes it. An empty
-/// complete roster would look like everyone had left.
+/// Title uses the meeting window, then the calendar fallback shared with Teams and Zoom.
+/// Roster comes from the meeting window's video-grid tiles.
 final class WebexSource: MeetingSource, @unchecked Sendable {
     /// `sparkhelper` is one bundle segment. A prefix of `spark` would also claim `sparkfoo`.
     static let helperAliases = ["cisco-systems.sparkhelper": "cisco-systems.spark"]
@@ -16,14 +15,16 @@ final class WebexSource: MeetingSource, @unchecked Sendable {
         ],
         capability: .titleAndRoster)
 
+    private var sawRosterSurface = false
+
     required init(call: CallIdentity) { _ = call }
 
     func read(_ context: ScanContext) -> SourceReading {
         var title: TitleCandidate?
         if context.needs.title {
-            title = callWindowTitle(context) ?? context.calendarFallbackTitle()
+            title = callWindowTitle(context) ?? context.calendarFallbackTitle(for: .webex)
         }
-        return SourceReading(title: title, roster: .unreadable(at: context.now))
+        return SourceReading(title: title, roster: roster(context))
     }
 
     /// The main app is preferred. The helper is the fallback when the meeting window lives there.
@@ -49,5 +50,18 @@ final class WebexSource: MeetingSource, @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    private func roster(_ context: ScanContext) -> RosterSnapshot {
+        guard context.needs.roster else { return .unreadable(at: context.now) }
+        for pid in candidatePids(context) {
+            let nodes = context.tree.nodes(pid: pid) { MeetingParsers.webexCallTitle(windowTitle: $0) != nil }
+            if let snapshot = MeetingParsers.webexRosterSnapshot(
+                nodes, at: context.now, isFirstSighting: !sawRosterSurface) {
+                sawRosterSurface = true
+                return snapshot
+            }
+        }
+        return .unreadable(at: context.now)
     }
 }

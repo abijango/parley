@@ -19,16 +19,17 @@ final class MeetingAdmission {
     func ingest(_ reading: SourceReading) {
         meeting.roster.apply(reading.roster)
         var current = TranscriptWriter.splitAttendees(meeting.attendees)
-        var changed = false
+        var added: [String] = []
         for name in AttendeePolicy.admissions(in: meeting.roster) {
             meeting.roster.record(.admitted(.automatic), for: name)
             if !current.contains(where: { $0.caseInsensitiveCompare(name.value) == .orderedSame }) {
                 current.append(name.value)
-                changed = true
+                added.append(name.value)
             }
         }
-        if changed {
+        if !added.isEmpty {
             meeting.attendees = current.joined(separator: ", ")
+            AppLog.log("Roster admitted (\(reading.roster.coverage)): \(added.joined(separator: ", "))", category: "detect")
         }
         publishUncertainChips()
         lastTokens = current

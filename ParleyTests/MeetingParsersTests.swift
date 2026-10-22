@@ -166,7 +166,7 @@ final class MeetingParsersTests: XCTestCase {
             node("AXButton", desc: "Join", depth: 7),
             node("AXButton", desc: "Modernization & Refactoring services for ISVs", depth: 6),
         ]
-        XCTAssertEqual(MeetingParsers.outlookNativeJoinableTitle(nodes), "testing for proble")
+        XCTAssertEqual(MeetingParsers.outlookNativeJoinableTitle(nodes, for: .teams), "testing for proble")
     }
 
     func testOutlookNativeJoinableTitleNilWithoutJoinChild() {
@@ -174,7 +174,7 @@ final class MeetingParsersTests: XCTestCase {
             node("AXButton", desc: "Wickes Workshop", depth: 6),
             node("AXButton", desc: "Join", depth: 6),   // sibling, not a child
         ]
-        XCTAssertNil(MeetingParsers.outlookNativeJoinableTitle(nodes))
+        XCTAssertNil(MeetingParsers.outlookNativeJoinableTitle(nodes, for: .teams))
     }
 
     /// Live labels from 2026-10-22: Outlook now appends the event location after the subject.
@@ -185,12 +185,50 @@ final class MeetingParsersTests: XCTestCase {
     }
 
     func testOutlookNativeJoinableTitleDropsTheLocation() {
-        XCTAssertEqual(MeetingParsers.outlookNativeJoinableTitle(joinable(webexInviteLabel)),
+        XCTAssertEqual(MeetingParsers.outlookNativeJoinableTitle(joinable(webexInviteLabel), for: .webex),
                        "sec eng // intellias standup")
     }
 
     func testOutlookNativeJoinableTitleRejectsSubjectlessEvent() {
-        XCTAssertNil(MeetingParsers.outlookNativeJoinableTitle(joinable(", Microsoft Teams Meeting")))
+        XCTAssertNil(MeetingParsers.outlookNativeJoinableTitle(joinable(", Microsoft Teams Meeting"), for: .teams))
+    }
+
+    func testTeamsCallSkipsJoinableWebexInviteForItsOwnEvent() {
+        XCTAssertNil(MeetingParsers.outlookNativeJoinableTitle(joinable(webexInviteLabel), for: .teams))
+        let both = joinable(webexInviteLabel) + joinable("Weekly sync, Microsoft Teams Meeting")
+        XCTAssertEqual(MeetingParsers.outlookNativeJoinableTitle(both, for: .teams), "Weekly sync")
+    }
+
+    // MARK: Webex roster
+
+    /// Live capture 2026-10-22 13:12, meeting window "Demo preparation", side-by-side layout.
+    private var webexMeetingWindow: [AXNode] {
+        [
+            node("AXWindow", title: "Demo preparation", depth: 5),
+            node("AXStaticText", value: "Demo preparation", depth: 6),
+            node("AXGroup", desc: "Shared content", depth: 7),
+            node("AXStaticText", value: "Viewing Petya Dimkina's screen", depth: 8),
+            node("AXSlider", title: "Handle to collpase or show more participants", depth: 7),
+            node("AXList", title: "Side by side view, Video Grid Area", depth: 8),
+            node("AXGroup", title: "Naufal Mir, , , , Video on,", depth: 11),
+            node("AXGroup", title: "SOF.10S02, , , speaking, Video on,", depth: 11),
+            node("AXStaticText", value: "SOF.10S02", depth: 12),
+            node("AXGroup", title: "Petya Dimkina, , , muted, Video off, Sharing", depth: 11),
+            node("AXButton", title: "Petya Dimkina", depth: 12),
+            node("AXButton", title: "Mute", depth: 6),
+        ]
+    }
+
+    func testWebexRosterReadsVideoGridTilesAsSightings() {
+        let snapshot = MeetingParsers.webexRosterSnapshot(webexMeetingWindow, at: Date(), isFirstSighting: true)
+        XCTAssertEqual(snapshot?.coverage, .sightings)
+        XCTAssertEqual(snapshot?.participants.map(\.name.value), ["Naufal Mir", "SOF.10S02", "Petya Dimkina"])
+    }
+
+    func testWebexRosterUnreadableWithoutVideoGrid() {
+        let lobby = [node("AXWindow", title: "Webex", depth: 5),
+                     node("AXGroup", title: "Thursday, October 15, 2026, [Lunch], 12:00 - 13:00", depth: 9)]
+        XCTAssertNil(MeetingParsers.webexRosterSnapshot(lobby, at: Date(), isFirstSighting: true))
     }
 
     // MARK: Zoom home "Now" entry

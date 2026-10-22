@@ -238,6 +238,27 @@ enum MeetingParsers {
         return parts
     }
 
+    // MARK: Webex roster
+
+    /// Video-grid tiles under `AXList title="<layout>, Video Grid Area"`, e.g.
+    /// `AXGroup title="Petya Dimkina, , , muted, Video off, Sharing"`. The grid
+    /// hides overflow participants, so tiles are sightings, never a complete list.
+    static func webexRosterSnapshot(_ nodes: [AXNode], at date: Date, isFirstSighting: Bool) -> RosterSnapshot? {
+        let isGrid: (AXNode) -> Bool = { $0.role == "AXList" && ($0.title?.hasSuffix("Video Grid Area") ?? false) }
+        guard nodes.contains(where: isGrid) else { return nil }
+        var seen = Set<String>()
+        var people: [Participant] = []
+        for node in subtree(of: nodes, anchor: isGrid) where node.role == "AXGroup" {
+            guard let title = node.title, let comma = title.range(of: ", "),
+                  let name = DisplayName(raw: String(title[..<comma.lowerBound])),
+                  seen.insert(name.key).inserted else { continue }
+            people.append(Participant(name: name, presence: .inCall(.participantTile), role: nil))
+        }
+        guard !people.isEmpty else { return nil }
+        return RosterSnapshot(observedAt: date, coverage: .sightings, isFirstSighting: isFirstSighting,
+                              participants: people)
+    }
+
     private static func snapshotPeople(_ people: [ParsedPerson]) -> [ParsedPerson] {
         var seen = Set<String>()
         return people.filter { seen.insert($0.name.key).inserted }
@@ -250,6 +271,7 @@ enum MeetingParsers {
         let start: Date?
         let end: Date?
         let organizer: String?
+        var platform: MeetingPlatform?
     }
 
     /// Events from the Teams Calendar tab (an embedded Outlook web view), e.g.
@@ -275,7 +297,8 @@ enum MeetingParsers {
                 start = Self.parse(date: dateStr, time: String(match.1), calendar: calendar)
                 end = Self.parse(date: dateStr, time: String(match.2), calendar: calendar)
             }
-            events.append(CalendarEvent(title: title, start: start, end: end, organizer: organizer))
+            events.append(CalendarEvent(title: title, start: start, end: end, organizer: organizer,
+                                        platform: MeetingPlatform.mentioned(in: rest)))
         }
         return events
     }
@@ -291,34 +314,58 @@ enum MeetingParsers {
     }
 
     /// Title from the Teams calendar view, then native Outlook's joinable event.
+    /// Events whose location names another service belong to a different call.
     /// Callers prepare the Teams tree first. Electron apps stay blank until that prep.
-    static func scheduleOverlapTitle(apps: RunningApps, tree: any MeetingUITree) -> TitleCandidate? {
+    static func scheduleOverlapTitle(apps: RunningApps, tree: any MeetingUITree,
+                                     platform: MeetingPlatform) -> TitleCandidate? {
         if let teamsPid = apps.pid(prefix: "com.microsoft.teams") {
             let events = outlookCalendarEvents(tree.nodes(pid: teamsPid))
+                .filter { $0.platform == nil || $0.platform == platform }
             if let event = currentEvent(in: events) {
                 return TitleCandidate(title: event.title, authority: .scheduleOverlap, provenance: "calendar:teams")
             }
         }
         if let outlookPid = apps.pid(exact: "com.microsoft.outlook"),
-           let title = outlookNativeJoinableTitle(tree.nodes(pid: outlookPid)) {
+           let title = outlookNativeJoinableTitle(tree.nodes(pid: outlookPid), for: platform) {
             return TitleCandidate(title: title, authority: .scheduleOverlap, provenance: "calendar:outlook")
         }
         return nil
     }
 
-    /// Native Outlook Calendar view: events are title-only buttons grouped by
-    /// day, and the *currently joinable* one carries a child "Join" button —
-    /// that child is the "this meeting is happening now" marker.
-    static func outlookNativeJoinableTitle(_ nodes: [AXNode]) -> String? {
-        for (i, node) in nodes.enumerated() where node.role == "AXButton" && node.desc != nil {
+    /// Native Outlook Calendar view: events are buttons grouped by day, and the
+    /// *currently joinable* one carries a child "Join" button — that child is the
+    /// "this meeting is happening now" marker. Labels read `<subject>` or
+    /// `<subject>, <location>`, where the location is "Microsoft Teams Meeting"
+    /// or a join URL.
+    static func outlookNativeJoinableTitle(_ nodes: [AXNode], for platform: MeetingPlatform) -> String? {
+        for (i, node) in nodes.enumerated() where node.role == "AXButton" {
+            guard let label = node.desc else { continue }
             for next in nodes.dropFirst(i + 1) {
                 if next.depth <= node.depth { break }
                 if next.role == "AXButton" && next.desc == "Join" {
-                    return node.desc
+                    let event = outlookEventLabel(label)
+                    if let title = event.title, event.platform == nil || event.platform == platform {
+                        return title
+                    }
+                    break
                 }
             }
         }
         return nil
+    }
+
+    private static func outlookEventLabel(_ label: String) -> (title: String?, platform: MeetingPlatform?) {
+        var subject = label
+        var platform: MeetingPlatform?
+        if let link = label.range(of: ", https://") {
+            subject = String(label[..<link.lowerBound])
+            platform = MeetingPlatform.mentioned(in: String(label[link.upperBound...]))
+        } else if label.hasSuffix(", Microsoft Teams Meeting") {
+            subject = String(label.dropLast(", Microsoft Teams Meeting".count))
+            platform = .teams
+        }
+        let title = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (title.isEmpty ? nil : title, platform)
     }
 
     /// Zoom Workplace home tab: the running scheduled meeting is an event group
