@@ -34,24 +34,39 @@ enum MeetingParsers {
         "OneDrive", "Apps", "Files", "Copilot",
     ]
 
+    /// Leading segment of a call popped out into its compact window.
+    static let teamsCompactViewPrefix = "Meeting compact view"
+
     /// Parses a Teams window title of the call-window form
-    /// `<meeting title> | <org> | <account> | Microsoft Teams`.
+    /// `<meeting title> | <org> | <account>`, optionally followed by
+    /// `| Microsoft Teams` (builds before 26276 appended it) and optionally
+    /// led by `Meeting compact view |`.
     /// Returns nil for main-window/nav titles and for the generic
     /// `"Microsoft Teams"` a freshly-opened call window carries before its real
     /// title settles (caller should keep polling). The meeting title may itself
-    /// contain " | ", so only the trailing three segments are stripped.
+    /// contain " | ", so only the trailing org and account segments are stripped.
     static func teamsCallTitle(windowTitle: String) -> String? {
-        let segments = windowTitle.components(separatedBy: " | ")
-        guard segments.count >= 4, segments.last == "Microsoft Teams" else { return nil }
+        var segments = windowTitle.components(separatedBy: " | ")
+        if segments.last == "Microsoft Teams" { segments.removeLast() }
+        // The account segment is the anchor now that the app-name suffix is optional.
+        guard segments.count >= 3, segments.last?.contains("@") == true else { return nil }
+        segments.removeLast(2)
+        if segments.first?.trimmingCharacters(in: .whitespaces) == teamsCompactViewPrefix {
+            segments.removeFirst()
+        }
         // Main-window titles lead with a nav view ("Calendar | <selected event> |
         // …"), so the nav check must look at the FIRST segment, not the joined
         // title — a meeting name may legitimately contain " | ".
-        let first = segments[0].trimmingCharacters(in: .whitespaces)
-        guard !teamsNavViews.contains(first) else { return nil }
-        let title = segments.dropLast(3).joined(separator: " | ")
-            .trimmingCharacters(in: .whitespaces)
+        guard let first = segments.first?.trimmingCharacters(in: .whitespaces),
+              !teamsNavViews.contains(first) else { return nil }
+        let title = segments.joined(separator: " | ")
+            .trimmingCharacters(in: titleTrimSet)
         return title.isEmpty ? nil : title
     }
+
+    /// Whitespace plus the zero-width characters Outlook leaves around subjects.
+    static let titleTrimSet = CharacterSet.whitespacesAndNewlines
+        .union(CharacterSet(charactersIn: "\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}"))
 
     /// Window titles seen on idle Webex (`Webex`, `Window`) and the app chrome
     /// names. A meeting window replaces these with the space or meeting name.
@@ -286,7 +301,7 @@ enum MeetingParsers {
         for node in nodes where node.role == "AXButton" {
             guard let desc = node.desc, !desc.hasPrefix("Canceled:"),
                   let match = desc.firstMatch(of: timeAnchor) else { continue }
-            let title = String(desc[..<match.range.lowerBound])
+            let title = String(desc[..<match.range.lowerBound]).trimmingCharacters(in: titleTrimSet)
             guard !title.isEmpty else { continue }
             let rest = String(desc[match.range.upperBound...])
             // rest: "Monday, June 01, 2026, Microsoft Teams Meeting, By X, Busy…"
@@ -364,7 +379,7 @@ enum MeetingParsers {
             subject = String(label.dropLast(", Microsoft Teams Meeting".count))
             platform = .teams
         }
-        let title = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = subject.trimmingCharacters(in: titleTrimSet)
         return (title.isEmpty ? nil : title, platform)
     }
 

@@ -21,6 +21,41 @@ final class MeetingParsersTests: XCTestCase {
             "test meeting for probe")
     }
 
+    /// Teams 26276 (2026-10-19) dropped the trailing "| Microsoft Teams" from window titles.
+    func testTeamsCallTitleParsesWindowWithoutAppSuffix() {
+        XCTAssertEqual(
+            MeetingParsers.teamsCallTitle(
+                windowTitle: "test meeting for probe | Intellias | naufal.mir@intellias.com"),
+            "test meeting for probe")
+        XCTAssertEqual(
+            MeetingParsers.teamsCallTitle(
+                windowTitle: "Q3 Review | Budget | Intellias | naufal.mir@intellias.com"),
+            "Q3 Review | Budget")
+    }
+
+    func testTeamsCallTitleRejectsNavViewsWithoutAppSuffix() {
+        // Live capture 2026-10-27.
+        XCTAssertNil(MeetingParsers.teamsCallTitle(
+            windowTitle: "Chat | AWS - AI DLC program | Intellias | naufal.mir@intellias.com"))
+    }
+
+    func testTeamsCallTitleRejectsTitleWithoutAccountSegment() {
+        XCTAssertNil(MeetingParsers.teamsCallTitle(windowTitle: "Some | random | window"))
+    }
+
+    func testTeamsCallTitleStripsCompactViewPrefix() {
+        XCTAssertEqual(
+            MeetingParsers.teamsCallTitle(
+                windowTitle: "Meeting compact view | Mass Mutual connext - Intellias x SpaceXSI | Intellias | naufal.mir@intellias.com | Microsoft Teams"),
+            "Mass Mutual connext - Intellias x SpaceXSI")
+        XCTAssertEqual(
+            MeetingParsers.teamsCallTitle(
+                windowTitle: "Meeting compact view | Weekly sync | Intellias | naufal.mir@intellias.com"),
+            "Weekly sync")
+        XCTAssertNil(MeetingParsers.teamsCallTitle(
+            windowTitle: "Meeting compact view | Intellias | naufal.mir@intellias.com"))
+    }
+
     func testTeamsCallTitleRejectsNavViews() {
         // Main window parked on Calendar / Chat — never a meeting title.
         XCTAssertNil(MeetingParsers.teamsCallTitle(
@@ -187,6 +222,13 @@ final class MeetingParsersTests: XCTestCase {
     func testOutlookNativeJoinableTitleDropsTheLocation() {
         XCTAssertEqual(MeetingParsers.outlookNativeJoinableTitle(joinable(webexInviteLabel), for: .webex),
                        "sec eng // intellias standup")
+    }
+
+    /// Live label from 2026-10-26: a zero-width space sits between subject and location.
+    func testOutlookNativeJoinableTitleTrimsZeroWidthSpace() {
+        let label = "FSI inititative Org Enablement & Certifications\u{200B} , Microsoft Teams Meeting"
+        XCTAssertEqual(MeetingParsers.outlookNativeJoinableTitle(joinable(label), for: .teams),
+                       "FSI inititative Org Enablement & Certifications")
     }
 
     func testOutlookNativeJoinableTitleRejectsSubjectlessEvent() {
