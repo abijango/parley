@@ -29,8 +29,9 @@ sets (light + dark). Clay (`Palette.accent`) is reserved for Record / Generate; 
 primary button is solid ink; selection is a neutral wash.
 
 Type (all OFL, bundled in `Resources/Fonts`, see `ThemeTokens.swift` → `BrandFont`):
-Hanken Grotesk for chrome and the live transcript, KF Libron (serif) for prose
-(`Typography.prose` — summaries, rendered notes, My notes), Geist Mono for numerics.
+Hanken Grotesk everywhere — chrome, the live transcript, and prose (`Typography.prose`
+for My notes; `MarkdownUI.Theme.parley` for rendered notes and summaries) — and Geist
+Mono for numerics.
 
 Shapes: buttons, fields, and rows use 8pt continuous corners (~28pt tall); cards
 12pt; the composer / floating panels 18pt.

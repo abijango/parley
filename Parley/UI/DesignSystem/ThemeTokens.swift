@@ -8,9 +8,9 @@ import AppKit
 // "ink" for the primary action, and clay reserved for Record / Generate. Colors are
 // Asset color sets (`Brand*`, light + dark) so both appearances come from one place.
 //
-// Type: Hanken Grotesk for chrome and the live transcript, KF Libron (serif) for prose
-// (summaries, rendered notes, My notes), Geist Mono for timestamps / paths / code. All
-// three are OFL and bundled under Resources/Fonts (registered via ATSApplicationFontsPath).
+// Type: Hanken Grotesk everywhere — chrome, the live transcript, and prose (summaries,
+// rendered notes, My notes) — with Geist Mono for timestamps / paths / code. Both are
+// OFL and bundled under Resources/Fonts (registered via ATSApplicationFontsPath).
 //
 // Structure (spacing, radius, motion, opacity, severity) stays static on `Theme`; this
 // file only holds the values `Theme.Palette` / `Theme.Typography` delegate to.
@@ -27,12 +27,6 @@ enum BrandFont {
                      relativeTo style: Font.TextStyle = .body) -> Font {
         .custom(sansPostScript(weight), size: size, relativeTo: style)
     }
-    /// KF Libron — long-form prose (summaries, rendered notes, the notes editor).
-    static func serif(_ size: CGFloat, _ weight: Font.Weight = .regular,
-                      relativeTo style: Font.TextStyle = .body) -> Font {
-        let bold = [.semibold, .bold, .heavy, .black].contains(weight)
-        return .custom(bold ? "KF_Libron-Bold" : "KF_Libron", size: size, relativeTo: style)
-    }
     /// Geist Mono — timestamps, paths, model ids.
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular,
                      relativeTo style: Font.TextStyle = .body) -> Font {
@@ -41,7 +35,6 @@ enum BrandFont {
 
     /// Family names for APIs that take a family rather than a face (MarkdownUI).
     static let sansFamily = "Hanken Grotesk"
-    static let serifFamily = "KF Libron"
     static let monoFamily = "Geist Mono"
 
     /// AppKit face for NSView-backed text (the live transcript table).
@@ -130,7 +123,7 @@ struct ThemeTokens {
         caption: BrandFont.sans(13, .regular, relativeTo: .callout),
         captionSecondary: BrandFont.sans(12, .regular, relativeTo: .subheadline),
         reading: BrandFont.sans(15, .regular, relativeTo: .title3),
-        prose: BrandFont.serif(16, .regular, relativeTo: .title3),
+        prose: BrandFont.sans(15, .regular, relativeTo: .title3),
         mono: BrandFont.mono(12, .regular, relativeTo: .callout),
         monoLarge: BrandFont.mono(18, .medium, relativeTo: .title2)
     )

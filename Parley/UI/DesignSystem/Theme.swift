@@ -154,9 +154,8 @@ enum Theme {
 
     // MARK: Typography
     //
-    // Role → font mapping. Chrome and the live transcript are Hanken Grotesk; long-form
-    // prose (summaries, rendered notes, My notes) is KF Libron; numerics/paths are Geist
-    // Mono. Fonts use `relativeTo:` so they still scale with Dynamic Type.
+    // Role → font mapping. Everything reads in Hanken Grotesk (chrome, the live
+    // transcript, and prose); numerics/paths are Geist Mono. Fonts use `relativeTo:` so they still scale with Dynamic Type.
     enum Typography {
         /// Top-of-window / primary screen title.
         static var screenTitle: Font { ThemeTokens.brand.screenTitle }           // 22
@@ -178,7 +177,8 @@ enum Theme {
         static var captionSecondary: Font { ThemeTokens.brand.captionSecondary } // 12
         /// Transcript lines (sans — dense, timestamped, reads like UI text).
         static var reading: Font { ThemeTokens.brand.reading }                   // 15
-        /// Long-form prose: summaries, rendered notes, the notes editor (serif).
+        /// Long-form prose: the notes editor (rendered notes use the matching
+        /// `MarkdownUI.Theme.parley`).
         static var prose: Font { ThemeTokens.brand.prose }                       // 16
         /// Timestamps, file paths, code, model ids.
         static var mono: Font { ThemeTokens.brand.mono }                         // 12
