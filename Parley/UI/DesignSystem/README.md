@@ -18,6 +18,7 @@ pattern, add it here first, then adopt it.
 | `Surfaces.swift` | `.cardSurface()`, `.chromeSurface()`, `.glassSurface()`, `.elevation(_:)`. |
 | `ThemeTokens.swift` | `BrandFont` (bundled faces) and the single `ThemeTokens.brand` value set behind `Palette` / `Typography`. |
 | `ButtonStyles.swift` | `.glassButton()` (secondary) / `.glassProminentButton()` (ink primary) / `.clayButton()` (Record, Generate); `RowButtonStyle` (`.buttonStyle(.row(selected:))`); `.textFieldStyle(.parley)`. |
+| `PillPicker.swift` | The segmented control: inset track + sliding white pill (`PillPicker(selection:options:)`). |
 | `Components.swift` | `StatusBanner`, `StatusBadge`, `SectionHeader`. |
 | `DesignSystemGallery.swift` | `#if DEBUG` preview gallery exercising everything (light + dark). |
 

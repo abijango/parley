@@ -456,7 +456,7 @@ struct RecordDetailView: View {
         }
         .padding(.horizontal, Theme.Spacing.small)
         .padding(.vertical, Theme.Spacing.xxSmall + 1)
-        .background(Capsule().fill(.quaternary.opacity(Theme.Opacity.surface)))
+        .background(Capsule().fill(Theme.Palette.selection))
         .lineLimit(1)
         .truncationMode(.tail)
         .fixedSize(horizontal: true, vertical: false)
@@ -537,26 +537,17 @@ struct RecordDetailView: View {
     }
 
     private var capturePicker: some View {
-        Picker("Other audio", selection: Binding(
+        PillPicker(selection: Binding(
             get: { settings.captureMode }, set: { settings.captureMode = $0 }
-        )) {
-            ForEach(CaptureMode.allCases) { Text($0.label).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(maxWidth: .infinity)
+        ), options: CaptureMode.allCases, fillsWidth: true) { Text($0.label) }
         .disabled(recording.isRecording)
     }
 
     private var micModePicker: some View {
-        Picker("Mic", selection: Binding(
+        PillPicker(selection: Binding(
             get: { live.micInputMode },
             set: { recording.setMicInputMode($0) }
-        )) {
-            ForEach(MicInputMode.allCases) { Text($0.label).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
+        ), options: MicInputMode.allCases, fillsWidth: true) { Text($0.label) }
         .help("Regular = normal mic level. Room = +6 dB boost for distant speakers (applied to the mic track).")
     }
 

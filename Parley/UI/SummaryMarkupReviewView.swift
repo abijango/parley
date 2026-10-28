@@ -111,12 +111,9 @@ struct SummaryMarkupReviewView: View {
                 Text("Summary v2 — edit the note, correct terminology, then file.")
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 Spacer()
-                Picker("Mode", selection: editingMode) {
-                    Text("Preview").tag(false)
-                    Text("Edit").tag(true)
+                PillPicker(selection: editingMode, options: [false, true]) { editing in
+                    Text(editing ? "Edit" : "Preview")
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 200)
             }
             if let metrics = v2MetricsLine {
                 Text(metrics.text)
