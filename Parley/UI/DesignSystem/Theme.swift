@@ -120,6 +120,7 @@ enum Theme {
         static var ink: Color           { ThemeTokens.brand.ink }
         static var inkText: Color       { ThemeTokens.brand.inkText }
         static var textPrimary: Color   { ThemeTokens.brand.textPrimary }
+        static var textBody: Color      { ThemeTokens.brand.textBody }
         static var textSecondary: Color { ThemeTokens.brand.textSecondary }
         static var textTertiary: Color  { ThemeTokens.brand.textTertiary }
     }

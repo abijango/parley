@@ -115,7 +115,8 @@ extension MarkdownUI.Theme {
     static let parley = MarkdownUI.Theme.basic
         .text {
             FontFamily(.custom(BrandFont.sansFamily))
-            FontSize(15)
+            FontSize(16.5)
+            ForegroundColor(Theme.Palette.textBody)
         }
         .code {
             FontFamily(.custom(BrandFont.monoFamily))
@@ -128,6 +129,7 @@ extension MarkdownUI.Theme {
             configuration.label
                 .markdownMargin(top: .rem(0.25), bottom: .rem(0.75))
                 .markdownTextStyle {
+                    ForegroundColor(Theme.Palette.textPrimary)
                     FontWeight(.semibold)
                     FontSize(.em(1.45))
                 }
@@ -136,6 +138,7 @@ extension MarkdownUI.Theme {
             configuration.label
                 .markdownMargin(top: .rem(1.25), bottom: .rem(0.5))
                 .markdownTextStyle {
+                    ForegroundColor(Theme.Palette.textPrimary)
                     FontWeight(.semibold)
                     FontSize(.em(1.2))
                 }
@@ -144,6 +147,7 @@ extension MarkdownUI.Theme {
             configuration.label
                 .markdownMargin(top: .rem(1), bottom: .rem(0.4))
                 .markdownTextStyle {
+                    ForegroundColor(Theme.Palette.textPrimary)
                     FontWeight(.semibold)
                     FontSize(.em(1.05))
                 }

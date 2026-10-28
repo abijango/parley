@@ -65,7 +65,7 @@ extension HistoryView {
                 Image(systemName: symbol).frame(width: 18)
             }
             .font(Theme.Typography.body)
-            .foregroundStyle(Theme.Palette.textPrimary)
+            .foregroundStyle(Theme.Palette.textBody)
         }
         .buttonStyle(.row(selected: selected))
     }
@@ -82,7 +82,7 @@ extension HistoryView {
                 LiveElapsedLabel()
             }
             .font(Theme.Typography.body)
-            .foregroundStyle(Theme.Palette.textPrimary)
+            .foregroundStyle(Theme.Palette.textBody)
         }
         .buttonStyle(.row(selected: shell.route == .live))
         .help("Back to the live transcript")
@@ -207,7 +207,7 @@ extension HistoryView {
             HStack(spacing: Theme.Spacing.small) {
                 Text(item.meta.title)
                     .font(Theme.Typography.body)
-                    .foregroundStyle(Theme.Palette.textPrimary)
+                    .foregroundStyle(Theme.Palette.textBody)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: Theme.Spacing.xSmall)
@@ -236,7 +236,7 @@ extension HistoryView {
                     Image(systemName: "gearshape").frame(width: 18)
                 }
                 .font(Theme.Typography.body)
-                .foregroundStyle(Theme.Palette.textPrimary)
+                .foregroundStyle(Theme.Palette.textBody)
             }
             .buttonStyle(.row())
             let busy = processingOrderedItems.count

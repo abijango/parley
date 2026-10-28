@@ -23,7 +23,9 @@ import AppKit
 // faces is unreliable). `relativeTo:` keeps Dynamic Type scaling.
 
 enum BrandFont {
-    /// Hanken Grotesk — UI chrome and the live transcript.
+    /// Hanken Grotesk — everything. The bundled faces are a lighter "book" cut of the
+    /// variable font (wght 360 / 460 / 560, named Regular / Medium / SemiBold) to match
+    /// the Claude app's text color and weight.
     static func sans(_ size: CGFloat, _ weight: Font.Weight = .regular,
                      relativeTo style: Font.TextStyle = .body) -> Font {
         .custom(sansPostScript(weight), size: size, relativeTo: style)
@@ -83,6 +85,7 @@ struct ThemeTokens {
     let inkText: Color          // text on `ink`
     // Color — text hierarchy
     let textPrimary: Color
+    let textBody: Color         // softer ink for list rows and reading text
     let textSecondary: Color
     let textTertiary: Color
 
@@ -113,20 +116,23 @@ struct ThemeTokens {
         ink: Color("BrandInk"),
         inkText: Color("BrandInkText"),
         textPrimary: Color("BrandTextPrimary"),
+        textBody: Color("BrandTextBody"),
         textSecondary: Color("BrandTextSecondary"),
         textTertiary: Color("BrandTextTertiary"),
 
-        screenTitle: BrandFont.sans(22, .semibold, relativeTo: .title),
-        sheetTitle: BrandFont.sans(18, .semibold, relativeTo: .title2),
-        sectionHeader: BrandFont.sans(15, .semibold, relativeTo: .title3),
-        body: BrandFont.sans(14, .regular, relativeTo: .body),
-        fieldLabel: BrandFont.sans(14, .regular, relativeTo: .body),
-        controlLabel: BrandFont.sans(14, .medium, relativeTo: .body),
-        secondary: BrandFont.sans(13, .regular, relativeTo: .callout),
-        caption: BrandFont.sans(13, .regular, relativeTo: .callout),
-        captionSecondary: BrandFont.sans(12, .regular, relativeTo: .subheadline),
-        reading: BrandFont.sans(15, .regular, relativeTo: .title3),
-        prose: BrandFont.sans(15, .regular, relativeTo: .title3),
+        // Sizes run ~9% above the Claude app's: Hanken's x-height (0.493 em) is
+        // smaller than Anthropic Sans's (0.54 em), so this matches perceived size.
+        screenTitle: BrandFont.sans(24, .semibold, relativeTo: .title),
+        sheetTitle: BrandFont.sans(19.5, .semibold, relativeTo: .title2),
+        sectionHeader: BrandFont.sans(16.5, .semibold, relativeTo: .title3),
+        body: BrandFont.sans(15, .regular, relativeTo: .body),
+        fieldLabel: BrandFont.sans(15, .regular, relativeTo: .body),
+        controlLabel: BrandFont.sans(15, .medium, relativeTo: .body),
+        secondary: BrandFont.sans(14, .regular, relativeTo: .callout),
+        caption: BrandFont.sans(14, .regular, relativeTo: .callout),
+        captionSecondary: BrandFont.sans(13, .regular, relativeTo: .subheadline),
+        reading: BrandFont.sans(16.5, .regular, relativeTo: .title3),
+        prose: BrandFont.sans(16.5, .regular, relativeTo: .title3),
         mono: BrandFont.mono(12, .regular, relativeTo: .callout),
         monoLarge: BrandFont.mono(18, .medium, relativeTo: .title2)
     )

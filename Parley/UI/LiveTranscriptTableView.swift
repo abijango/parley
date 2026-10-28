@@ -433,7 +433,7 @@ final class LiveTranscriptRowView: NSView {
 
         speakerButton.isBordered = false
         speakerButton.bezelStyle = .inline
-        speakerButton.font = BrandFont.nsSans(12, .semibold)
+        speakerButton.font = BrandFont.nsSans(13, .semibold)
         speakerButton.alignment = .left
         speakerButton.lineBreakMode = .byTruncatingTail
         speakerButton.translatesAutoresizingMaskIntoConstraints = false
@@ -442,7 +442,7 @@ final class LiveTranscriptRowView: NSView {
         speakerButton.setContentHuggingPriority(.required, for: .horizontal)
         speakerButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        textField.font = BrandFont.nsSans(15)
+        textField.font = BrandFont.nsSans(16.5)
         textField.textColor = .labelColor
         textField.isSelectable = true
         textField.lineBreakMode = .byWordWrapping
