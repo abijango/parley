@@ -40,6 +40,7 @@ enum BrandFont {
     }
 
     /// Family names for APIs that take a family rather than a face (MarkdownUI).
+    static let sansFamily = "Hanken Grotesk"
     static let serifFamily = "KF Libron"
     static let monoFamily = "Geist Mono"
 

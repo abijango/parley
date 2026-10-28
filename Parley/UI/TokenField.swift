@@ -25,6 +25,12 @@ struct TokenField: View {
     @State private var showOverflow = false
     @FocusState private var focused: Bool
 
+    /// Horizontal inset: the same 10pt as `.textFieldStyle(.parley)` so the placeholder
+    /// lines up with the fields above it; a little tighter once chips fill the row.
+    private var horizontalInset: CGFloat {
+        tokens.isEmpty ? Theme.Spacing.small + 2 : Theme.Spacing.xSmall + 2
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
             FlowLayout(maxWidth: fieldWidth,
@@ -33,8 +39,9 @@ struct TokenField: View {
                 if Self.hiddenCount(tokens) > 0 { overflowChip }
                 inputField
             }
-            .padding(Theme.Spacing.xSmall)
-            .frame(maxWidth: .infinity, minHeight: 28, alignment: .topLeading)
+            .padding(.horizontal, horizontalInset)
+            .padding(.vertical, Theme.Spacing.xSmall + 1)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
             // Take the full chip height and refuse vertical compression: in the
             // inspector VStack, `notesField` claims all leftover height, so a short
             // window would otherwise squeeze this field below its content and the
@@ -51,8 +58,9 @@ struct TokenField: View {
             // neighboring Title/Filing/Suggested fields.
             .background(GeometryReader { g in
                 Color.clear
-                    .onAppear { fieldWidth = g.size.width - Theme.Spacing.xSmall * 2 }
-                    .onChange(of: g.size.width) { fieldWidth = g.size.width - Theme.Spacing.xSmall * 2 }
+                    .onAppear { fieldWidth = g.size.width - horizontalInset * 2 }
+                    .onChange(of: g.size.width) { fieldWidth = g.size.width - horizontalInset * 2 }
+                    .onChange(of: tokens.isEmpty) { fieldWidth = g.size.width - horizontalInset * 2 }
             })
             .background(Theme.Radius.rect(Theme.Radius.small).fill(Theme.Palette.panelBg))
             .overlay(Theme.Radius.rect(Theme.Radius.small)

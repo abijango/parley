@@ -16,17 +16,12 @@ struct TranscriptPreviewView: View {
     @State private var loadError: String?
     @State private var loadTask: Task<Void, Never>?
 
-    /// Reading / code font families for the rendered note (prose serif + mono).
-    private let readingFamily: FontProperties.Family = .custom(BrandFont.serifFamily)
-    private let codeFamily: FontProperties.Family = .custom(BrandFont.monoFamily)
-
     var body: some View {
         Group {
             if let content {
                 ScrollView {
                     Markdown(content)
-                        .markdownTextStyle(\.text) { FontFamily(readingFamily); FontSize(16) }
-                        .markdownTextStyle(\.code) { FontFamily(codeFamily) }
+                        .markdownTheme(.parley)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(Theme.Spacing.large)
@@ -111,4 +106,52 @@ struct TranscriptPreviewView: View {
             return .failed("Couldn't read the note: \(error.localizedDescription)")
         }
     }
+}
+
+extension MarkdownUI.Theme {
+    /// Rendered notes and summaries: Hanken Grotesk at regular weight with roomy line
+    /// spacing and modest semibold headings — the light reading feel of the Claude app,
+    /// rather than MarkdownUI's large bold defaults.
+    static let parley = MarkdownUI.Theme.basic
+        .text {
+            FontFamily(.custom(BrandFont.sansFamily))
+            FontSize(15)
+        }
+        .code {
+            FontFamily(.custom(BrandFont.monoFamily))
+            FontSize(.em(0.88))
+        }
+        .strong {
+            FontWeight(.semibold)
+        }
+        .heading1 { configuration in
+            configuration.label
+                .markdownMargin(top: .rem(0.25), bottom: .rem(0.75))
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.45))
+                }
+        }
+        .heading2 { configuration in
+            configuration.label
+                .markdownMargin(top: .rem(1.25), bottom: .rem(0.5))
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.2))
+                }
+        }
+        .heading3 { configuration in
+            configuration.label
+                .markdownMargin(top: .rem(1), bottom: .rem(0.4))
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.05))
+                }
+        }
+        .paragraph { configuration in
+            configuration.label
+                .fixedSize(horizontal: false, vertical: true)
+                .relativeLineSpacing(.em(0.3))
+                .markdownMargin(top: .zero, bottom: .em(0.8))
+        }
 }
