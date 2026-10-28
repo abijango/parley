@@ -51,6 +51,20 @@ struct SpeakerCache: Codable, Equatable {
         return out
     }
 
+    /// Fold speaker `id` into `target`: `id`'s lines take the target's label (its name,
+    /// or `Speaker {target}`) and the two entries become one with summed talk time.
+    /// Returns the relabeled body, or `body` unchanged when either id is missing.
+    static func merge(_ id: String, into target: String, in cache: inout SpeakerCache, body: String) -> String {
+        guard id != target,
+              let from = cache.speakers.firstIndex(where: { $0.id == id }),
+              let to = cache.speakers.firstIndex(where: { $0.id == target }) else { return body }
+        let name = cache.speakers[to].resolvedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = name?.isEmpty == false ? name! : "Speaker \(target)"
+        cache.speakers[to].talkSeconds += cache.speakers[from].talkSeconds
+        cache.speakers.remove(at: from)
+        return relabel(body, assignments: [id: label])
+    }
+
     /// Undo auto-identification for attendees the user removed: each removed name that
     /// resolves to exactly one diarized speaker has its transcript lines turned back into
     /// `Speaker {id}` and its `resolvedName` cleared, so the speaker can be named again.

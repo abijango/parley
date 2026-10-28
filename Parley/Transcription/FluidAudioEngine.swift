@@ -105,6 +105,10 @@ final class FluidAudioEngine {
     /// Live speaker merges: diarization speakerId → canonical speakerId (flattened).
     /// Applied at display time only; cleared when the final pass replaces the ids.
     private var speakerAliases: [String: String] = [:]
+    /// Live only: the best clean clip heard so far per diarization speaker (16 kHz mono),
+    /// for "play their voice" before naming. `mixed.caf` only exists after stop.
+    private var liveClips: [String: (samples: [Float], score: Float)] = [:]
+    static let liveClipSeconds: TimeInterval = 4
 
     /// Diarized speaker turns on the session timeline (speakerId + start/end seconds).
     private var diarSegments: [(speakerId: String, start: TimeInterval, end: TimeInterval)] = []
@@ -533,6 +537,7 @@ final class FluidAudioEngine {
         streamStart = Date()
         liveSegStart = startElapsed
         lockEnabled = true
+        liveClips = [:]
 
         // Mix both capture rings into one mono stream; feed the recognizer AND
         // buffer the same samples for the diarizer.
@@ -610,9 +615,49 @@ final class FluidAudioEngine {
                      quality: $0.qualityScore)
                 }
                 guard !segs.isEmpty else { continue }
+                let clips = Self.clipCandidates(
+                    in: Array(scratch.prefix(n)),
+                    turns: result.segments.map {
+                        ($0.speakerId, TimeInterval($0.startTimeSeconds), TimeInterval($0.endTimeSeconds), $0.qualityScore)
+                    })
+                await self?.noteLiveClips(clips)
                 await self?.ingestDiarization(segs)
             }
         }
+    }
+
+    /// The cleanest stretch of each speaker in one diarization chunk: quality-gated turns
+    /// of at least 1.5 s, trimmed to their middle `liveClipSeconds`. Scored by quality ×
+    /// length so a long clean turn beats a short one.
+    nonisolated static func clipCandidates(
+        in samples: [Float],
+        turns: [(speakerId: String, start: TimeInterval, end: TimeInterval, quality: Float)],
+        sampleRate: Double = 16_000
+    ) -> [(speakerId: String, samples: [Float], score: Float)] {
+        var best: [String: (samples: [Float], score: Float)] = [:]
+        for t in turns where t.quality >= 0.4 && t.end - t.start >= 1.5 {
+            let length = min(t.end - t.start, liveClipSeconds)
+            let mid = (t.start + t.end) / 2
+            let s = max(0, Int((mid - length / 2) * sampleRate))
+            let e = min(samples.count, Int((mid + length / 2) * sampleRate))
+            guard e > s else { continue }
+            let score = t.quality * Float(length)
+            if score > (best[t.speakerId]?.score ?? 0) {
+                best[t.speakerId] = (Array(samples[s..<e]), score)
+            }
+        }
+        return best.map { ($0.key, $0.value.samples, $0.value.score) }
+    }
+
+    private func noteLiveClips(_ clips: [(speakerId: String, samples: [Float], score: Float)]) {
+        for c in clips where c.score > (liveClips[c.speakerId]?.score ?? 0) {
+            liveClips[c.speakerId] = (c.samples, c.score)
+        }
+    }
+
+    /// Best live clip for this speaker's person (across merged clusters), if any.
+    func liveClip(for speakerId: String) -> [Float]? {
+        speakerGroup(speakerId).compactMap { liveClips[$0] }.max { $0.score < $1.score }?.samples
     }
 
     /// Load diarization models and build a session-long manager (owned by the diarTask).

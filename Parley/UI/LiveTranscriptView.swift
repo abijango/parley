@@ -21,7 +21,8 @@ struct LiveTranscriptView: View {
                     people: people,
                     attendees: attendees,
                     onName: onNameSpeaker,
-                    onMerge: onMergeSpeaker ?? { _, _ in })
+                    onMerge: onMergeSpeaker ?? { _, _ in },
+                    onPlay: { RecordingController.shared.playLiveClip($0) })
             }
             LiveTranscriptTable(
                 store: store,
@@ -41,7 +42,11 @@ struct TranscriptSpeakerNamer: View {
     let people: [String]
     let attendees: [String]
     /// Other live speakers, for "Same person as…".
-    var others: [LiveSpeaker] = []
+    var others: [StripSpeaker] = []
+    /// Voiceprint / attendee guess, offered as a one-click answer.
+    var suggestion: String? = nil
+    /// Plays this speaker's clip, shown as "Play voice" beside the title.
+    var onPlay: (() -> Void)? = nil
     let onCommit: (String) -> Void
     var onMerge: ((String) -> Void)? = nil
 
@@ -55,7 +60,24 @@ struct TranscriptSpeakerNamer: View {
         }.prefix(5).map { $0 }
 
         return VStack(alignment: .leading, spacing: Theme.Spacing.small) {
-            Text(title).font(Theme.Typography.sheetTitle)
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(Theme.Typography.sheetTitle)
+                Spacer(minLength: Theme.Spacing.small)
+                if let onPlay {
+                    Button(action: onPlay) { Label("Play voice", systemImage: "play.fill") }
+                        .glassButton()
+                        .controlSize(.small)
+                }
+            }
+
+            if let suggestion {
+                HStack(spacing: Theme.Spacing.small) {
+                    Text("Suggested").font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    Button(suggestion) { onCommit(suggestion) }
+                        .glassProminentButton()
+                        .controlSize(.small)
+                }
+            }
 
             if !attendees.isEmpty {
                 Text("In this call").font(Theme.Typography.caption).foregroundStyle(.secondary)
@@ -74,7 +96,7 @@ struct TranscriptSpeakerNamer: View {
             Text("Other name").font(Theme.Typography.caption).foregroundStyle(.secondary)
             TextField("Type a name", text: $draft)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 240)
+                .frame(maxWidth: .infinity)
                 .onSubmit { save() }
 
             if !matches.isEmpty {
@@ -113,7 +135,7 @@ struct TranscriptSpeakerNamer: View {
             }
         }
         .padding(Theme.Spacing.medium)
-        .frame(width: 264)
+        .frame(width: 300)
     }
 
     private func save() {

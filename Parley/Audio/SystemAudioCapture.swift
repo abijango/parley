@@ -235,8 +235,13 @@ final class SystemAudioCapture: @unchecked Sendable {
         let description: CATapDescription
         switch target {
         case .global:
-            // Exclude ourselves so we never capture our own output.
-            description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+            // Exclude ourselves so we never capture our own output (e.g. a speaker
+            // clip played during the call would otherwise be transcribed).
+            let selfObject = Self.audioProcessObject(for: getpid())
+            AppLog.log(selfObject == nil
+                       ? "System audio: own process object unavailable — global tap includes \(AppInfo.name)'s output"
+                       : "System audio: global tap excludes \(AppInfo.name)'s own output", category: "audio")
+            description = CATapDescription(stereoGlobalTapButExcludeProcesses: selfObject.map { [$0] } ?? [])
         case .app(let pid):
             guard let processObject = Self.audioProcessObject(for: pid) else {
                 throw SystemAudioCaptureError.noProcessObject(pid)

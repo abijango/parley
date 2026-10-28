@@ -103,7 +103,7 @@ final class LiveTranscriptLockTests: XCTestCase {
         engine.setSpeakerName("2", as: "alex")
         let speakers = Set(engine.confirmedTimeline().compactMap(\.speakerId))
         XCTAssertEqual(speakers.count, 1)
-        XCTAssertEqual(LiveSpeakerRoster.speakers(from: engine.confirmedTimeline()).count, 1)
+        XCTAssertEqual(SpeakerRoster.speakers(from: engine.confirmedTimeline()).count, 1)
     }
 
     func testMergeWithoutNameFoldsIntoTarget() {

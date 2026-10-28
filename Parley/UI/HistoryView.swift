@@ -402,7 +402,12 @@ struct HistoryView: View {
             Button("Retry summary") { summarize(item) }
             Divider()
         case .failed(.speakerDetection):
-            if audioAvailable(item) { Button("Retry speaker detection") { detectSpeakers(item) }; Divider() }
+            if audioAvailable(item) { Button("Retry speaker detection") {
+                recording.reprocessSpeakers(
+                    forAudioPath: item.meta.audio, transcript: item.url,
+                    attendees: item.meta.attendees.joined(separator: ", "),
+                    title: item.meta.title, filing: item.meta.filing)
+            }; Divider() }
         default:
             EmptyView()
         }
@@ -805,13 +810,8 @@ struct HistoryView: View {
             attendeesEditor(item)
             historyAttachmentsEditor(item)
             filesStrip(item)
-            speakerGuessBanner(item)
-            if item.hasUnnamedSpeakers {
-                StatusBanner(.warning,
-                             audioAvailable(item)
-                             ? "Speakers aren't assigned yet. Detect & name them, or tap a suggestion below."
-                             : "Speakers aren't assigned and the audio is no longer available to detect them.",
-                             symbol: "person.crop.circle.badge.exclamationmark")
+            HistorySpeakerStrip(item: item, audioAvailable: audioAvailable(item)) {
+                if item.summaryReadyURL != nil { summaryService.regenerate(item) } else { summarize(item) }
             }
             actionRow(item)
             // Live pipeline status for this note: the full segmented stage bar
@@ -856,28 +856,6 @@ struct HistoryView: View {
               !summaryService.hasPendingWork(item) else { return }
         let url = store.rename(item, to: trimmed)
         selection = [url.path]
-    }
-
-    @ViewBuilder private func speakerGuessBanner(_ item: TranscriptItem) -> some View {
-        if let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio),
-           let cache = SpeakerCache.read(dir) {
-            let guesses = cache.speakers.filter {
-                $0.resolvedName == nil && ($0.guessedName?.isEmpty == false)
-            }
-            if !guesses.isEmpty {
-                HStack(spacing: Theme.Spacing.xSmall) {
-                    Text("Suggestions:").font(Theme.Typography.caption).foregroundStyle(.secondary)
-                    ForEach(guesses, id: \.id) { s in
-                        if let guess = s.guessedName {
-                            Button("\(guess)?") {
-                                recording.confirmSpeakerGuess(on: item.url, speakerId: s.id, name: guess)
-                            }
-                            .buttonStyle(.chip)
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// Editable attendee list for a filed/processed call. Writes straight through to the
@@ -1105,8 +1083,7 @@ struct HistoryView: View {
     }
 
     private func detectSpeakers(_ item: TranscriptItem) {
-        // Prefer the persisted speaker cache (opens the review instantly); falls back to a
-        // full re-run only when there's no cache (older recordings).
+        // Unnamed speakers already in the cache are named in the strip; otherwise re-run.
         recording.assignSpeakers(
             forAudioPath: item.meta.audio, transcript: item.url,
             attendees: item.meta.attendees.joined(separator: ", "),

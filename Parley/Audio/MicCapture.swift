@@ -82,6 +82,16 @@ final class MicCapture: @unchecked Sendable {
     private var archiver: AudioArchiver?
     /// Updated by the tap on every buffer; read by the watchdog.
     private var lastBufferDate: Date = .distantPast
+    /// Mic input is replaced with silence until this time (guarded by `tapLock`), so a
+    /// speaker clip Parley plays mid-call isn't picked up and transcribed again.
+    private var silencedUntil: Date = .distantPast
+
+    /// Feed silence instead of the mic for `seconds` (archive timing is preserved).
+    func silence(for seconds: TimeInterval) {
+        os_unfair_lock_lock(&tapLock)
+        silencedUntil = max(silencedUntil, Date().addingTimeInterval(seconds))
+        os_unfair_lock_unlock(&tapLock)
+    }
 
     // MARK: - Fixed state
 
@@ -220,7 +230,9 @@ final class MicCapture: @unchecked Sendable {
             let currentResampler = self.resampler
             let currentArchiver = self.archiver
             self.lastBufferDate = Date()
+            let silenced = self.lastBufferDate < self.silencedUntil
             os_unfair_lock_unlock(&self.tapLock)
+            if silenced { Self.zero(buffer) }
 
             let mode = self.micInputMode
             // Boost the tap buffer before archive + resample. Returns false when the
@@ -236,6 +248,18 @@ final class MicCapture: @unchecked Sendable {
                 floats.withUnsafeBufferPointer { self.ringBuffer.write($0) }
                 self.meter.update(floats)
             }
+        }
+    }
+
+    private static func zero(_ buffer: AVAudioPCMBuffer) {
+        let frames = Int(buffer.frameLength)
+        let channels = Int(buffer.format.channelCount)
+        if let data = buffer.floatChannelData {
+            for c in 0..<channels { data[c].update(repeating: 0, count: frames) }
+        } else if let data = buffer.int16ChannelData {
+            for c in 0..<channels { data[c].update(repeating: 0, count: frames) }
+        } else if let data = buffer.int32ChannelData {
+            for c in 0..<channels { data[c].update(repeating: 0, count: frames) }
         }
     }
 

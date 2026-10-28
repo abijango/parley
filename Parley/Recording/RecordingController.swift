@@ -164,6 +164,8 @@ final class RecordingController: ObservableObject {
     private(set) lazy var admission = MeetingAdmission(meeting: meeting)
 
     private let settings = AppSettings.shared
+    /// Speaker-strip voice clips (live and History).
+    private let clipPlayer = SamplePlayer()
 
     // Capture
     private let micRing = AudioRingBuffer(capacity: 16_000 * 30)
@@ -228,6 +230,7 @@ final class RecordingController: ObservableObject {
         fluid.sessionAttendees = meeting.attendees
         fluid.sessionMeetingTitle = meeting.meetingTitle
         fluid.onSpeakerIdentified = { [weak self] name in self?.admission.addRecognized(name) }
+        live.segmentStore.roster.clipAvailable = { [weak fluid] id in fluid?.liveClip(for: id) != nil }
         wireSegmentPublishing(to: fluid)
         return fluid
     }
@@ -355,6 +358,52 @@ final class RecordingController: ObservableObject {
         } else {
             admission.addRecognized(name)
         }
+    }
+
+    /// Live strip: play the best clip heard so far for a speaker. Returns its length
+    /// (0 when there's no clean clip yet).
+    @discardableResult
+    func playLiveClip(_ speakerId: String) -> TimeInterval {
+        guard let clip = engine?.liveClip(for: speakerId), !clip.isEmpty else { return 0 }
+        let length = Double(clip.count) / 16_000
+        // Laptop speakers bleed into the mic, which has no echo cancellation: mute it
+        // for the clip (plus a tail) so the clip isn't transcribed or diarized again.
+        micCapture?.silence(for: length + 0.4)
+        clipPlayer.play(samples: clip)
+        return length
+    }
+
+    /// History strip: play a cached speaker's sample from the call's `mixed.caf`.
+    @discardableResult
+    func playCachedClip(sessionDir: URL, speakerId: String) -> TimeInterval {
+        guard let cache = SpeakerCache.read(sessionDir),
+              let s = cache.speakers.first(where: { $0.id == speakerId }), s.sampleEnd > s.sampleStart
+        else { return 0 }
+        let end = min(s.sampleEnd, s.sampleStart + FluidAudioEngine.liveClipSeconds + 2)
+        clipPlayer.play(files: [sessionDir.appendingPathComponent(cache.mixedCafName)],
+                        start: s.sampleStart, end: end)
+        return end - s.sampleStart
+    }
+
+    func stopClip() { clipPlayer.stop() }
+
+    /// History "same person as…" into a speaker who has no name yet: their lines take the
+    /// target's `Speaker N` label and the two cache entries become one. (Into a named
+    /// speaker, the strip names instead — `confirmSpeakerGuess`.)
+    func mergeCachedSpeaker(on transcript: URL, speakerId: String, into target: String) {
+        guard speakerId != target else { return }
+        let dir = MeetingFiles.sessionDir(forAudioPath: store.items.first(where: { $0.url == transcript })?.meta.audio)
+            ?? transcript.deletingLastPathComponent()
+        guard var cache = SpeakerCache.read(dir),
+              let body = try? String(contentsOf: transcript, encoding: .utf8) else { return }
+        let before = cache
+        let relabeled = SpeakerCache.merge(speakerId, into: target, in: &cache, body: body)
+        guard cache != before else { return }
+        if relabeled != body { try? relabeled.write(to: transcript, atomically: true, encoding: .utf8) }
+        cache.write(to: dir)
+        store.refresh()
+        transcriptRevision += 1
+        AppLog.log("Merged Speaker \(speakerId) into Speaker \(target): \(transcript.lastPathComponent)", category: "record")
     }
 
     /// Live "same person as…": merge one diarized speaker into another. If the target
@@ -649,10 +698,12 @@ final class RecordingController: ObservableObject {
         appActivity = .idle
     }
 
-    /// Host a speaker-review produced by the offline queue (History "Detect speakers").
+    /// A History "Detect speakers" pass finished: it already rewrote the transcript and
+    /// wrote `speakers.json`, which History's speaker strip reads — no sheet.
     private func presentQueuedReview(_ review: SpeakerReview) {
-        pendingSpeakerReview = review
-        autoPresentSpeakerReview = true
+        store.refresh()
+        transcriptRevision += 1
+        AppLog.log("Speakers detected — naming in History strip (\(review.speakers.count))", category: "record")
     }
 
     /// Starts background call detection. This increment is detection + logging
@@ -1264,44 +1315,23 @@ final class RecordingController: ObservableObject {
         }
     }
 
-    /// Open the assign-speakers review for a History note. Prefers the persisted speaker
-    /// cache (instant — no re-run); falls back to re-running the offline pass only when no
-    /// cache exists (older recordings) or its audio is gone.
+    /// History "Detect speakers". When the persisted speaker cache still has unnamed
+    /// speakers, History's strip already offers them (with clips) — nothing to run.
+    /// Otherwise re-run the offline pass, which rewrites the transcript and the cache.
     func assignSpeakers(forAudioPath audioPath: String?, transcript: URL,
                         attendees: String, title: String, filing: String) {
         guard let audioPath, !audioPath.isEmpty else {
             lastResult = "No saved audio for this recording — can't detect speakers."; return
         }
         let dir = URL(fileURLWithPath: audioPath).deletingLastPathComponent()
-        let mixed = dir.appendingPathComponent("mixed.caf")
         if let cache = SpeakerCache.read(dir),
-           !cache.speakers.isEmpty,
-           FileManager.default.fileExists(atPath: mixed.path) {
-            let summaries = cache.speakers.map {
-                CallSpeakerSummary(id: $0.id, resolvedName: $0.resolvedName, guessedName: $0.guessedName,
-                                   talkSeconds: $0.talkSeconds,
-                                   sampleStart: $0.sampleStart, sampleEnd: $0.sampleEnd, firstLine: $0.firstLine)
-            }
-            // Seed assignments from auto-resolved + previously-persisted names so Done
-            // always applies them even if the user doesn't re-tap Name.
-            var seeded: [String: String] = [:]
-            for s in cache.speakers {
-                if let n = s.resolvedName?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty {
-                    seeded[s.id] = n
-                }
-            }
-            pendingSpeakerReview = SpeakerReview(
-                speakers: summaries, mixedCaf: mixed, engine: nil, transcriptURL: transcript,
-                title: title, filing: filing, attendees: attendees,
-                autoSummarize: settings.autoRunClaude, cache: cache, sessionDir: dir,
-                assignments: seeded)
-            autoPresentSpeakerReview = true
-            AppLog.log("Assign speakers from cache (\(cache.speakers.count)) — \(transcript.lastPathComponent)", category: "record")
-        } else {
-            // No cache (or audio gone) → fall back to a full re-run that opens the review.
-            reprocessSpeakers(forAudioPath: audioPath, transcript: transcript,
-                              attendees: attendees, title: title, filing: filing)
+           cache.speakers.contains(where: { $0.resolvedName?.isEmpty != false }) {
+            transcriptRevision += 1
+            AppLog.log("Detect speakers: cache has unnamed speakers — naming in History strip", category: "record")
+            return
         }
+        reprocessSpeakers(forAudioPath: audioPath, transcript: transcript,
+                          attendees: attendees, title: title, filing: filing)
     }
 
     /// On-demand speaker detection for an already-recorded call (from History).

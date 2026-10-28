@@ -71,17 +71,6 @@ struct MainWindowView: View {
             RecoveryView { showingRecovery = false }
                 .environmentObject(recording)
         }
-        // Assign-speakers review for a History "Detect speakers" run. Hosted here, at
-        // the always-mounted window root, so it survives switching tabs/notes — the
-        // History view used to own this sheet and tore it (and the only way back to
-        // the review) down on navigation, forcing a full re-run of the offline pass.
-        .sheet(isPresented: Binding(
-            get: { recording.autoPresentSpeakerReview && recording.pendingSpeakerReview != nil },
-            set: { if !$0 { recording.autoPresentSpeakerReview = false } })) {
-            if let review = recording.pendingSpeakerReview {
-                AssignSpeakersView(review: review)
-            }
-        }
         // Post-call batch enrichment sheet (Slice B): one-time prompt to add Company
         // for attendees with no known rolodex entry. The setter handles OS-level
         // dismiss (Escape) by calling finishEnrichment(save:false), which ensures the
@@ -207,7 +196,6 @@ struct RecordDetailView: View {
     @State private var apps: [CapturableApp] = []
     @State private var mode: WindowMode = .live
     @State private var pendingPerson: PendingPerson?
-    @State private var showSpeakerReview = false
     /// Distinguishes the user's typing in the Title field from programmatic
     /// auto-fill (discovered titles): only focused changes count as user edits.
     @FocusState private var titleFocused: Bool
@@ -285,13 +273,6 @@ struct RecordDetailView: View {
             if recording.isRecording {
                 mode = .live
                 withAnimation(Theme.Motion.quick) { meetingDetailsExpanded = true }
-            }
-        }
-        // At-stop "Assign speakers" review (FluidAudio).
-        // Speaker review is opt-in (a footer button), not an auto-popup after every call.
-        .sheet(isPresented: $showSpeakerReview) {
-            if let review = recording.pendingSpeakerReview {
-                AssignSpeakersView(review: review)
             }
         }
         .sheet(item: $pendingPerson) { pending in
@@ -890,14 +871,6 @@ struct RecordDetailView: View {
                 }
                 .font(Theme.Typography.caption)
                 .foregroundStyle(.secondary)
-            }
-            if let review = recording.pendingSpeakerReview, !review.speakers.isEmpty {
-                Button {
-                    showSpeakerReview = true
-                } label: {
-                    Label("Assign speakers (\(review.speakers.count))", systemImage: "person.2.wave.2")
-                }
-                .font(Theme.Typography.caption)
             }
             if recording.lastTranscriptURL != nil, !recording.isRecording {
                 Button("Ready for next") {

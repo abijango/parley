@@ -8,7 +8,7 @@ final class LiveSegmentStore: ObservableObject {
     @Published private(set) var segments: [Segment] = [] {
         didSet { roster.update(from: segments) }
     }
-    let roster = LiveSpeakerRoster()
+    let roster = SpeakerRoster()
 
     func reset() {
         roster.reset()
