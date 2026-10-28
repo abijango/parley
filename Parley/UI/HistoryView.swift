@@ -782,7 +782,7 @@ struct HistoryView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
                     TextField("Meeting title", text: headerTitleBinding(for: item))
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.parley)
                         .font(Theme.Typography.screenTitle)
                         .onSubmit { persistHeaderTitle(item) }
                         .disabled(summaryService.hasPendingWork(item))
@@ -1028,7 +1028,7 @@ struct HistoryView: View {
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 TextField("Name", text: $attendeeDraft)
-                    .textFieldStyle(.roundedBorder).frame(width: 240)
+                    .textFieldStyle(.parley).frame(width: 240)
                     .onSubmit { commitAddAttendee(item) }
                 let matches = attendeeMatches(item)
                 if !matches.isEmpty {
@@ -1205,7 +1205,7 @@ struct HistoryView: View {
                 .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextField("Title", text: $renameDraft)
-                .textFieldStyle(.roundedBorder).frame(width: 340)
+                .textFieldStyle(.parley).frame(width: 340)
                 .onSubmit { commitRename(item) }
             HStack {
                 Spacer()
@@ -1329,7 +1329,7 @@ struct HistoryView: View {
             .background(.quaternary.opacity(Theme.Opacity.surface), in: RoundedRectangle(cornerRadius: 6))
 
             TextField("Combined title", text: $combineDraft)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.parley)
             Toggle("Move the originals to the Trash after combining", isOn: $combineTrashOriginals)
                 .help("Off keeps the originals; recorded audio and filed notes are always kept either way.")
 

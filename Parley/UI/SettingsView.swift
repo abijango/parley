@@ -186,22 +186,10 @@ struct SettingsView: View {
 
     private var generalTab: some View {
         Form {
-            Section("Appearance") {
-                SettingRow("Theme",
-                           description: "Native is the macOS look — SF Pro, system accent, Liquid Glass. Cursor is a warm paper palette with Geist and flat surfaces. Switches instantly.") {
-                    Picker("", selection: Binding(
-                        get: { ThemeStore.shared.kind },
-                        set: { ThemeStore.shared.select($0) }
-                    )) {
-                        ForEach(ThemeKind.allCases) { Text($0.displayName).tag($0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
-                }
-            }
             Section("Paths") {
                 LabeledContent("Obsidian vault") {
                     TextField("path to your vault", text: $settings.vaultPath)
-                        .textFieldStyle(.roundedBorder).frame(maxWidth: 280)
+                        .textFieldStyle(.parley).frame(maxWidth: 280)
                 }
                 SettingRow("Transcripts folder") {
                     Text(AppPaths.unprocessedURL.path)
@@ -323,7 +311,7 @@ struct SettingsView: View {
                     }
                     LabeledContent("CLI") {
                         TextField("/usr/local/bin/cursor", text: $settings.cursorBinaryPath)
-                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                            .textFieldStyle(.parley).font(Theme.Typography.mono)
                     }
                     helpText("Runs `cursor agent -p --mode ask --output-format json` with your Cursor subscription. Ask mode is read-only (no vault edits). Sign in once via Terminal if prompted.")
                 }
@@ -334,12 +322,12 @@ struct SettingsView: View {
                     ClaudeConnectionView()
                     LabeledContent("Model") {
                         TextField("sonnet", text: $settings.claudeModel)
-                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                            .textFieldStyle(.parley).font(Theme.Typography.mono)
                             .frame(maxWidth: 220)
                     }
                     LabeledContent("CLI") {
                         TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
-                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                            .textFieldStyle(.parley).font(Theme.Typography.mono)
                     }
                     helpText("Runs `claude -p` (raw prompt, no skill/tools). The status above shows whether the CLI is installed and logged in.")
                 }
@@ -348,12 +336,12 @@ struct SettingsView: View {
                     GrokConnectionView()
                     LabeledContent("Model") {
                         TextField("grok-4.6", text: $settings.grokModel)
-                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                            .textFieldStyle(.parley).font(Theme.Typography.mono)
                             .frame(maxWidth: 220)
                     }
                     LabeledContent("CLI") {
                         TextField("~/.grok/bin/grok", text: $settings.grokBinaryPath)
-                            .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                            .textFieldStyle(.parley).font(Theme.Typography.mono)
                     }
                     helpText("Runs `grok -p` (raw prompt, no vault tools; JSON on stdout). The status above shows whether the CLI is installed and logged in.")
                 }
@@ -928,7 +916,7 @@ struct SettingsView: View {
                 editorStyle(TextEditor(text: $settings.scanRootsRaw), height: 44)
                 LabeledContent("Contacts file") {
                     TextField("Rolodex.md", text: $settings.contactsFileName)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.parley)
                 }
             }
 
@@ -1068,11 +1056,11 @@ struct SettingsView: View {
             Section {
                 LabeledContent("CLI") {
                     TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
-                        .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                        .textFieldStyle(.parley).font(Theme.Typography.mono)
                 }
                 LabeledContent("Model") {
                     TextField("sonnet", text: $settings.claudeModel)
-                        .textFieldStyle(.roundedBorder).font(Theme.Typography.mono)
+                        .textFieldStyle(.parley).font(Theme.Typography.mono)
                         .frame(maxWidth: 220)
                 }
             } header: {

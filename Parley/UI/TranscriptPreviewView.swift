@@ -16,13 +16,9 @@ struct TranscriptPreviewView: View {
     @State private var loadError: String?
     @State private var loadTask: Task<Void, Never>?
 
-    /// Reading / code font families for the rendered note, matched to the active look.
-    private var readingFamily: FontProperties.Family {
-        ThemeStore.shared.kind == .cursor ? .custom("Geist") : .system(.serif)
-    }
-    private var codeFamily: FontProperties.Family {
-        ThemeStore.shared.kind == .cursor ? .custom("GeistMono") : .system(.monospaced)
-    }
+    /// Reading / code font families for the rendered note (prose serif + mono).
+    private let readingFamily: FontProperties.Family = .custom(BrandFont.serifFamily)
+    private let codeFamily: FontProperties.Family = .custom(BrandFont.monoFamily)
 
     var body: some View {
         Group {

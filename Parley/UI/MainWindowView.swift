@@ -363,7 +363,7 @@ struct RecordDetailView: View {
                 } label: {
                     Label("Generate meeting notes", systemImage: "sparkles")
                 }
-                .glassProminentButton()
+                .clayButton()
                 .disabled(recording.lastTranscriptURL == nil)
             }
             Spacer()
@@ -605,8 +605,7 @@ struct RecordDetailView: View {
                 .frame(maxWidth: .infinity)
         }
         .controlSize(.large)
-        .glassProminentButton()
-        .tint(recording.isRecording ? .red : .green)
+        .buttonStyle(InkButtonStyle(role: recording.isRecording ? .primary : .clay))
         .disabled(live.state == .preparing || live.state == .stopping)
     }
 
@@ -695,7 +694,7 @@ struct RecordDetailView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             railField("Title") {
                 TextField("Meeting title", text: $meeting.meetingTitle)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
                     .focused($titleFocused)
                     .onChange(of: meeting.meetingTitle) {
                         if titleFocused { recording.userEditedTitle() }
@@ -787,7 +786,7 @@ struct RecordDetailView: View {
     private var notesField: some View {
         railField("Notes") {
             TextEditor(text: $meeting.manualNotes)
-                .font(Theme.Typography.body)
+                .font(Theme.Typography.prose)
                 .frame(maxWidth: .infinity,
                        minHeight: isPreRecordIdle ? 100 : 140,
                        maxHeight: .infinity)

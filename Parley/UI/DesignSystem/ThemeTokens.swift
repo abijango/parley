@@ -1,85 +1,91 @@
 import SwiftUI
 import AppKit
-import Observation
 
-// MARK: - Switchable looks: Native (Tahoe) ↔ Cursor
+// MARK: - The one look: warm paper, ink, and clay
 //
-// The design system has two "looks". They share *everything structural* — spacing,
-// radius, motion, opacity, severity (all still static on `Theme`) — and differ only in
-// three axes: **color**, **typography**, and two **material behaviors** (buttons +
-// surfaces, which branch on `ThemeStore.shared.kind` in ButtonStyles.swift / Surfaces.swift).
+// Parley has a single look, modeled on the Claude desktop app: a warm off-white canvas,
+// a slightly darker sidebar, hairline dividers, a neutral selection wash, near-black
+// "ink" for the primary action, and clay reserved for Record / Generate. Colors are
+// Asset color sets (`Brand*`, light + dark) so both appearances come from one place.
 //
-// The differing color + font values live in a `ThemeTokens` value set. The *current*
-// set is held by an `@Observable` `ThemeStore`. `Theme.Palette` / `Theme.Typography`
-// are computed accessors that read the store, so the app's ~370 existing token call
-// sites switch looks with **zero changes** — SwiftUI's Observation tracks the read
-// through the static accessor and re-renders on flip (verified: Step 1 spike).
+// Type: Hanken Grotesk for chrome and the live transcript, KF Libron (serif) for prose
+// (summaries, rendered notes, My notes), Geist Mono for timestamps / paths / code. All
+// three are OFL and bundled under Resources/Fonts (registered via ATSApplicationFontsPath).
 //
-// Caveat (by design): tokens must be read *inside* a view's `body` for tracking to
-// arm. Existing screens do (`.foregroundStyle(Theme.Palette.accent)` inline). Don't
-// cache a token in `init` or a stored `let`.
+// Structure (spacing, radius, motion, opacity, severity) stays static on `Theme`; this
+// file only holds the values `Theme.Palette` / `Theme.Typography` delegate to.
 
-enum ThemeKind: String, CaseIterable, Identifiable {
-    case tahoe          // macOS-native: SF Pro + New York serif, system accent, Liquid Glass
-    case cursor         // Cursor-style: Geist, warm paper, clay accent, flat matte chrome
-
-    var id: String { rawValue }
-    var displayName: String { self == .tahoe ? "Native" : "Cursor" }
-}
-
-// MARK: - Geist face resolution
+// MARK: - Bundled face resolution
 //
-// Static TTFs are bundled per weight (Resources/Fonts), each registered under the
-// family "Geist" / "Geist Mono" with a per-weight PostScript name. We reference the
-// exact PostScript name per weight so the right face is always picked (relying on
-// SwiftUI's family-level `.weight()` matching across many registered faces is less
-// reliable than naming the face outright). `relativeTo:` keeps Dynamic Type scaling.
+// We reference each face by its exact PostScript name so the right weight is always
+// picked (SwiftUI's family-level `.weight()` matching across separately registered
+// faces is unreliable). `relativeTo:` keeps Dynamic Type scaling.
 
-enum GeistFont {
+enum BrandFont {
+    /// Hanken Grotesk — UI chrome and the live transcript.
     static func sans(_ size: CGFloat, _ weight: Font.Weight = .regular,
                      relativeTo style: Font.TextStyle = .body) -> Font {
         .custom(sansPostScript(weight), size: size, relativeTo: style)
     }
+    /// KF Libron — long-form prose (summaries, rendered notes, the notes editor).
+    static func serif(_ size: CGFloat, _ weight: Font.Weight = .regular,
+                      relativeTo style: Font.TextStyle = .body) -> Font {
+        let bold = [.semibold, .bold, .heavy, .black].contains(weight)
+        return .custom(bold ? "KF_Libron-Bold" : "KF_Libron", size: size, relativeTo: style)
+    }
+    /// Geist Mono — timestamps, paths, model ids.
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular,
                      relativeTo style: Font.TextStyle = .body) -> Font {
-        .custom(monoPostScript(weight), size: size, relativeTo: style)
+        .custom("GeistMono-" + monoSuffix(weight), size: size, relativeTo: style)
     }
 
-    // Font.Weight numeric → Geist face. (ultraLight 100 … black 900.)
-    private static func sansPostScript(_ w: Font.Weight) -> String { "Geist-" + suffix(w) }
-    private static func monoPostScript(_ w: Font.Weight) -> String { "GeistMono-" + suffix(w) }
+    /// Family names for APIs that take a family rather than a face (MarkdownUI).
+    static let serifFamily = "KF Libron"
+    static let monoFamily = "Geist Mono"
 
-    private static func suffix(_ w: Font.Weight) -> String {
+    /// AppKit face for NSView-backed text (the live transcript table).
+    static func nsSans(_ size: CGFloat, _ weight: Font.Weight = .regular) -> NSFont {
+        NSFont(name: sansPostScript(weight), size: size) ?? .systemFont(ofSize: size)
+    }
+
+    // Only Regular / Medium / SemiBold are bundled; heavier requests take SemiBold.
+    private static func sansPostScript(_ w: Font.Weight) -> String {
         switch w {
-        case .ultraLight: return "Thin"        // 100
-        case .thin:       return "ExtraLight"  // 200
-        case .light:      return "Light"       // 300
-        case .regular:    return "Regular"     // 400
-        case .medium:     return "Medium"      // 500
-        case .semibold:   return "SemiBold"    // 600
-        case .bold:       return "Bold"        // 700
-        case .heavy:      return "ExtraBold"   // 800
-        case .black:      return "Black"       // 900
+        case .medium: return "HankenGrotesk-Medium"
+        case .semibold, .bold, .heavy, .black: return "HankenGrotesk-SemiBold"
+        default: return "HankenGrotesk-Regular"
+        }
+    }
+
+    private static func monoSuffix(_ w: Font.Weight) -> String {
+        switch w {
+        case .ultraLight: return "Thin"
+        case .thin:       return "ExtraLight"
+        case .light:      return "Light"
+        case .medium:     return "Medium"
+        case .semibold:   return "SemiBold"
+        case .bold:       return "Bold"
+        case .heavy:      return "ExtraBold"
+        case .black:      return "Black"
         default:          return "Regular"
         }
     }
 }
 
 // MARK: - ThemeTokens
-//
-// The values that differ between looks. Roles mirror `Theme.Typography` / the color
-// surface vocabulary 1:1 so the computed accessors are a straight delegation.
 
 struct ThemeTokens {
     // Color — chrome
-    let accent: Color           // primary action / selection tint
+    let accent: Color           // clay: Record / Generate, links, small highlights
     let accentText: Color       // text/icon on top of `accent`
-    let windowBg: Color         // window base layer
-    let panelBg: Color          // grouped-content / field surface
-    let sidebarBg: Color        // navigation chrome
+    let windowBg: Color         // main canvas
+    let panelBg: Color          // fields, cards, the composer bar
+    let sidebarBg: Color        // left sidebar
     let divider: Color          // hairline separators
-    // Color — text hierarchy (for components that route through tokens; bare
-    // SwiftUI `.primary`/`.secondary` in views stay system-semantic in both looks)
+    let selection: Color        // neutral selected-row wash
+    let ink: Color              // primary button fill
+    let inkText: Color          // text on `ink`
+    // Color — text hierarchy
     let textPrimary: Color
     let textSecondary: Color
     let textTertiary: Color
@@ -95,99 +101,36 @@ struct ThemeTokens {
     let caption: Font
     let captionSecondary: Font
     let reading: Font
+    let prose: Font
     let mono: Font
     let monoLarge: Font
 
-    // MARK: Native (Tahoe) — exactly today's values (SF Pro + New York serif, system colors)
-    static let tahoe = ThemeTokens(
-        accent: .accentColor,
+    static let brand = ThemeTokens(
+        accent: Color("BrandAccent"),
         accentText: .white,
-        windowBg: Color(nsColor: .windowBackgroundColor),
-        panelBg: Color(nsColor: .controlBackgroundColor),
-        sidebarBg: Color(nsColor: .windowBackgroundColor),
-        divider: Color(nsColor: .separatorColor),
-        textPrimary: .primary,
-        textSecondary: .secondary,
-        textTertiary: Color(nsColor: .tertiaryLabelColor),
+        windowBg: Color("BrandWindowBg"),
+        panelBg: Color("BrandPanelBg"),
+        sidebarBg: Color("BrandSidebarBg"),
+        divider: Color("BrandDivider"),
+        selection: Color("BrandSelection"),
+        ink: Color("BrandInk"),
+        inkText: Color("BrandInkText"),
+        textPrimary: Color("BrandTextPrimary"),
+        textSecondary: Color("BrandTextSecondary"),
+        textTertiary: Color("BrandTextTertiary"),
 
-        screenTitle: .title.weight(.semibold),
-        sheetTitle: .title2.weight(.semibold),
-        sectionHeader: .title3.weight(.semibold),
-        body: .body,
-        fieldLabel: .body,
-        controlLabel: .body.weight(.medium),
-        secondary: .callout,
-        caption: .callout,
-        captionSecondary: .subheadline,
-        reading: .system(.title3, design: .serif),
-        mono: .system(.callout, design: .monospaced),
-        monoLarge: .system(.title2, design: .monospaced)
+        screenTitle: BrandFont.sans(22, .semibold, relativeTo: .title),
+        sheetTitle: BrandFont.sans(18, .semibold, relativeTo: .title2),
+        sectionHeader: BrandFont.sans(15, .semibold, relativeTo: .title3),
+        body: BrandFont.sans(14, .regular, relativeTo: .body),
+        fieldLabel: BrandFont.sans(14, .regular, relativeTo: .body),
+        controlLabel: BrandFont.sans(14, .medium, relativeTo: .body),
+        secondary: BrandFont.sans(13, .regular, relativeTo: .callout),
+        caption: BrandFont.sans(13, .regular, relativeTo: .callout),
+        captionSecondary: BrandFont.sans(12, .regular, relativeTo: .subheadline),
+        reading: BrandFont.sans(15, .regular, relativeTo: .title3),
+        prose: BrandFont.serif(16, .regular, relativeTo: .title3),
+        mono: BrandFont.mono(12, .regular, relativeTo: .callout),
+        monoLarge: BrandFont.mono(18, .medium, relativeTo: .title2)
     )
-
-    // MARK: Cursor — Geist throughout, warm paper + clay (colors are Asset sets, Step 4).
-    // Titles are Bold (per the Cursor reference); hierarchy carried by weight, one family.
-    static let cursor = ThemeTokens(
-        accent: Color("CursorAccent"),
-        accentText: .white,
-        windowBg: Color("CursorWindowBg"),
-        panelBg: Color("CursorPanelBg"),
-        sidebarBg: Color("CursorSidebarBg"),
-        divider: Color("CursorDivider"),
-        textPrimary: Color("CursorTextPrimary"),
-        textSecondary: Color("CursorTextSecondary"),
-        textTertiary: Color("CursorTextTertiary"),
-
-        // Sizes nudged up a notch for legibility on large/4K displays (was 22/17/15/
-        // 13/13/13/12/12/11/15/12/17). Easy to retune from here.
-        screenTitle: GeistFont.sans(25, .bold, relativeTo: .title),
-        sheetTitle: GeistFont.sans(19, .semibold, relativeTo: .title2),
-        sectionHeader: GeistFont.sans(16, .semibold, relativeTo: .title3),
-        body: GeistFont.sans(14, .regular, relativeTo: .body),
-        fieldLabel: GeistFont.sans(14, .regular, relativeTo: .body),
-        controlLabel: GeistFont.sans(14, .medium, relativeTo: .body),
-        secondary: GeistFont.sans(13, .regular, relativeTo: .callout),
-        caption: GeistFont.sans(13, .regular, relativeTo: .callout),
-        captionSecondary: GeistFont.sans(12, .regular, relativeTo: .subheadline),
-        reading: GeistFont.sans(16, .regular, relativeTo: .title3),
-        mono: GeistFont.mono(13, .regular, relativeTo: .callout),
-        monoLarge: GeistFont.mono(19, .medium, relativeTo: .title2)
-    )
-
-    static func set(for kind: ThemeKind) -> ThemeTokens {
-        kind == .cursor ? .cursor : .tahoe
-    }
-}
-
-// MARK: - ThemeStore
-//
-// Single source of truth for the active look. `Theme.Palette` / `Theme.Typography`
-// read `shared.tokens`; the button/surface helpers read `shared.kind`. Flipping
-// `kind` reskins the whole app live (Observation re-renders the readers).
-
-@MainActor @Observable
-final class ThemeStore {
-    static let shared = ThemeStore()
-
-    /// Persisted in the presentation layer (UserDefaults), deliberately *not* in
-    /// `AppSettings` — the look is a pure UI preference and `Settings/` is a
-    /// protected path per the design-polish brief.
-    private static let defaultsKey = "selectedThemeKind"
-
-    private(set) var kind: ThemeKind
-    private(set) var tokens: ThemeTokens
-
-    private init() {
-        let saved = UserDefaults.standard.string(forKey: Self.defaultsKey)
-            .flatMap(ThemeKind.init(rawValue:)) ?? .tahoe
-        kind = saved
-        tokens = .set(for: saved)
-    }
-
-    /// Flip the active look and persist it. Call on the main thread (it's a UI
-    /// mutation); reskins every view reading a token via Observation.
-    func select(_ kind: ThemeKind) {
-        self.kind = kind
-        self.tokens = .set(for: kind)
-        UserDefaults.standard.set(kind.rawValue, forKey: Self.defaultsKey)
-    }
 }

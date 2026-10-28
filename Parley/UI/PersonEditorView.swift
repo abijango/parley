@@ -215,12 +215,12 @@ struct PersonEditorView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             editorRow(label: "Name") {
                 TextField("Full name", text: $draftName)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
 
             editorRow(label: "Title") {
                 TextField("Job title", text: $draftTitle)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
 
             editorRow(label: "Company") {
@@ -240,7 +240,7 @@ struct PersonEditorView: View {
 
             editorRow(label: "LinkedIn") {
                 TextField("https://linkedin.com/in/...", text: $draftLinkedin)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
 
             originSection
@@ -275,7 +275,7 @@ struct PersonEditorView: View {
 
             editorRow(label: "Note") {
                 TextField("How you know them", text: $draftOriginNote)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
         }
     }
@@ -329,11 +329,11 @@ struct PersonEditorView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.small) {
             editorRow(label: "Title") {
                 TextField("Past title", text: $prevRoleTitle)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
             editorRow(label: "Company") {
                 TextField("Past company", text: $prevRoleCompany)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
             editorRow(label: "Side") {
                 Picker("Side", selection: $prevRoleSide) {
@@ -380,7 +380,7 @@ struct PersonEditorView: View {
             TextField("Company name", text: $draftCompany, onEditingChanged: { editing in
                 showCompletions = editing && !companyCompletions.isEmpty
             })
-            .textFieldStyle(.roundedBorder)
+            .textFieldStyle(.parley)
             .onChange(of: draftCompany) {
                 showCompletions = !companyCompletions.isEmpty
                     && !draftCompany.trimmingCharacters(in: .whitespaces).isEmpty

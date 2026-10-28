@@ -46,7 +46,7 @@ struct NewPersonSheet: View {
                     TextField("https://www.linkedin.com/in/…", text: $linkedin)
                 }
             }
-            .textFieldStyle(.roundedBorder)
+            .textFieldStyle(.parley)
 
             Text("Saved to the rolodex" + (company.isEmpty ? "." : " under “\(company)”."))
                 .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)

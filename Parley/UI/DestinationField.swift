@@ -17,7 +17,7 @@ struct DestinationField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
             TextField("Filing location — type to filter, or a new path", text: $text)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.parley)
                 .focused($focused)
                 .onChange(of: text) { editing = true; highlighted = 0 }
                 .onChange(of: focused) { if !focused { commit() } }

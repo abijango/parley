@@ -99,7 +99,7 @@ struct AttendeeEnrichmentSheet: View {
                               text: linkedinBinding(index: i))
                 }
             }
-            .textFieldStyle(.roundedBorder)
+            .textFieldStyle(.parley)
         }
         .padding(.vertical, Theme.Spacing.xxSmall)
     }

@@ -8,10 +8,8 @@ import SwiftUI
 /// **not** yet adopting it (that's Phase 2+). The system compiles and is exercised
 /// in isolation by the `#Preview` gallery in `DesignSystemGallery.swift`.
 ///
-/// Target note: the app targets macOS 26+ (Tahoe). Liquid-Glass APIs are used
-/// directly in `Surfaces.swift` / `ButtonStyles.swift` — no availability guards.
-/// (Glass auto-falls-back to opaque under the *Reduce Transparency* accessibility
-/// setting, so the UI stays legible without manual handling.)
+/// Look: one flat, warm "paper and ink" style modeled on the Claude desktop app —
+/// opaque surfaces with hairline borders rather than materials / Liquid Glass.
 enum Theme {
 
     // MARK: Spacing
@@ -43,12 +41,12 @@ enum Theme {
     // surfaces via `Theme.Radius.rect(_:)` so the style is consistent.
 
     enum Radius {
-        /// 6pt — chips, compact controls.
-        static let small: CGFloat = 6
-        /// 10pt — cards, banners, list surfaces.
-        static let medium: CGFloat = 10
-        /// 16pt — sheets, large floating panels.
-        static let large: CGFloat = 16
+        /// 8pt — buttons, text fields, sidebar rows, chips.
+        static let small: CGFloat = 8
+        /// 12pt — cards, banners, list surfaces.
+        static let medium: CGFloat = 12
+        /// 18pt — the composer bar, sheets, large floating panels.
+        static let large: CGFloat = 18
 
         /// A continuous-corner rounded rectangle at the given radius.
         static func rect(_ radius: CGFloat) -> RoundedRectangle {
@@ -97,7 +95,7 @@ enum Theme {
         static let tintSubtle: Double = 0.10
         /// Chips / tinted capsules / badges.
         static let tintFill: Double = 0.15
-        /// Selected-row background (accent wash).
+        /// Accent wash strength where a tinted selection is still wanted (chips).
         static let selection: Double = 0.18
         /// Quaternary card / grouped-content backgrounds.
         static let surface: Double = 0.35
@@ -105,23 +103,23 @@ enum Theme {
 
     // MARK: Color
     //
-    // Now **look-dependent**: values come from the active `ThemeTokens` (see
-    // `ThemeTokens.swift`) via the `ThemeStore`. The Native (Tahoe) look keeps the
-    // original stance — system accent + system semantic colors, no hardcoded hex. The
-    // Cursor look swaps in a warm-paper palette + clay accent (Asset color sets).
-    // These are computed (not `static let`) so flipping the store reskins live; the
-    // read is tracked by Observation when it happens inside a view's `body`.
+    // One look (see `ThemeTokens.swift`): warm paper canvas, darker sidebar, neutral
+    // selection wash, ink for the primary action, clay accent for Record / Generate.
+    // Values are `Brand*` Asset color sets, so light/dark come from one place.
 
-    @MainActor enum Palette {
-        static var accent: Color      { ThemeStore.shared.tokens.accent }
-        static var accentText: Color  { ThemeStore.shared.tokens.accentText }
-        static var windowBg: Color    { ThemeStore.shared.tokens.windowBg }
-        static var panelBg: Color     { ThemeStore.shared.tokens.panelBg }
-        static var sidebarBg: Color   { ThemeStore.shared.tokens.sidebarBg }
-        static var divider: Color     { ThemeStore.shared.tokens.divider }
-        static var textPrimary: Color   { ThemeStore.shared.tokens.textPrimary }
-        static var textSecondary: Color { ThemeStore.shared.tokens.textSecondary }
-        static var textTertiary: Color  { ThemeStore.shared.tokens.textTertiary }
+    enum Palette {
+        static var accent: Color        { ThemeTokens.brand.accent }
+        static var accentText: Color    { ThemeTokens.brand.accentText }
+        static var windowBg: Color      { ThemeTokens.brand.windowBg }
+        static var panelBg: Color       { ThemeTokens.brand.panelBg }
+        static var sidebarBg: Color     { ThemeTokens.brand.sidebarBg }
+        static var divider: Color       { ThemeTokens.brand.divider }
+        static var selection: Color     { ThemeTokens.brand.selection }
+        static var ink: Color           { ThemeTokens.brand.ink }
+        static var inkText: Color       { ThemeTokens.brand.inkText }
+        static var textPrimary: Color   { ThemeTokens.brand.textPrimary }
+        static var textSecondary: Color { ThemeTokens.brand.textSecondary }
+        static var textTertiary: Color  { ThemeTokens.brand.textTertiary }
     }
 
     // MARK: Severity
@@ -136,7 +134,7 @@ enum Theme {
 
         @MainActor var color: Color {
             switch self {
-            case .info:    return Theme.Palette.accent
+            case .info:    return .blue
             case .success: return .green
             case .warning: return .orange
             case .danger:  return .red
@@ -156,43 +154,35 @@ enum Theme {
 
     // MARK: Typography
     //
-    // Role → font mapping. SwiftUI's semantic fonts already scale with Dynamic Type;
-    // pinning the role here stops the drift the audit found (sheet titles split
-    // between `.title3.weight(.semibold)` and `.headline`; section headers between
-    // `.headline` and `.subheadline.weight(.semibold)`).
-
-    // Scale: "Comfortable" — every role sits a step or two above SwiftUI's tiny
-    // defaults so labels/captions read easily (the audit's "text too small"). Chrome
-    // is SF Pro (the system font); reading text is New York (serif) for long-form
-    // transcript/note reading — a deliberate content/chrome split.
-    // Now **look-dependent** (computed from the active `ThemeTokens`). Native (Tahoe)
-    // keeps SF Pro chrome + New York serif reading; Cursor swaps the whole scale to
-    // Geist (one family, weight-driven hierarchy). Sizes/roles are unchanged across
-    // looks — only the typeface differs — so layout stays stable when switching.
-    @MainActor enum Typography {
+    // Role → font mapping. Chrome and the live transcript are Hanken Grotesk; long-form
+    // prose (summaries, rendered notes, My notes) is KF Libron; numerics/paths are Geist
+    // Mono. Fonts use `relativeTo:` so they still scale with Dynamic Type.
+    enum Typography {
         /// Top-of-window / primary screen title.
-        static var screenTitle: Font { ThemeStore.shared.tokens.screenTitle }       // ~22
+        static var screenTitle: Font { ThemeTokens.brand.screenTitle }           // 22
         /// Sheet & dialog titles.
-        static var sheetTitle: Font { ThemeStore.shared.tokens.sheetTitle }         // ~17
+        static var sheetTitle: Font { ThemeTokens.brand.sheetTitle }             // 18
         /// In-pane section headers.
-        static var sectionHeader: Font { ThemeStore.shared.tokens.sectionHeader }   // ~15
+        static var sectionHeader: Font { ThemeTokens.brand.sectionHeader }       // 15
         /// Default body / primary UI text.
-        static var body: Font { ThemeStore.shared.tokens.body }                     // ~13
+        static var body: Font { ThemeTokens.brand.body }                         // 14
         /// Form-field labels (Title, Filing, …).
-        static var fieldLabel: Font { ThemeStore.shared.tokens.fieldLabel }         // ~13
+        static var fieldLabel: Font { ThemeTokens.brand.fieldLabel }             // 14
         /// Inline control / disclosure-group labels.
-        static var controlLabel: Font { ThemeStore.shared.tokens.controlLabel }     // ~13 medium
+        static var controlLabel: Font { ThemeTokens.brand.controlLabel }         // 14 medium
         /// Secondary controls / labels.
-        static var secondary: Font { ThemeStore.shared.tokens.secondary }           // ~12
+        static var secondary: Font { ThemeTokens.brand.secondary }               // 13
         /// Captions / helper text.
-        static var caption: Font { ThemeStore.shared.tokens.caption }               // ~12
+        static var caption: Font { ThemeTokens.brand.caption }                   // 13
         /// De-emphasized fine print.
-        static var captionSecondary: Font { ThemeStore.shared.tokens.captionSecondary } // ~11
-        /// Reading text — transcript lines & rendered notes (NY serif / Geist sans).
-        static var reading: Font { ThemeStore.shared.tokens.reading }               // ~15
+        static var captionSecondary: Font { ThemeTokens.brand.captionSecondary } // 12
+        /// Transcript lines (sans — dense, timestamped, reads like UI text).
+        static var reading: Font { ThemeTokens.brand.reading }                   // 15
+        /// Long-form prose: summaries, rendered notes, the notes editor (serif).
+        static var prose: Font { ThemeTokens.brand.prose }                       // 16
         /// Timestamps, file paths, code, model ids.
-        static var mono: Font { ThemeStore.shared.tokens.mono }                     // ~12
+        static var mono: Font { ThemeTokens.brand.mono }                         // 12
         /// Prominent monospaced numerics (elapsed timers, large counts).
-        static var monoLarge: Font { ThemeStore.shared.tokens.monoLarge }           // ~17
+        static var monoLarge: Font { ThemeTokens.brand.monoLarge }               // 18
     }
 }

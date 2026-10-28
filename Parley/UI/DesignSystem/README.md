@@ -16,18 +16,24 @@ pattern, add it here first, then adopt it.
 |---|---|
 | `Theme.swift` | All tokens: `Spacing`, `Radius`, `Motion`, `Shadow`, `Opacity`, `Palette`, `Severity`, `Typography`. |
 | `Surfaces.swift` | `.cardSurface()`, `.chromeSurface()`, `.glassSurface()`, `.elevation(_:)`. |
-| `ButtonStyles.swift` | `.glassButton()` / `.glassProminentButton()` adoption helpers; `RowButtonStyle` (`.buttonStyle(.row(selected:))`). |
+| `ThemeTokens.swift` | `BrandFont` (bundled faces) and the single `ThemeTokens.brand` value set behind `Palette` / `Typography`. |
+| `ButtonStyles.swift` | `.glassButton()` (secondary) / `.glassProminentButton()` (ink primary) / `.clayButton()` (Record, Generate); `RowButtonStyle` (`.buttonStyle(.row(selected:))`); `.textFieldStyle(.parley)`. |
 | `Components.swift` | `StatusBanner`, `StatusBadge`, `SectionHeader`. |
 | `DesignSystemGallery.swift` | `#if DEBUG` preview gallery exercising everything (light + dark). |
 
-## Liquid Glass & the deployment target
+## The look
 
-The app targets **macOS 26+ (Tahoe)** only. Liquid-Glass APIs (`.glass`,
-`.glassProminent`, `glassEffect`) are used directly — no availability guards or
-material fallbacks. Glass automatically degrades to an opaque appearance under the
-*Reduce Transparency* accessibility setting, so "legible without glass" holds for
-free. Adopt glass through the helpers here (`.glassButton()`, `.glassSurface()`) so
-there's one point of control.
+One look, modeled on the Claude desktop app: flat, opaque "paper and ink" surfaces
+with 0.5pt hairlines — no materials or Liquid Glass. Colors are `Brand*` Asset color
+sets (light + dark). Clay (`Palette.accent`) is reserved for Record / Generate; the
+primary button is solid ink; selection is a neutral wash.
+
+Type (all OFL, bundled in `Resources/Fonts`, see `ThemeTokens.swift` → `BrandFont`):
+Hanken Grotesk for chrome and the live transcript, KF Libron (serif) for prose
+(`Typography.prose` — summaries, rendered notes, My notes), Geist Mono for numerics.
+
+Shapes: buttons, fields, and rows use 8pt continuous corners (~28pt tall); cards
+12pt; the composer / floating panels 18pt.
 
 ## Quick reference
 
@@ -42,6 +48,8 @@ withAnimation(Theme.Motion.spring) { … }
 // Buttons
 Button("Save") {}.glassProminentButton()        // primary
 Button("Cancel") {}.glassButton()               // secondary
+Button("Record") {}.clayButton()                // capture / AI actions only
+TextField("Title", text: $t).textFieldStyle(.parley)
 Button { … } label: { … }.buttonStyle(.row(selected: isSelected))   // sidebar/list row
 
 // Status
@@ -50,5 +58,5 @@ StatusBadge("Review", severity: .info)
 
 // Surfaces
 someContent.cardSurface()
-floatingCluster.glassSurface()                   // Liquid Glass floating surface
+floatingCluster.glassSurface()                   // floating panel: fill + hairline + lift
 ```

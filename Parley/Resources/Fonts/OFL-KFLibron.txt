@@ -1,0 +1,8 @@
+Newsreader (c) 2020 The Newsreader Project Authors (http://github.com/productiontype/Newsreader)
+Readerly (c) 2026 Nico Verbruggen (https://github.com/nicoverbruggen/readerly)
+Libron (c) 2026 Nico Verbruggen (https://github.com/nicoverbruggen/libron)
+
+Libron is a modified version of Readerly with reduced serifs.
+
+KF Libron is licensed under the SIL Open Font License, Version 1.1.
+Full licence text: see OFL-HankenGrotesk.txt (identical OFL 1.1 terms) or https://openfontlicense.org

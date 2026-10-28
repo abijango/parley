@@ -198,7 +198,7 @@ struct SummaryCompareView: View {
             HStack(spacing: Theme.Spacing.small) {
                 Text("File to:").font(Theme.Typography.caption).foregroundStyle(.secondary)
                 TextField("destination", text: $approveDestination)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
                     .font(Theme.Typography.mono)
             }
         }

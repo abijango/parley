@@ -95,7 +95,7 @@ struct TranscriptSpeakerNamer: View {
 
             Text("Other name").font(Theme.Typography.caption).foregroundStyle(.secondary)
             TextField("Type a name", text: $draft)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.parley)
                 .frame(maxWidth: .infinity)
                 .onSubmit { save() }
 

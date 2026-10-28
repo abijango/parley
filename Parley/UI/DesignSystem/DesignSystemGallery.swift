@@ -6,20 +6,9 @@ import SwiftUI
 /// without touching any real screen. Wrapped in `#if DEBUG`; never built into
 /// Release.
 private struct DesignSystemGallery: View {
-    @State private var kind: ThemeKind = ThemeStore.shared.kind
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.xLarge) {
-
-                // Live look switch. Flipping calls ThemeStore.select(...) — the body
-                // below reads Theme.* tokens, so the whole gallery reskins via
-                // Observation (the real-app proof of the Step 1 spike).
-                Picker("Look", selection: $kind) {
-                    ForEach(ThemeKind.allCases) { Text($0.displayName).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: kind) { _, newKind in ThemeStore.shared.select(newKind) }
 
                 section("Type roles") {
                     Text("Screen title").font(Theme.Typography.screenTitle)
@@ -29,7 +18,8 @@ private struct DesignSystemGallery: View {
                     Text("Field label").font(Theme.Typography.fieldLabel).foregroundStyle(.secondary)
                     Text("Secondary").font(Theme.Typography.secondary).foregroundStyle(.secondary)
                     Text("Caption").font(Theme.Typography.caption).foregroundStyle(.secondary)
-                    Text("Reading — transcript & notes").font(Theme.Typography.reading)
+                    Text("Reading — transcript lines").font(Theme.Typography.reading)
+                    Text("Prose — summaries and notes").font(Theme.Typography.prose)
                     Text("00:42 · path/to/file").font(Theme.Typography.mono).foregroundStyle(.tertiary)
                 }
 
@@ -37,6 +27,10 @@ private struct DesignSystemGallery: View {
                     HStack(spacing: Theme.Spacing.medium) {
                         Button("Secondary") {}.glassButton()
                         Button("Primary") {}.glassProminentButton()
+                        Button("Record") {}.clayButton()
+                    }
+                    TextField("Meeting title", text: .constant("")).textFieldStyle(.parley)
+                    HStack {
                     }
                     VStack(spacing: Theme.Spacing.xxSmall) {
                         Button { } label: { Label("Record", systemImage: "record.circle") }

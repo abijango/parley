@@ -2,46 +2,35 @@ import SwiftUI
 
 // MARK: - Surface treatments
 //
-// Three layered surfaces. Adopt via the `View` extensions below; views should not
-// hand-roll `.background(...)` for these roles. Each branches on the active look
-// (`ThemeStore.shared.kind`):
-//   • Native (Tahoe) → macOS 26 materials / Liquid Glass.
-//   • Cursor          → flat warm panels with hairline borders (no translucency).
+// Three layered surfaces, all flat and opaque (the "paper and ink" look — no
+// materials / Liquid Glass). Adopt via the `View` extensions below; views should not
+// hand-roll `.background(...)` for these roles.
 //
-// Layering model (the brief's "content at base, chrome floats above"):
-//   • cardSurface  — grouped content sitting on the base layer.
-//   • chromeSurface — navigation chrome (sidebar / toolbar / footer) above content.
-//   • glassSurface  — genuinely floating clusters (capsular toolbars, action pods).
+// Layering model (content at base, chrome slightly darker, floating bits lifted):
+//   • cardSurface   — grouped content sitting on the base layer.
+//   • chromeSurface — navigation chrome (sidebar / toolbar / footer).
+//   • glassSurface  — genuinely floating clusters (composer bar, action pods). The
+//                     name is kept so existing call sites don't churn.
 
 extension View {
 
-    /// Grouped-content card: a low-chrome filled surface (settings groups, list
-    /// rows, file chips). Tahoe = quaternary fill; Cursor = flat panel + hairline.
+    /// Grouped-content card: panel fill + hairline (settings groups, list rows, file chips).
     func cardSurface(radius: CGFloat = Theme.Radius.medium) -> some View {
-        modifier(CardSurface(radius: radius))
+        let shape = Theme.Radius.rect(radius)
+        return background(shape.fill(Theme.Palette.panelBg))
+            .overlay(shape.strokeBorder(Theme.Palette.divider, lineWidth: 0.5))
     }
 
-    /// Navigation chrome (sidebar, toolbars, footers). Tahoe = `.regularMaterial`;
-    /// Cursor = flat warm sidebar fill. Kept as a distinct role so chrome is
-    /// consistent everywhere.
-    @ViewBuilder func chromeSurface() -> some View {
-        if ThemeStore.shared.kind == .cursor {
-            background(Theme.Palette.sidebarBg)
-        } else {
-            background(.regularMaterial)
-        }
+    /// Navigation chrome (sidebar, toolbars, footers): the warm sidebar fill.
+    func chromeSurface() -> some View {
+        background(Theme.Palette.sidebarBg)
     }
 
-    /// Elements that genuinely float over content (capsular toolbars, action pods).
-    /// Tahoe = Liquid Glass (falls back to opaque under *Reduce Transparency*);
-    /// Cursor = flat panel fill + hairline, clipped to the shape.
-    @ViewBuilder func glassSurface<S: Shape>(in shape: S) -> some View {
-        if ThemeStore.shared.kind == .cursor {
-            background(shape.fill(Theme.Palette.panelBg))
-                .overlay(shape.stroke(Theme.Palette.divider, lineWidth: 1))
-        } else {
-            glassEffect(.regular, in: shape)
-        }
+    /// Elements that float over content: panel fill, hairline, and a soft lift.
+    func glassSurface<S: InsettableShape>(in shape: S) -> some View {
+        background(shape.fill(Theme.Palette.panelBg))
+            .overlay(shape.strokeBorder(Theme.Palette.divider, lineWidth: 0.5))
+            .elevation(.card)
     }
 
     /// Capsule-shaped `glassSurface()` — the common floating-control case.
@@ -52,19 +41,5 @@ extension View {
     /// Apply a design-system shadow.
     func elevation(_ shadow: Theme.Shadow) -> some View {
         self.shadow(color: shadow.color, radius: shadow.radius, x: shadow.x, y: shadow.y)
-    }
-}
-
-private struct CardSurface: ViewModifier {
-    let radius: CGFloat
-    @ViewBuilder func body(content: Content) -> some View {
-        let shape = Theme.Radius.rect(radius)
-        if ThemeStore.shared.kind == .cursor {
-            content
-                .background(shape.fill(Theme.Palette.panelBg))
-                .overlay(shape.strokeBorder(Theme.Palette.divider, lineWidth: 1))
-        } else {
-            content.background(.quaternary.opacity(Theme.Opacity.surface), in: shape)
-        }
     }
 }

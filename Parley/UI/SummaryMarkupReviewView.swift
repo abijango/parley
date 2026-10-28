@@ -321,15 +321,15 @@ struct SummaryMarkupReviewView: View {
                 .fixedSize(horizontal: false, vertical: true)
             LabeledContent("Find") {
                 TextField("Maya", text: $correctFrom)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
             LabeledContent("Replace with") {
                 TextField("Maia", text: $correctTo)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
             LabeledContent("Notes") {
                 TextField("platform name, not a person", text: $correctNotes)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.parley)
             }
             Toggle("Remember for \(customerScope.isEmpty ? "this customer" : customerScope)", isOn: $rememberCorrection)
             HStack {
