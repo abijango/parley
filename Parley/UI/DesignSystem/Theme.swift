@@ -103,8 +103,9 @@ enum Theme {
 
     // MARK: Color
     //
-    // One look (see `ThemeTokens.swift`): warm paper canvas, darker sidebar, neutral
-    // selection wash, ink for the primary action, clay accent for Record / Generate.
+    // One look (see `ThemeTokens.swift`): neutral off-white canvas, light-grey sidebar,
+    // neutral selection wash, ink for the primary action, blue accent for links, red
+    // for Record.
     // Values are `Brand*` Asset color sets, so light/dark come from one place.
 
     enum Palette {
@@ -115,6 +116,7 @@ enum Theme {
         static var sidebarBg: Color     { ThemeTokens.brand.sidebarBg }
         static var divider: Color       { ThemeTokens.brand.divider }
         static var selection: Color     { ThemeTokens.brand.selection }
+        static var record: Color        { ThemeTokens.brand.record }
         static var ink: Color           { ThemeTokens.brand.ink }
         static var inkText: Color       { ThemeTokens.brand.inkText }
         static var textPrimary: Color   { ThemeTokens.brand.textPrimary }

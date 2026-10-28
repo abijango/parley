@@ -107,8 +107,8 @@ struct RecordDetailView: View {
     // Notes panel (right rail) visibility + section disclosure — view-local
     // presentation state, deliberately not in AppSettings.
     @AppStorage(NotesPanel<EmptyView>.visibleKey) private var notesPanelVisible = true
-    @AppStorage("parley.liveNotesExpanded") private var liveNotesExpanded = true
-    @AppStorage("parley.meetingDetailsExpanded") private var meetingDetailsExpanded = false
+    @AppStorage("parley.liveDetailsExpanded") private var meetingDetailsExpanded = true
+    @AppStorage("parley.liveNotesSectionExpanded") private var liveNotesExpanded = false
     @AppStorage("parley.liveSummaryExpanded") private var liveSummaryExpanded = false
 
     /// Pre-first-recording: no live segments yet and not actively recording.
@@ -350,18 +350,20 @@ struct RecordDetailView: View {
 
     // MARK: Notes panel
 
-    /// The right-hand notes panel: My notes (fills the rail), meeting details, and the
-    /// summary placeholder. Start/Stop and audio sources live in the composer.
+    /// The right-hand notes panel: Details (title, filing, attendees) on top, then
+    /// Notes (attachments + the notes editor, collapsed by default; fills the rail when
+    /// open), then the summary placeholder. Start/Stop and audio sources live in the
+    /// composer.
     private var inspector: some View {
         NotesPanel {
-            NotesPanelSection("My notes", symbol: "square.and.pencil",
-                              isExpanded: $liveNotesExpanded, fills: true) {
-                notesField
-            }
             NotesPanelSection("Details", symbol: "doc.text", isExpanded: $meetingDetailsExpanded) {
+                metadataFields   // editable during recording too (e.g. a mid-call joiner)
+            }
+            NotesPanelSection("Notes", symbol: "square.and.pencil",
+                              isExpanded: $liveNotesExpanded, fills: true) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
-                    metadataFields   // editable during recording too (e.g. a mid-call joiner)
                     liveAttachmentsField
+                    notesField
                 }
             }
             NotesPanelSection("Summary", symbol: "sparkles", isExpanded: $liveSummaryExpanded) {
@@ -380,9 +382,9 @@ struct RecordDetailView: View {
             Image(systemName: settings.batchMode ? "waveform" : "text.bubble")
                 .font(.system(size: 30, weight: .medium))
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(Theme.Palette.accent)
+                .foregroundStyle(Theme.Palette.textSecondary)
                 .frame(width: 76, height: 76)
-                .background(Theme.Palette.accent.opacity(Theme.Opacity.tintFill), in: Circle())
+                .background(Theme.Palette.selection, in: Circle())
 
             VStack(spacing: Theme.Spacing.xSmall) {
                 Text(settings.batchMode ? "Batch mode" : "Ready to record")
@@ -494,15 +496,15 @@ struct RecordDetailView: View {
                   systemImage: recording.isRecording ? "stop.fill" : "record.circle")
                 .frame(maxWidth: .infinity)
         }
-        .buttonStyle(InkButtonStyle(role: recording.isRecording ? .primary : .clay))
+        .buttonStyle(InkButtonStyle(role: recording.isRecording ? .primary : .record))
         .disabled(live.state == .preparing || live.state == .stopping)
+        .help(recording.isRecording
+              ? "Stop recording (\(RecordingCommands.shortcutLabel))"
+              : "Start recording (\(RecordingCommands.shortcutLabel))")
     }
 
     private func toggleRecording() {
-        Task {
-            if recording.isRecording { recording.stop() }
-            else { await recording.start() }
-        }
+        RecordingCommands.toggle(recording)
     }
 
     /// Live elapsed timer, ticking once a second while recording.

@@ -17,17 +17,18 @@ pattern, add it here first, then adopt it.
 | `Theme.swift` | All tokens: `Spacing`, `Radius`, `Motion`, `Shadow`, `Opacity`, `Palette`, `Severity`, `Typography`. |
 | `Surfaces.swift` | `.cardSurface()`, `.chromeSurface()`, `.glassSurface()`, `.elevation(_:)`. |
 | `ThemeTokens.swift` | `BrandFont` (bundled faces) and the single `ThemeTokens.brand` value set behind `Palette` / `Typography`. |
-| `ButtonStyles.swift` | `.glassButton()` (secondary) / `.glassProminentButton()` (ink primary) / `.clayButton()` (Record, Generate); `RowButtonStyle` (`.buttonStyle(.row(selected:))`); `.textFieldStyle(.parley)`. |
+| `ButtonStyles.swift` | `.glassButton()` (secondary) / `.glassProminentButton()` (ink primary) / `InkButtonStyle(role: .record)` (Start recording only); `RowButtonStyle` (`.buttonStyle(.row(selected:))`); `.textFieldStyle(.parley)`. |
 | `PillPicker.swift` | The segmented control: inset track + sliding white pill (`PillPicker(selection:options:)`). |
 | `Components.swift` | `StatusBanner`, `StatusBadge`, `SectionHeader`. |
 | `DesignSystemGallery.swift` | `#if DEBUG` preview gallery exercising everything (light + dark). |
 
 ## The look
 
-One look, modeled on the Claude desktop app: flat, opaque "paper and ink" surfaces
-with 0.5pt hairlines — no materials or Liquid Glass. Colors are `Brand*` Asset color
-sets (light + dark). Clay (`Palette.accent`) is reserved for Record / Generate; the
-primary button is solid ink; selection is a neutral wash.
+One look, modeled on the Claude desktop app: flat, opaque surfaces with 0.5pt hairlines
+— no materials or Liquid Glass. Neutral off-white canvas, light-grey sidebar, white
+fields and panels. Colors are `Brand*` Asset color sets (light + dark). Blue
+(`Palette.accent`) is for links and active filters; red (`Palette.record`) only for the
+Start recording button; the primary button is solid ink; selection is a neutral wash.
 
 Type (all OFL, bundled in `Resources/Fonts`, see `ThemeTokens.swift` → `BrandFont`):
 Hanken Grotesk everywhere — chrome, the live transcript, and prose (`Typography.prose`
@@ -50,7 +51,7 @@ withAnimation(Theme.Motion.spring) { … }
 // Buttons
 Button("Save") {}.glassProminentButton()        // primary
 Button("Cancel") {}.glassButton()               // secondary
-Button("Record") {}.clayButton()                // capture / AI actions only
+Button("Record") {}.buttonStyle(InkButtonStyle(role: .record))   // Start recording only
 TextField("Title", text: $t).textFieldStyle(.parley)
 Button { … } label: { … }.buttonStyle(.row(selected: isSelected))   // sidebar/list row
 

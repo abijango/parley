@@ -149,7 +149,10 @@ struct HistoryView: View {
             if !sidebarCollapsed {
                 shellSidebar
                     .transition(.move(edge: .leading))
+                // Run the hairline up under the toolbar, like the sidebar fill does, so
+                // the column edge doesn't break at the top of the window.
                 Divider()
+                    .ignoresSafeArea(.container, edges: .top)
             }
             shellCenter
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -164,6 +167,7 @@ struct HistoryView: View {
         }
         .onChange(of: recording.historyFocusPath) { applyHistoryFocus() }
         .onReceive(offline.$jobs) { _ in offlineJobsRevision &+= 1 }
+        .onReceive(NotificationCenter.default.publisher(for: .parleyShowLiveScreen)) { _ in showLive() }
         .onChange(of: searchQuery) { updateContentSearch() }
         .onChange(of: searchInContents) { updateContentSearch() }
         .onChange(of: selection) {

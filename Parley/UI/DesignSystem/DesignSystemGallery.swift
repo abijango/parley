@@ -27,7 +27,7 @@ private struct DesignSystemGallery: View {
                     HStack(spacing: Theme.Spacing.medium) {
                         Button("Secondary") {}.glassButton()
                         Button("Primary") {}.glassProminentButton()
-                        Button("Record") {}.clayButton()
+                        Button("Record") {}.buttonStyle(InkButtonStyle(role: .record))
                     }
                     TextField("Meeting title", text: .constant("")).textFieldStyle(.parley)
                     HStack {

@@ -6,7 +6,7 @@ import SwiftUI
 //   • `glassButton()`          — secondary: panel fill + hairline.
 //   • `glassProminentButton()` — primary: solid ink (near-black / near-white in dark).
 //                                One per view.
-//   • `clayButton()`           — Record / Generate only: the clay accent.
+//   • `InkButtonStyle(role: .record)` — the Start recording button only: red.
 // All share one shape (8pt continuous corners, ~28pt tall at regular size), matching
 // the Claude desktop app. The "glass" names are historical; nothing is translucent.
 
@@ -21,17 +21,12 @@ extension View {
     func glassProminentButton() -> some View {
         buttonStyle(InkButtonStyle(role: .primary))
     }
-
-    /// Record / Generate: the clay accent, reserved for capture and AI actions.
-    func clayButton() -> some View {
-        buttonStyle(InkButtonStyle(role: .clay))
-    }
 }
 
 /// The app's push button. Flat and opaque; interaction darkens the fill a few percent.
 /// `controlSize`-aware so `.controlSize(.small)` call sites stay correctly sized.
 struct InkButtonStyle: ButtonStyle {
-    enum Role { case primary, secondary, clay }
+    enum Role { case primary, secondary, record }
     var role: Role = .secondary
 
     func makeBody(configuration: Configuration) -> some View {
@@ -57,8 +52,8 @@ struct InkButtonStyle: ButtonStyle {
                     switch role {
                     case .primary:
                         shape.fill(Theme.Palette.ink).opacity(configuration.isPressed ? 0.82 : (hovering ? 0.9 : 1))
-                    case .clay:
-                        shape.fill(Theme.Palette.accent)
+                    case .record:
+                        shape.fill(Theme.Palette.record)
                             .brightness(configuration.isPressed ? -0.06 : (hovering ? -0.03 : 0))
                     case .secondary:
                         shape.fill(Theme.Palette.panelBg)
@@ -76,7 +71,7 @@ struct InkButtonStyle: ButtonStyle {
         private var foreground: Color {
             switch role {
             case .primary: return Theme.Palette.inkText
-            case .clay: return Theme.Palette.accentText
+            case .record: return .white
             case .secondary: return Theme.Palette.textPrimary
             }
         }

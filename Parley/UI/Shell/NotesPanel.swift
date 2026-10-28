@@ -37,6 +37,7 @@ struct NotesPanel<Content: View>: View {
     /// the width within range. Dragging left widens the panel; double-click resets.
     private var resizeDivider: some View {
         Divider()
+            .ignoresSafeArea(.container, edges: .top)   // continue under the toolbar
             .overlay {
                 Color.clear
                     .frame(width: 8)

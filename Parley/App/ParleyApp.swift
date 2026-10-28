@@ -23,6 +23,9 @@ struct ParleyApp: App {
         // toggle living in the toolbar — the Cursor/Finder idiom: one thin top bar with
         // the traffic lights, columns beneath.
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        .commands {
+            CommandMenu("Recording") { RecordingCommands() }
+        }
 
         // Menu-bar companion: quick controls + status without opening the window.
         MenuBarExtra {

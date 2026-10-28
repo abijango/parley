@@ -1,11 +1,12 @@
 import SwiftUI
 import AppKit
 
-// MARK: - The one look: warm paper, ink, and clay
+// MARK: - The one look: off-white, ink, and a little color
 //
-// Parley has a single look, modeled on the Claude desktop app: a warm off-white canvas,
-// a slightly darker sidebar, hairline dividers, a neutral selection wash, near-black
-// "ink" for the primary action, and clay reserved for Record / Generate. Colors are
+// Parley has a single look, modeled on the Claude desktop app: a neutral off-white
+// canvas, a light-grey sidebar, white fields and panels, hairline dividers, a neutral
+// selection wash, near-black "ink" for the primary action, blue for links and active
+// filters, and red reserved for Record. Colors are
 // Asset color sets (`Brand*`, light + dark) so both appearances come from one place.
 //
 // Type: Hanken Grotesk everywhere — chrome, the live transcript, and prose (summaries,
@@ -70,13 +71,14 @@ enum BrandFont {
 
 struct ThemeTokens {
     // Color — chrome
-    let accent: Color           // clay: Record / Generate, links, small highlights
+    let accent: Color           // blue: links, active filters, small highlights
     let accentText: Color       // text/icon on top of `accent`
     let windowBg: Color         // main canvas
     let panelBg: Color          // fields, cards, the composer bar
     let sidebarBg: Color        // left sidebar
     let divider: Color          // hairline separators
     let selection: Color        // neutral selected-row wash
+    let record: Color           // red: the Start recording button
     let ink: Color              // primary button fill
     let inkText: Color          // text on `ink`
     // Color — text hierarchy
@@ -107,6 +109,7 @@ struct ThemeTokens {
         sidebarBg: Color("BrandSidebarBg"),
         divider: Color("BrandDivider"),
         selection: Color("BrandSelection"),
+        record: Color("BrandRecord"),
         ink: Color("BrandInk"),
         inkText: Color("BrandInkText"),
         textPrimary: Color("BrandTextPrimary"),
