@@ -1,43 +1,50 @@
 import SwiftUI
 import AppKit
 
-/// Browses every transcript in the app-owned vault folder. The sidebar lists
-/// items newest-first; selecting one renders its note and exposes per-item
-/// actions (open in Obsidian, reveal audio, process/re-process).
+/// The main window's three-pane shell and history browser. The sidebar
+/// (`MeetingSidebar.swift`) lists every transcript in the app-owned vault folder,
+/// grouped by date; the center shows the live screen, People, or the selected note
+/// with its per-item actions (open in Obsidian, reveal audio, process/re-process).
 struct HistoryView: View {
-    @EnvironmentObject private var recording: RecordingController
-    @EnvironmentObject private var store: TranscriptStore
-    @EnvironmentObject private var vault: VaultDirectory
-    @ObservedObject private var settings = AppSettings.shared
+    @EnvironmentObject var recording: RecordingController
+    @EnvironmentObject var shell: MainShellModel
+    @AppStorage("parley.sidebarCollapsed") var sidebarCollapsed = false
+    @EnvironmentObject var store: TranscriptStore
+    @EnvironmentObject var vault: VaultDirectory
+    @ObservedObject var settings = AppSettings.shared
     /// Observed directly so live job state (pending/failed) republishes the view.
-    @ObservedObject private var summaryService = RecordingController.shared.summaryService
-    /// Observed so the per-item "Detecting speakers…" state tracks the offline queue.
-    @ObservedObject private var offline = RecordingController.shared.offlineService
-    @StateObject private var rowIndex = HistoryRowIndex()
-    @State private var selection = Set<TranscriptItem.ID>()
-    @State private var filter: HistoryFilter = .needsYou
+    @ObservedObject var summaryService = RecordingController.shared.summaryService
+    /// NOT observed: this view is the always-mounted window shell, and `offline`
+    /// publishes fine-grained progress ticks during a speaker pass. Job-state changes
+    /// re-render via `.onReceive(offline.$jobs)`; progress only re-renders the small
+    /// `PipelineStageBar` subviews that observe it themselves.
+    let offline = RecordingController.shared.offlineService
+    @State var offlineJobsRevision = 0
+    @StateObject var rowIndex = HistoryRowIndex()
+    @State var selection = Set<TranscriptItem.ID>()
+    @State var filter: HistoryFilter = .all
     /// Search query, matched against title / attendees / filing (and bodies when enabled).
-    @State private var searchQuery = ""
-    @State private var searchInContents = false
+    @State var searchQuery = ""
+    @State var searchInContents = false
     // File-management sheet (one at a time, enum-driven to avoid stacking modifiers).
-    @State private var fileOp: FileOp?
-    @State private var renameDraft = ""
-    @State private var refileDraft = ""
-    @State private var deleteAudioToo = true
-    @State private var deleteNoteToo = true
-    @State private var combineDraft = ""
-    @State private var combineTrashOriginals = false
+    @State var fileOp: FileOp?
+    @State var renameDraft = ""
+    @State var refileDraft = ""
+    @State var deleteAudioToo = true
+    @State var deleteNoteToo = true
+    @State var combineDraft = ""
+    @State var combineTrashOriginals = false
     // Inferred-affiliation confirm banner (Slice D).
     // Tracks names whose toggle has been turned OFF; empty means all are confirmed (default ON).
-    @State private var deselectedAffiliations: Set<String> = []
+    @State var deselectedAffiliations: Set<String> = []
     // The URL of the staged note for which the current inferred set was computed,
     // so we can reset deselections when the user navigates to a different note.
-    @State private var inferredAffiliationStagedURL: URL?
-    @State private var stagedRawMarkdown: String?
+    @State var inferredAffiliationStagedURL: URL?
+    @State var stagedRawMarkdown: String?
     /// When multiple backends are staged, which one the review pane is showing.
-    @State private var reviewStagedURL: URL?
+    @State var reviewStagedURL: URL?
     /// Opens the side-by-side model comparison window for this transcript.
-    @State private var compareItem: TranscriptItem?
+    @State var compareItem: TranscriptItem?
 
     /// The active file-management sheet and its target(s).
     enum FileOp: Identifiable {
@@ -68,7 +75,7 @@ struct HistoryView: View {
         rowIndex.stage(for: item)
     }
 
-    private var filteredItems: [TranscriptItem] {
+    var filteredItems: [TranscriptItem] {
         var base: [TranscriptItem]
         switch filter {
         case .all: base = store.items
@@ -82,7 +89,7 @@ struct HistoryView: View {
     }
 
     /// Items in the Processing tab: offline queue order, then summary queue order.
-    private var processingOrderedItems: [TranscriptItem] {
+    var processingOrderedItems: [TranscriptItem] {
         var seen = Set<String>()
         var result: [TranscriptItem] = []
         func appendSession(_ sessionID: String?) {
@@ -110,7 +117,7 @@ struct HistoryView: View {
     }
 
     /// Title / attendees / filing match synchronously; body match uses the async index.
-    private func matchesSearch(_ item: TranscriptItem, query q: String) -> Bool {
+    func matchesSearch(_ item: TranscriptItem, query q: String) -> Bool {
         if item.meta.title.lowercased().contains(q) { return true }
         if item.meta.filing.lowercased().contains(q) { return true }
         if item.meta.attendees.contains(where: { $0.lowercased().contains(q) }) { return true }
@@ -118,28 +125,29 @@ struct HistoryView: View {
         return false
     }
     /// Count of items needing the user (badge on the "Needs you" tab).
-    private var needsYouCount: Int { store.items.filter { rowIndex.row(for: $0).needsYou }.count }
+    var needsYouCount: Int { store.items.filter { rowIndex.row(for: $0).needsYou }.count }
     /// Item awaiting the "speakers not assigned" confirmation before summarizing.
-    @State private var pendingProcessItem: TranscriptItem?
+    @State var pendingProcessItem: TranscriptItem?
     /// Add-attendee popover (for someone present who didn't speak / was forgotten).
-    @State private var addingAttendee = false
-    @State private var attendeeDraft = ""
+    @State var addingAttendee = false
+    @State var attendeeDraft = ""
     /// Editable destination for the summary currently under review (seeded from meta.filing).
-    @State private var reviewDestination = ""
-    @State private var headerTitleDraft = ""
-    @State private var headerFilingDraft = ""
-    @State private var headerEditItemID: String?
+    @State var reviewDestination = ""
+    @State var headerTitleDraft = ""
+    @State var headerFilingDraft = ""
+    @State var headerEditItemID: String?
 
     var body: some View {
-        // Resizable list/detail split (the window sidebar is a plain HStack, not a
-        // NavigationSplitView, so a single HSplitView here is safe and gives a draggable
-        // divider). The list has a sensible min/ideal/max; the detail fills the rest.
-        HSplitView {
-            list
-                .frame(minWidth: 220, idealWidth: 300, maxWidth: 480)
-                .frame(maxHeight: .infinity)
-            detail
-                .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+        // A plain HStack (not NavigationSplitView — see MainWindowView): sidebar,
+        // hairline, center. The sidebar hides entirely when collapsed.
+        HStack(spacing: 0) {
+            if !sidebarCollapsed {
+                shellSidebar
+                    .transition(.move(edge: .leading))
+                Divider()
+            }
+            shellCenter
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
@@ -150,9 +158,13 @@ struct HistoryView: View {
             applyHistoryFocus()
         }
         .onChange(of: recording.historyFocusPath) { applyHistoryFocus() }
+        .onReceive(offline.$jobs) { _ in offlineJobsRevision &+= 1 }
         .onChange(of: searchQuery) { updateContentSearch() }
         .onChange(of: searchInContents) { updateContentSearch() }
-        .onChange(of: selection) { seedReviewDestination() }
+        .onChange(of: selection) {
+            seedReviewDestination()
+            if !selection.isEmpty { shell.route = .notes }
+        }
         .onChange(of: selectedItem?.summaryReadyURL) { seedReviewDestination() }
         // The "Detect speakers" review sheet is hosted at the window root
         // (MainWindowView), not here, so it survives switching tabs/notes mid-review.
@@ -189,32 +201,33 @@ struct HistoryView: View {
         }
     }
 
-    private func applyHistoryFocus() {
+    func applyHistoryFocus() {
         guard let path = recording.historyFocusPath else { return }
         selection = [path]
+        shell.route = .notes
         recording.historyFocusPath = nil
     }
 
     /// Seed the editable review destination from the selected item's filing.
-    private func seedReviewDestination() {
+    func seedReviewDestination() {
         if let item = selectedItem, item.summaryReadyURL != nil {
             reviewDestination = item.meta.filing
         }
     }
 
-    private func isV2Review(item _: TranscriptItem, staged: URL) -> Bool {
+    func isV2Review(item _: TranscriptItem, staged: URL) -> Bool {
         // Markup UI is only for Summary v2 staging files. Do not treat classic
         // dual-staging as v2 merely because Settings → Pipeline is set to v2.
         staged.lastPathComponent.hasSuffix(".v2.md")
     }
 
-    private func classicMetricsLine(for item: TranscriptItem) -> (text: String, help: String)? {
+    func classicMetricsLine(for item: TranscriptItem) -> (text: String, help: String)? {
         guard let run = SummaryRunStore().runs(forTranscriptID: item.url.path)
             .first(where: { $0.pipeline == .classic }) else { return nil }
         return SummaryMetricsFormat.compactLine(metrics: run.writerMetrics)
     }
 
-    private func updateContentSearch() {
+    func updateContentSearch() {
         rowIndex.updateContentSearch(
             query: searchQuery,
             searchInContents: searchInContents,
@@ -224,11 +237,11 @@ struct HistoryView: View {
 
     /// Queue a background Claude summary. An explicit press is user-initiated — it
     /// bypasses the auto-off + bulk-confirm gates (but still respects a usage-limit pause).
-    private func summarize(_ item: TranscriptItem) {
+    func summarize(_ item: TranscriptItem) {
         recording.summaryService.enqueueIfPolicyAllows(item, trigger: .userInitiated)
     }
 
-    private func describeAttachments(for item: TranscriptItem) {
+    func describeAttachments(for item: TranscriptItem) {
         isDescribingAttachments = true
         switch summaryService.describeAttachments(for: item) {
         case .success(let digest):
@@ -249,55 +262,19 @@ struct HistoryView: View {
         isDescribingAttachments = false
     }
 
-    private func isPending(_ item: TranscriptItem) -> Bool {
+    func isPending(_ item: TranscriptItem) -> Bool {
         if case .pending = summaryService.state(for: item) { return true }
         return false
     }
 
-    private func summaryHasFailed(_ item: TranscriptItem) -> Bool {
+    func summaryHasFailed(_ item: TranscriptItem) -> Bool {
         if case .failed = summaryService.state(for: item) { return true }
         return false
     }
 
     // MARK: List
 
-    /// The list column is navigation chrome (like the window sidebar): it floats
-    /// on material while the selected note — the content — sits at base.
-    private var list: some View {
-        VStack(spacing: 0) {
-            searchBar
-            Divider()
-            Picker("", selection: $filter) {
-                ForEach(HistoryFilter.allCases) { f in
-                    Text(f == .needsYou && needsYouCount > 0 ? "Needs you (\(needsYouCount))" : f.rawValue).tag(f)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(Theme.Spacing.small)
-            Divider()
-
-            queueBanner
-
-            if filteredItems.isEmpty {
-                listEmptyState
-            } else {
-                List(selection: $selection) {
-                    ForEach(filteredItems) { item in
-                        row(item).tag(item.id)
-                            .contextMenu { rowMenu(item) }
-                    }
-                    .onMove(perform: moveAction)
-                }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
-                .onDeleteCommand { if !selectedItems.isEmpty { beginDelete(selectedItems) } }
-            }
-        }
-        .chromeSurface()
-    }
-
-    @ViewBuilder private var listEmptyState: some View {
+    @ViewBuilder var listEmptyState: some View {
         if !searchQuery.isEmpty {
             EmptyStateView(
                 icon: "magnifyingglass",
@@ -316,30 +293,9 @@ struct HistoryView: View {
         }
     }
 
-    private var searchBar: some View {
-        HStack(spacing: Theme.Spacing.small) {
-            Image(systemName: "magnifyingglass")
-                .font(Theme.Typography.caption).foregroundStyle(.secondary)
-            TextField("Search meetings", text: $searchQuery)
-                .textFieldStyle(.plain)
-            if !searchQuery.isEmpty {
-                Button { searchQuery = "" } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            Toggle(isOn: $searchInContents) {
-                Image(systemName: "doc.text.magnifyingglass")
-            }
-            .toggleStyle(.button).controlSize(.small)
-            .help("Also search inside transcript text (slower)")
-        }
-        .padding(.horizontal, Theme.Spacing.medium).padding(.vertical, Theme.Spacing.small)
-    }
-
     /// Per-row context menu — operates on the right-clicked item (selecting it first if it
     /// isn't part of the current selection).
-    @ViewBuilder private func rowMenu(_ item: TranscriptItem) -> some View {
+    @ViewBuilder func rowMenu(_ item: TranscriptItem) -> some View {
         let targets = selection.contains(item.id) && selection.count > 1 ? selectedItems : [item]
         if targets.count == 1 {
             queueActions(item)
@@ -371,7 +327,7 @@ struct HistoryView: View {
     }
 
     /// Stage-aware queue actions for a single item (top of the row menu).
-    @ViewBuilder private func queueActions(_ item: TranscriptItem) -> some View {
+    @ViewBuilder func queueActions(_ item: TranscriptItem) -> some View {
         switch stage(item) {
         case .queuedForSummary:
             Button("Summarize now") { summaryService.prioritize(item) }
@@ -413,20 +369,20 @@ struct HistoryView: View {
         }
     }
 
-    private func sessionID(for item: TranscriptItem) -> String? {
+    func sessionID(for item: TranscriptItem) -> String? {
         MeetingFiles.sessionDir(forAudioPath: item.meta.audio)?.lastPathComponent
     }
 
     /// Drag-to-reorder only in the Processing tab. SwiftUI takes a nonisolated closure,
     /// but it calls it on the main thread.
-    private var moveAction: ((IndexSet, Int) -> Void)? {
+    var moveAction: ((IndexSet, Int) -> Void)? {
         guard filter == .processing else { return nil }
         return { source, destination in
             MainActor.assumeIsolated { moveProcessingItem(from: source, to: destination) }
         }
     }
 
-    private func moveProcessingItem(from source: IndexSet, to destination: Int) {
+    func moveProcessingItem(from source: IndexSet, to destination: Int) {
         guard filter == .processing else { return }
         let items = processingOrderedItems
         guard let from = source.first, from < items.count else { return }
@@ -451,7 +407,7 @@ struct HistoryView: View {
 
     /// Banner above the list: the bulk-confirm prompt (highest priority) or a
     /// throttle-paused notice with Resume. Shown in any tab so it's never missed.
-    @ViewBuilder private var queueBanner: some View {
+    @ViewBuilder var queueBanner: some View {
         if let bulk = summaryService.pendingBulkConfirm {
             VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
                 Text("Summarize \(bulk.items.count) notes?")
@@ -491,39 +447,9 @@ struct HistoryView: View {
         }
     }
 
-    private func row(_ item: TranscriptItem) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
-            HStack(spacing: Theme.Spacing.small) {
-                Text(item.meta.title)
-                    .font(.headline)
-                    .lineLimit(1)
-                Spacer()
-                rowIndicator(item)
-                statusBadge(item)
-            }
-            HStack(spacing: Theme.Spacing.small) {
-                Image(systemName: item.meta.type == "manual" ? "pencil" : "mic")
-                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
-                Text(Self.dateString(item.meta.date))
-                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
-            }
-            if !item.meta.attendees.isEmpty {
-                Text(item.meta.attendees.joined(separator: ", "))
-                    .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            // In-flight (or failed) pipeline state as a thin stage underline; the
-            // spinner/clock the row used to show is folded into this bar.
-            if let bar = StageBarModel.derive(item: item, offline: offline, summary: summaryService) {
-                SegmentedStageBar(segments: bar.segments, style: .mini)
-            }
-        }
-        .padding(.vertical, Theme.Spacing.xxSmall)
-    }
-
     /// Warning/attention icons in the row; in-flight states render as the mini stage
     /// bar underline instead (see `row`).
-    @ViewBuilder private func rowIndicator(_ item: TranscriptItem) -> some View {
+    @ViewBuilder func rowIndicator(_ item: TranscriptItem) -> some View {
         switch rowIndex.row(for: item).rowIndicator {
         case .needsSpeakerNames:
             Image(systemName: "person.crop.circle.badge.exclamationmark")
@@ -539,14 +465,14 @@ struct HistoryView: View {
     }
 
     /// Status chip mapped from the fused pipeline stage.
-    private func statusBadge(_ item: TranscriptItem) -> some View {
+    func statusBadge(_ item: TranscriptItem) -> some View {
         let model = rowIndex.row(for: item)
         return StatusBadge(model.statusLabel, severity: model.statusSeverity)
     }
 
     // MARK: Detail
 
-    @ViewBuilder private var detail: some View {
+    @ViewBuilder var detail: some View {
         if selection.count > 1 {
             bulkPanel
         } else if let item = selectedItem {
@@ -574,7 +500,7 @@ struct HistoryView: View {
     }
 
     /// Shown when several meetings are selected — bulk delete / refile / summarize.
-    private var bulkPanel: some View {
+    var bulkPanel: some View {
         let items = selectedItems
         let bytes = items.reduce(Int64(0)) { $0 + store.links(for: $1).audioBytes }
         return VStack(spacing: Theme.Spacing.large) {
@@ -609,7 +535,7 @@ struct HistoryView: View {
     }
 
     /// Live "summarizing…/failed" bar for a transcript without a staged summary yet.
-    @ViewBuilder private func summaryStatusBar(_ item: TranscriptItem) -> some View {
+    @ViewBuilder func summaryStatusBar(_ item: TranscriptItem) -> some View {
         switch summaryService.state(for: item) {
         case .pending:
             HStack(spacing: Theme.Spacing.small) {
@@ -635,7 +561,7 @@ struct HistoryView: View {
     /// The review pane shown when a summary is staged: editable destination above the
     /// rendered note, with Commit / Discard / Regenerate. When multiple backends have
     /// staged output, a picker lets you flip between them for quality comparison.
-    @ViewBuilder private func reviewPane(_ item: TranscriptItem, staged: URL) -> some View {
+    @ViewBuilder func reviewPane(_ item: TranscriptItem, staged: URL) -> some View {
         let inferred = InferredAffiliationParser.parseInferred(markdown: stagedRawMarkdown ?? "")
         let reviewURL = reviewStagedURL ?? staged
         VStack(spacing: 0) {
@@ -718,7 +644,7 @@ struct HistoryView: View {
     }
 
     /// Banner listing inferred affiliations, each with a default-ON toggle.
-    @ViewBuilder private func inferredAffiliationBanner(
+    @ViewBuilder func inferredAffiliationBanner(
         _ items: [InferredAffiliation],
         staged: URL
     ) -> some View {
@@ -747,15 +673,15 @@ struct HistoryView: View {
         .chromeSurface()
     }
 
-    private var selectedItems: [TranscriptItem] {
+    var selectedItems: [TranscriptItem] {
         store.items.filter { selection.contains($0.id) }
     }
     /// The single selected item, or nil when zero or many are selected.
-    private var selectedItem: TranscriptItem? {
+    var selectedItem: TranscriptItem? {
         selection.count == 1 ? selectedItems.first : nil
     }
 
-    private func commitAndSelectNext(_ item: TranscriptItem, stagedURL: URL) {
+    func commitAndSelectNext(_ item: TranscriptItem, stagedURL: URL) {
         let nextID = Self.selectionAfterRemoving(item.id, from: filteredItems.map(\.id))
         guard summaryService.commit(
             item,
@@ -777,7 +703,7 @@ struct HistoryView: View {
         return orderedIDs[index == orderedIDs.index(before: orderedIDs.endIndex) ? index - 1 : index + 1]
     }
 
-    private func detailHeader(_ item: TranscriptItem) -> some View {
+    func detailHeader(_ item: TranscriptItem) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
@@ -816,30 +742,27 @@ struct HistoryView: View {
             actionRow(item)
             // Live pipeline status for this note: the full segmented stage bar
             // (detecting / queued / summarizing / failed), hidden when idle.
-            if let bar = StageBarModel.derive(item: item, offline: offline, summary: summaryService) {
-                SegmentedStageBar(segments: bar.segments,
-                                  statusLabel: bar.statusLabel, sublabel: bar.sublabel)
-            }
+            PipelineStageBar(item: item, style: .full)
         }
         .padding(Theme.Spacing.large)
         .onAppear { seedHeaderFields(item) }
         .onChange(of: item.id) { seedHeaderFields(item) }
     }
 
-    private func seedHeaderFields(_ item: TranscriptItem) {
+    func seedHeaderFields(_ item: TranscriptItem) {
         headerEditItemID = item.id
         headerTitleDraft = item.meta.title
         headerFilingDraft = item.meta.filing
     }
 
-    private func headerTitleBinding(for item: TranscriptItem) -> Binding<String> {
+    func headerTitleBinding(for item: TranscriptItem) -> Binding<String> {
         Binding(
             get: { headerEditItemID == item.id ? headerTitleDraft : item.meta.title },
             set: { headerTitleDraft = $0 }
         )
     }
 
-    private func headerFilingBinding(for item: TranscriptItem) -> Binding<String> {
+    func headerFilingBinding(for item: TranscriptItem) -> Binding<String> {
         Binding(
             get: { headerEditItemID == item.id ? headerFilingDraft : item.meta.filing },
             set: { newValue in
@@ -850,7 +773,7 @@ struct HistoryView: View {
         )
     }
 
-    private func persistHeaderTitle(_ item: TranscriptItem) {
+    func persistHeaderTitle(_ item: TranscriptItem) {
         let trimmed = headerTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != item.meta.title,
               !summaryService.hasPendingWork(item) else { return }
@@ -862,7 +785,7 @@ struct HistoryView: View {
     /// transcript's frontmatter + body header via `setAttendees`, so a polluted list (e.g.
     /// speaker-split "Rosen"/"Adam" duplicates) can be cleaned without opening the file.
     /// Persisted immediately on every add/remove — there is no separate "Save".
-    @ViewBuilder private func attendeesEditor(_ item: TranscriptItem) -> some View {
+    @ViewBuilder func attendeesEditor(_ item: TranscriptItem) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
             Text("Attendees").font(Theme.Typography.fieldLabel).foregroundStyle(.secondary)
             TokenField(tokens: attendeesBinding(for: item),
@@ -884,17 +807,17 @@ struct HistoryView: View {
 
     /// Reads the item's current attendees; every mutation persists through `setAttendees`,
     /// which refreshes the store so the detail re-renders from the freshly-written note.
-    private func attendeesBinding(for item: TranscriptItem) -> Binding<[String]> {
+    func attendeesBinding(for item: TranscriptItem) -> Binding<[String]> {
         Binding(
             get: { item.meta.attendees },
             set: { recording.setAttendees(on: item.url, to: $0) }
         )
     }
 
-    @State private var attachmentError: String?
-    @State private var isDescribingAttachments = false
+    @State var attachmentError: String?
+    @State var isDescribingAttachments = false
 
-    @ViewBuilder private func historyAttachmentsEditor(_ item: TranscriptItem) -> some View {
+    @ViewBuilder func historyAttachmentsEditor(_ item: TranscriptItem) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
             MeetingAttachmentsView(
                 attachments: item.meta.attachments,
@@ -936,12 +859,12 @@ struct HistoryView: View {
         }
     }
 
-    private func metadataLine(_ item: TranscriptItem) -> some View {
+    func metadataLine(_ item: TranscriptItem) -> some View {
         Text(Self.dateString(item.meta.date))
             .font(Theme.Typography.caption).foregroundStyle(.secondary)
     }
 
-    private func actionRow(_ item: TranscriptItem) -> some View {
+    func actionRow(_ item: TranscriptItem) -> some View {
         HStack(spacing: Theme.Spacing.medium) {
             if let notePath = item.meta.note, !notePath.isEmpty {
                 Button {
@@ -1015,7 +938,7 @@ struct HistoryView: View {
     }
 
     /// Add a present-but-non-speaking (or forgotten) attendee to this transcript.
-    private func addAttendeeButton(_ item: TranscriptItem) -> some View {
+    func addAttendeeButton(_ item: TranscriptItem) -> some View {
         Button { attendeeDraft = ""; addingAttendee = true } label: {
             Label("Add attendee", systemImage: "person.badge.plus")
         }
@@ -1049,7 +972,7 @@ struct HistoryView: View {
         }
     }
 
-    private func attendeeMatches(_ item: TranscriptItem) -> [String] {
+    func attendeeMatches(_ item: TranscriptItem) -> [String] {
         let d = attendeeDraft.trimmingCharacters(in: .whitespaces).lowercased()
         guard !d.isEmpty else { return [] }
         let have = Set(item.meta.attendees.map { $0.lowercased() })
@@ -1057,7 +980,7 @@ struct HistoryView: View {
             .prefix(5).map { $0 }
     }
 
-    private func commitAddAttendee(_ item: TranscriptItem) {
+    func commitAddAttendee(_ item: TranscriptItem) {
         let name = attendeeDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
         recording.addAttendeeToTranscript(item.url, name: name)
@@ -1066,23 +989,23 @@ struct HistoryView: View {
     }
 
     /// Note generation is in flight — disable the action buttons.
-    private var busy: Bool {
+    var busy: Bool {
         recording.summaryService.runningID != nil
     }
 
     /// This item's recording already has an offline pass queued or running (so its
     /// "Detect speakers" button is disabled to avoid a duplicate enqueue).
-    private func isProcessingOffline(_ item: TranscriptItem) -> Bool {
+    func isProcessingOffline(_ item: TranscriptItem) -> Bool {
         let s = offline.jobState(forAudioPath: item.meta.audio)
         return s == .queued || s == .running
     }
 
-    private func audioAvailable(_ item: TranscriptItem) -> Bool {
+    func audioAvailable(_ item: TranscriptItem) -> Bool {
         guard let a = item.meta.audio, !a.isEmpty else { return false }
         return FileManager.default.fileExists(atPath: a)
     }
 
-    private func detectSpeakers(_ item: TranscriptItem) {
+    func detectSpeakers(_ item: TranscriptItem) {
         // Unnamed speakers already in the cache are named in the strip; otherwise re-run.
         recording.assignSpeakers(
             forAudioPath: item.meta.audio, transcript: item.url,
@@ -1094,7 +1017,7 @@ struct HistoryView: View {
 
     /// Transcript + linked audio + filed note as compact chips, each with size and quick
     /// reveal/open. Surfaces links the data model already carries (`meta.audio`/`meta.note`).
-    @ViewBuilder private func filesStrip(_ item: TranscriptItem) -> some View {
+    @ViewBuilder func filesStrip(_ item: TranscriptItem) -> some View {
         let l = store.links(for: item)
         HStack(spacing: Theme.Spacing.small) {
             fileChip(icon: "doc.text", label: "Transcript",
@@ -1114,7 +1037,7 @@ struct HistoryView: View {
         }
     }
 
-    @ViewBuilder private func fileChip(icon: String, label: String, detail: String?,
+    @ViewBuilder func fileChip(icon: String, label: String, detail: String?,
                                        reveal: URL?, open: (() -> Void)? = nil) -> some View {
         Button {
             if let open { open() }
@@ -1134,18 +1057,18 @@ struct HistoryView: View {
 
     // MARK: File-management actions (rename / refile / delete)
 
-    private func beginRename(_ item: TranscriptItem) {
+    func beginRename(_ item: TranscriptItem) {
         renameDraft = item.meta.title
         fileOp = .rename(item)
     }
 
-    private func beginRefile(_ items: [TranscriptItem]) {
+    func beginRefile(_ items: [TranscriptItem]) {
         guard !items.isEmpty else { return }
         refileDraft = items.first?.meta.filing ?? ""
         fileOp = .refile(items)
     }
 
-    private func beginDelete(_ items: [TranscriptItem]) {
+    func beginDelete(_ items: [TranscriptItem]) {
         guard !items.isEmpty else { return }
         let links = items.map { store.links(for: $0) }
         deleteAudioToo = links.contains { $0.audioSession != nil }
@@ -1153,7 +1076,7 @@ struct HistoryView: View {
         fileOp = .delete(items)
     }
 
-    private func beginCombine(_ items: [TranscriptItem]) {
+    func beginCombine(_ items: [TranscriptItem]) {
         guard items.count > 1 else { return }
         // Default the combined title to the earliest meeting's title.
         combineDraft = items.min { $0.meta.date < $1.meta.date }?.meta.title ?? ""
@@ -1161,12 +1084,12 @@ struct HistoryView: View {
         fileOp = .combine(items)
     }
 
-    private func beginMerge(_ item: TranscriptItem) {
+    func beginMerge(_ item: TranscriptItem) {
         fileOp = .merge(item)
     }
 
     /// Present MergeSheet as a sheet body when fileOp == .merge(item).
-    private func mergeSheetView(_ item: TranscriptItem) -> some View {
+    func mergeSheetView(_ item: TranscriptItem) -> some View {
         // All other items are candidates; sort by date so the picker is in order.
         let candidates = store.items
             .filter { $0.id != item.id }
@@ -1198,7 +1121,7 @@ struct HistoryView: View {
         }
     }
 
-    private func renameSheet(_ item: TranscriptItem) -> some View {
+    func renameSheet(_ item: TranscriptItem) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             Text("Rename meeting").font(Theme.Typography.sheetTitle)
             Text("Updates the title in the transcript and renames the file (its date prefix is kept). A filed note is renamed to match.")
@@ -1226,14 +1149,14 @@ struct HistoryView: View {
         .padding(Theme.Spacing.large).frame(width: 380)
     }
 
-    private func commitRename(_ item: TranscriptItem) {
+    func commitRename(_ item: TranscriptItem) {
         guard !summaryService.hasPendingWork(item) else { return }
         let newURL = store.rename(item, to: renameDraft)
         selection = [newURL.path]
         fileOp = nil
     }
 
-    private func refileSheet(_ items: [TranscriptItem]) -> some View {
+    func refileSheet(_ items: [TranscriptItem]) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             Text(items.count > 1 ? "Refile \(items.count) meetings" : "Refile meeting")
                 .font(Theme.Typography.sheetTitle)
@@ -1255,14 +1178,14 @@ struct HistoryView: View {
         .padding(Theme.Spacing.large).frame(width: 420)
     }
 
-    private func commitRefile(_ items: [TranscriptItem]) {
+    func commitRefile(_ items: [TranscriptItem]) {
         var lastURL: URL?
         for item in items { lastURL = store.refile(item, to: refileDraft) }
         if items.count == 1, let u = lastURL { selection = [u.path] }
         fileOp = nil
     }
 
-    private func deleteSheet(_ items: [TranscriptItem]) -> some View {
+    func deleteSheet(_ items: [TranscriptItem]) -> some View {
         let links = items.map { store.links(for: $0) }
         let audioBytes = links.reduce(Int64(0)) { $0 + $1.audioBytes }
         let anyAudio = links.contains { $0.audioSession != nil }
@@ -1296,7 +1219,7 @@ struct HistoryView: View {
         .padding(Theme.Spacing.large).frame(width: 420)
     }
 
-    private func commitDelete(_ items: [TranscriptItem]) {
+    func commitDelete(_ items: [TranscriptItem]) {
         store.deleteMany(items, alsoAudio: deleteAudioToo, alsoNote: deleteNoteToo)
         selection.subtract(Set(items.map(\.id)))
         fileOp = nil
@@ -1304,7 +1227,7 @@ struct HistoryView: View {
 
     /// Merge several meetings into one cohesive transcript (e.g. a call that got
     /// split by a crash or an auto-stop/restart), so it can be summarized as a whole.
-    private func combineSheet(_ items: [TranscriptItem]) -> some View {
+    func combineSheet(_ items: [TranscriptItem]) -> some View {
         let ordered = items.sorted { $0.meta.date < $1.meta.date }
         return VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
             Text("Combine \(ordered.count) meetings").font(Theme.Typography.sheetTitle)
@@ -1345,7 +1268,7 @@ struct HistoryView: View {
         .padding(Theme.Spacing.large).frame(width: 460)
     }
 
-    private func commitCombine(_ items: [TranscriptItem]) {
+    func commitCombine(_ items: [TranscriptItem]) {
         let url = store.combine(items, title: combineDraft, trashOriginals: combineTrashOriginals)
         fileOp = nil
         guard let url else { return }
@@ -1357,7 +1280,7 @@ struct HistoryView: View {
 
     // MARK: Helpers
 
-    private static let dateFormatter: DateFormatter = {
+    static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = .autoupdatingCurrent
         f.timeZone = .autoupdatingCurrent
@@ -1366,7 +1289,7 @@ struct HistoryView: View {
         return f
     }()
 
-    private static let timeFormatter: DateFormatter = {
+    static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = .autoupdatingCurrent
         f.timeZone = .autoupdatingCurrent
@@ -1375,8 +1298,8 @@ struct HistoryView: View {
         return f
     }()
 
-    private static func dateString(_ date: Date) -> String { dateFormatter.string(from: date) }
+    static func dateString(_ date: Date) -> String { dateFormatter.string(from: date) }
 
-    private static func timeString(_ date: Date) -> String { timeFormatter.string(from: date) }
+    static func timeString(_ date: Date) -> String { timeFormatter.string(from: date) }
 
 }

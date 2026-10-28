@@ -82,14 +82,20 @@ final class UIResponsivenessTests: XCTestCase {
                       "MarkdownUI preview must not mount underneath the enrichment sheet")
     }
 
-    func testHistoryBadgeIgnoresProgressTicks() throws {
-        let src = try Self.source("Parley/UI/MainWindowView.swift")
+    func testWindowShellIgnoresProgressTicks() throws {
+        // The shell (HistoryView) is always mounted, so it must not re-render on every
+        // offline progress tick: job changes arrive via $jobs, progress only reaches the
+        // per-row PipelineStageBar.
+        let src = try Self.source("Parley/UI/HistoryView.swift")
+        XCTAssertTrue(src.contains("let offline = RecordingController.shared.offlineService"),
+                      "the shell must not ObservedObject-subscribe to progress ticks")
         XCTAssertTrue(src.contains("offline.$jobs"),
-                      "badge must subscribe to jobs, not the whole ObservableObject")
-        XCTAssertTrue(src.contains("private let offline = RecordingController.shared.offlineService"),
-                      "MainWindowView must not ObservedObject-subscribe to progress ticks")
+                      "the shell must subscribe to jobs, not the whole ObservableObject")
         XCTAssertFalse(src.contains("offline.objectWillChange"),
-                       "objectWillChange includes progress ticks that re-derive every History row")
+                       "objectWillChange includes progress ticks that re-derive every row")
+        let sidebar = try Self.source("Parley/UI/Shell/MeetingSidebar.swift")
+        XCTAssertFalse(sidebar.contains("offline: offline, summary: summaryService"),
+                       "stage bars must observe progress in their own subview")
     }
 
     func testOfflinePassBarIsItsOwnObserver() throws {

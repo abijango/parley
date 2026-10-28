@@ -1,168 +1,61 @@
 import SwiftUI
 import AppKit
 
-/// The app's main window: a sidebar that switches between the live "Record"
-/// experience and the "History" browser, each shown in the detail pane.
+/// The app's main window: a three-pane shell (Claude-desktop style). The sidebar lists
+/// past meetings by date; the center shows the live recording screen, the selected
+/// meeting, or People. The shell itself lives in `HistoryView` + `MeetingSidebar.swift`
+/// so the list and the note detail share one selection and set of actions.
 struct MainWindowView: View {
     @EnvironmentObject private var recording: RecordingController
-    @ObservedObject private var store = RecordingController.shared.store
-    @ObservedObject private var summaryService = RecordingController.shared.summaryService
-    private let offline = RecordingController.shared.offlineService
-    @State private var selection: SidebarSection? = .record
+    @StateObject private var shell = MainShellModel()
     @State private var showingRecovery = false
     @AppStorage("parley.sidebarCollapsed") private var sidebarCollapsed = false
-    /// Cached count for the History nav badge — recomputed only when store/offline/summary change.
-    @State private var historyBadge = 0
-
-    enum SidebarSection: String, CaseIterable, Identifiable, Hashable {
-        case record = "Record", history = "History", people = "People"
-        var id: String { rawValue }
-        var symbol: String {
-            switch self {
-            case .record:  return "record.circle"
-            case .history: return "clock.arrow.circlepath"
-            case .people:  return "person.crop.circle"
-            }
-        }
-    }
 
     var body: some View {
-        // A plain sidebar + detail (NOT NavigationSplitView): in this fixed menu-bar
+        // A plain HStack shell (NOT NavigationSplitView): in this fixed menu-bar
         // utility window, NavigationSplitView's adaptive column-collapsing and
         // integrated title bar misrendered on narrow built-in displays (blank band,
         // window title bleeding over the content). A fixed HStack renders identically
         // at every size.
-        HStack(spacing: 0) {
-            sidebar
-            Divider()
-            Group {
-                switch selection ?? .record {
-                case .record:
-                    RecordDetailView()
-                case .history:
-                    HistoryView()
-                case .people:
-                    PeopleView(voiceprintStore: recording.voiceprints)
+        HistoryView()
+            .frame(minWidth: 720, minHeight: 560)
+            .background(Theme.Palette.windowBg)
+            // Sidebar collapse toggle lives in the toolbar (in the title bar, by the
+            // traffic lights) — the native placement, so it isn't floating in the column.
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        withAnimation(Theme.Motion.quick) { sidebarCollapsed.toggle() }
+                    } label: {
+                        Image(systemName: "sidebar.left")
+                    }
+                    .help(sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(minWidth: 720, minHeight: 560)
-        .onChange(of: recording.historyFocusPath) {
-            if recording.historyFocusPath != nil { selection = .history }
-        }
-        // Sidebar collapse toggle lives in the toolbar (in the title bar, by the
-        // traffic lights) — the native placement, so it isn't floating in the column.
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    withAnimation(Theme.Motion.quick) { sidebarCollapsed.toggle() }
-                } label: {
-                    Image(systemName: "sidebar.left")
-                }
-                .help(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
+            .background(WindowConfigurator())   // hide the "Parley" title text
+            .environmentObject(recording.store)
+            .environmentObject(shell)
+            // Crash recovery: offer any interrupted sessions on launch; auto-dismiss
+            // once they're all handled (resumed / recovered / discarded).
+            .sheet(isPresented: $showingRecovery) {
+                RecoveryView { showingRecovery = false }
+                    .environmentObject(recording)
             }
-        }
-        .background(WindowConfigurator())   // hide the "Parley" title text
-        .environmentObject(recording.store)
-        // Crash recovery: offer any interrupted sessions on launch; auto-dismiss
-        // once they're all handled (resumed / recovered / discarded).
-        .sheet(isPresented: $showingRecovery) {
-            RecoveryView { showingRecovery = false }
-                .environmentObject(recording)
-        }
-        // Post-call batch enrichment sheet (Slice B): one-time prompt to add Company
-        // for attendees with no known rolodex entry. The setter handles OS-level
-        // dismiss (Escape) by calling finishEnrichment(save:false), which ensures the
-        // deferred non-speaker summary always fires even when the user skips.
-        .sheet(isPresented: Binding(
-            get: { recording.autoPresentEnrichment && recording.pendingEnrichment != nil },
-            set: { if !$0 && recording.pendingEnrichment != nil { recording.finishEnrichment(save: false) } })) {
-            AttendeeEnrichmentSheet(recording: recording)
-        }
-        .onChange(of: recording.pendingRecoveries.isEmpty) {
-            showingRecovery = !recording.pendingRecoveries.isEmpty
-        }
-        .onAppear {
-            if !recording.pendingRecoveries.isEmpty { showingRecovery = true }
-            refreshHistoryBadge()
-        }
-        .onChange(of: store.items) { refreshHistoryBadge() }
-        .onReceive(offline.$jobs) { _ in refreshHistoryBadge() }
-        .onChange(of: summaryService.runningID) { refreshHistoryBadge() }
-    }
-
-    private func refreshHistoryBadge() {
-        historyBadge = store.items.filter {
-            PipelineStage.derive(item: $0, offline: offline, summary: summaryService).needsYou
-        }.count
-    }
-
-    /// Navigation sidebar (Record / History) with Settings pinned at the bottom.
-    /// Collapses to a thin icon-only rail.
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-            ForEach(SidebarSection.allCases) { section in
-                navButton(section)
+            // Post-call batch enrichment sheet (Slice B): one-time prompt to add Company
+            // for attendees with no known rolodex entry. The setter handles OS-level
+            // dismiss (Escape) by calling finishEnrichment(save:false), which ensures the
+            // deferred non-speaker summary always fires even when the user skips.
+            .sheet(isPresented: Binding(
+                get: { recording.autoPresentEnrichment && recording.pendingEnrichment != nil },
+                set: { if !$0 && recording.pendingEnrichment != nil { recording.finishEnrichment(save: false) } })) {
+                AttendeeEnrichmentSheet(recording: recording)
             }
-
-            Spacer()
-
-            // Settings pinned to the bottom-left (opens the Settings window).
-            SettingsLink {
-                navRow(symbol: "gearshape", title: "Settings")
+            .onChange(of: recording.pendingRecoveries.isEmpty) {
+                showingRecovery = !recording.pendingRecoveries.isEmpty
             }
-            .buttonStyle(.row())
-            .foregroundStyle(.primary)
-            .help(sidebarCollapsed ? "Settings" : "")
-        }
-        .padding(Theme.Spacing.small)
-        .frame(width: sidebarCollapsed ? 52 : 170)
-        .frame(maxHeight: .infinity)
-        .chromeSurface()
-    }
-
-    private func navButton(_ section: SidebarSection) -> some View {
-        let isSelected = (selection ?? .record) == section
-        return Button {
-            selection = section
-        } label: {
-            navRow(symbol: section.symbol, title: section.rawValue,
-                   badge: section == .history ? historyBadge : 0)
-        }
-        .buttonStyle(.row(selected: isSelected))
-        .foregroundStyle(isSelected ? Theme.Palette.accent : .primary)
-        .animation(Theme.Motion.quick, value: isSelected)
-        .help(sidebarCollapsed ? section.rawValue : "")
-    }
-
-    /// A sidebar row's content: icon-only when collapsed, icon + label when expanded.
-    /// An optional badge count (summaries in progress / ready to review) is shown on
-    /// the trailing edge, or as a dot when collapsed. Selection / hover styling is
-    /// provided by `RowButtonStyle` (`.buttonStyle(.row(selected:))`).
-    @ViewBuilder private func navRow(symbol: String, title: String, badge: Int = 0) -> some View {
-        Group {
-            if sidebarCollapsed {
-                Image(systemName: symbol)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .overlay(alignment: .topTrailing) {
-                        if badge > 0 {
-                            Circle().fill(Theme.Palette.accent).frame(width: 7, height: 7).offset(x: 2, y: -1)
-                        }
-                    }
-            } else {
-                // Label centred across the row; icon pinned to the leading edge and
-                // the badge to the trailing edge (overlays, so they don't shift the
-                // centred text).
-                Text(title)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .overlay(alignment: .leading) { Image(systemName: symbol) }
-                    .overlay(alignment: .trailing) {
-                        if badge > 0 { CountBadge(count: badge) }
-                    }
+            .onAppear {
+                if !recording.pendingRecoveries.isEmpty { showingRecovery = true }
             }
-        }
-        .font(Theme.Typography.body)
     }
 }
 

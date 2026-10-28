@@ -34,7 +34,7 @@ struct TokenField: View {
                 inputField
             }
             .padding(Theme.Spacing.xSmall)
-            .frame(maxWidth: .infinity, minHeight: 22, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .topLeading)
             // Take the full chip height and refuse vertical compression: in the
             // inspector VStack, `notesField` claims all leftover height, so a short
             // window would otherwise squeeze this field below its content and the
@@ -54,7 +54,10 @@ struct TokenField: View {
                     .onAppear { fieldWidth = g.size.width - Theme.Spacing.xSmall * 2 }
                     .onChange(of: g.size.width) { fieldWidth = g.size.width - Theme.Spacing.xSmall * 2 }
             })
-            .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
+            .background(Theme.Radius.rect(Theme.Radius.small).fill(Theme.Palette.panelBg))
+            .overlay(Theme.Radius.rect(Theme.Radius.small)
+                .strokeBorder(focused ? Theme.Palette.textTertiary : Theme.Palette.divider,
+                              lineWidth: focused ? 1 : 0.5))
             .contentShape(Rectangle())
             .onTapGesture { focused = true }
 
@@ -85,30 +88,28 @@ struct TokenField: View {
         HStack(spacing: Theme.Spacing.xSmall) {
             Text(name)
                 .font(Theme.Typography.caption.weight(.medium))
-                .foregroundStyle(Theme.Palette.accent)
+                .foregroundStyle(Theme.Palette.textPrimary)
                 .lineLimit(1).truncationMode(.tail)
                 .frame(maxWidth: 200, alignment: .leading)
             Button { remove(name) } label: {
                 Image(systemName: "xmark.circle.fill").font(.system(size: 11))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.Palette.accent.opacity(0.55))
+            .foregroundStyle(Theme.Palette.textTertiary)
             .help("Remove")
         }
         .padding(.horizontal, Theme.Spacing.small)
         .padding(.vertical, Theme.Spacing.xxSmall + 1)
-        .background(Capsule().fill(Theme.Palette.accent.opacity(Theme.Opacity.tintFill)))
-        .overlay(Capsule().strokeBorder(Theme.Palette.accent.opacity(0.25)))
+        .background(Capsule().fill(Theme.Palette.selection))
     }
 
     private var overflowChip: some View {
         Button("and \(Self.hiddenCount(tokens)) more") { showOverflow = true }
             .font(Theme.Typography.caption.weight(.medium))
-            .foregroundStyle(Theme.Palette.accent)
+            .foregroundStyle(Theme.Palette.textSecondary)
             .padding(.horizontal, Theme.Spacing.small)
             .padding(.vertical, Theme.Spacing.xxSmall + 1)
-            .background(Capsule().fill(Theme.Palette.accent.opacity(Theme.Opacity.tintFill)))
-            .overlay(Capsule().strokeBorder(Theme.Palette.accent.opacity(0.25)))
+            .background(Capsule().fill(Theme.Palette.selection))
             .buttonStyle(.plain)
             .popover(isPresented: $showOverflow) {
                 ScrollView {
