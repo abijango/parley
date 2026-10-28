@@ -77,8 +77,10 @@ private struct WindowConfigurator: NSViewRepresentable {
     }
 }
 
-/// The live recording experience: recording controls + session metadata on top,
-/// the live transcription stream filling the body, and a result/footer bar.
+/// The live recording screen: the transcript fills the center with a rounded composer
+/// bar (Start/Stop, timer, meters, audio sources) floating at the bottom, and the
+/// meeting details + notes in the right rail. When a recording finishes, the shell
+/// jumps to the new note in the sidebar.
 struct RecordDetailView: View {
     @EnvironmentObject private var recording: RecordingController
     @ObservedObject private var live = RecordingController.shared.live
@@ -87,7 +89,7 @@ struct RecordDetailView: View {
     @EnvironmentObject private var vault: VaultDirectory
     @ObservedObject private var summaryService = RecordingController.shared.summaryService
     @State private var apps: [CapturableApp] = []
-    @State private var mode: WindowMode = .live
+    @State private var showingSources = false
     @State private var pendingPerson: PendingPerson?
     /// Distinguishes the user's typing in the Title field from programmatic
     /// auto-fill (discovered titles): only focused changes count as user edits.
@@ -104,25 +106,21 @@ struct RecordDetailView: View {
     /// the old fixed 300); double-clicking the divider resets to it.
     @AppStorage("parley.inspectorWidth") private var inspectorWidth: Double = 340
     @AppStorage("parley.meetingDetailsExpanded") private var meetingDetailsExpanded = false
-    @AppStorage("parley.audioSettingsExpanded") private var audioSettingsExpanded = false
     @State private var dragBaseWidth: Double?
     private static let inspectorWidthRange: ClosedRange<Double> = 280...440
     private static let defaultInspectorWidth: Double = 340
 
     /// Pre-first-recording: no live segments yet and not actively recording.
     private var isPreRecordIdle: Bool {
-        mode == .live && !recording.isRecording && live.segments.isEmpty
+        !recording.isRecording && live.segments.isEmpty
     }
 
+    /// Once the finished transcript is written (and any enrichment sheet is closed),
+    /// select it in the sidebar so the note — and its summary — take the center.
     private func showPreviewIfSettled() {
-        guard recording.lastTranscriptURL != nil, !recording.isRecording else { return }
+        guard let url = recording.lastTranscriptURL, !recording.isRecording else { return }
         guard recording.pendingEnrichment == nil else { return }
-        mode = .preview
-    }
-
-    enum WindowMode: String, CaseIterable, Identifiable {
-        case live = "Live", preview = "Preview"
-        var id: String { rawValue }
+        recording.historyFocusPath = url.path
     }
 
     /// A new attendee name awaiting rich-contact entry.
@@ -132,39 +130,29 @@ struct RecordDetailView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                inspectorDivider
-                inspector
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            OfflinePassBar()
-            footer
+        HStack(spacing: 0) {
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            inspectorDivider
+            inspector
         }
         .frame(minWidth: 480, minHeight: 520)
         .onAppear {
             apps = ProcessLister.capturableApps()
             axTrusted = PermissionManager.accessibilityAuthorized()
-            recording.modeResetForNextMeeting = { mode = .live }
         }
         // The user grants AX in System Settings and comes back — that return is the only
         // moment the cached trust can go stale.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             axTrusted = PermissionManager.accessibilityAuthorized()
         }
-        // Auto-switch to the rendered note when a recording finishes writing it —
-        // but never while a (new) recording is already live, so a back-to-back
-        // auto-started call isn't yanked to the previous call's preview.
+        // Jump to the finished note when a recording writes it — but never while a
+        // (new) recording is already live, so a back-to-back auto-started call isn't
+        // yanked to the previous call's note.
         .onChange(of: recording.lastTranscriptURL) { showPreviewIfSettled() }
         .onChange(of: recording.pendingEnrichment?.id) { showPreviewIfSettled() }
-        // Any recording start (manual OR auto-detected) shows the live transcript.
-        // Auto-record used to leave the window on whatever it was (often the prior
-        // call's Preview), so live text appeared to be "missing" until you switched tabs.
         .onChange(of: recording.isRecording) {
             if recording.isRecording {
-                mode = .live
                 withAnimation(Theme.Motion.quick) { meetingDetailsExpanded = true }
             }
         }
@@ -191,55 +179,169 @@ struct RecordDetailView: View {
         meeting.destinationPath.split(separator: "/").last.map(String.init) ?? ""
     }
 
-    @ViewBuilder private var content: some View {
-        switch mode {
-        case .live:
-            VStack(spacing: 0) {
-                recordControlStrip
-                if let load = modelLoadingInfo {
-                    modelLoadingBar(stage: load.stage, fraction: load.fraction)
-                        .padding(.horizontal, Theme.Spacing.large)
-                        .padding(.bottom, Theme.Spacing.small)
-                }
-                Divider()
-                // An overlay, not a ZStack: during recording the idle message is absent, so
-                // a ZStack was a stack level that held one child and bought nothing but
-                // layout cost. The transcript sits at the bottom of a seven-level nest and
-                // every level multiplies the sizing work — see
-                // docs/LAYOUT_EXPLOSION_AUDIT.md.
-                LiveTranscriptView(
-                    isRecording: recording.isRecording,
-                    people: vault.people,
-                    attendees: TranscriptWriter.splitAttendees(meeting.attendees),
-                    onNameSpeaker: settings.batchMode
-                        ? nil : { id, name in recording.nameSpeaker(id, as: name) },
-                    onMergeSpeaker: settings.batchMode
-                        ? nil : { id, target in recording.mergeSpeaker(id, into: target) },
-                    liveDisabled: settings.batchMode,
-                    hidesEmptyState: isPreRecordIdle
-                )
-                .overlay {
-                    // Scoped to the message that actually animates. Previously this
-                    // animation sat on the whole live VStack, so flipping isPreRecordIdle
-                    // animated a layout pass over the entire transcript subtree. Same
-                    // correction as offlinePassBar above.
-                    Group {
-                        if isPreRecordIdle {
-                            preRecordIdleMessage
-                                .transition(.opacity)
-                        }
+    private var content: some View {
+        VStack(spacing: 0) {
+            if let load = modelLoadingInfo {
+                modelLoadingBar(stage: load.stage, fraction: load.fraction)
+                    .padding(.horizontal, Theme.Spacing.large)
+                    .padding(.vertical, Theme.Spacing.small)
+            }
+            // An overlay, not a ZStack: during recording the idle message is absent, so
+            // a ZStack was a stack level that held one child and bought nothing but
+            // layout cost. The transcript sits at the bottom of a seven-level nest and
+            // every level multiplies the sizing work — see
+            // docs/LAYOUT_EXPLOSION_AUDIT.md.
+            LiveTranscriptView(
+                isRecording: recording.isRecording,
+                people: vault.people,
+                attendees: TranscriptWriter.splitAttendees(meeting.attendees),
+                onNameSpeaker: settings.batchMode
+                    ? nil : { id, name in recording.nameSpeaker(id, as: name) },
+                onMergeSpeaker: settings.batchMode
+                    ? nil : { id, target in recording.mergeSpeaker(id, into: target) },
+                liveDisabled: settings.batchMode,
+                hidesEmptyState: isPreRecordIdle
+            )
+            .overlay {
+                // Scoped to the message that actually animates, so flipping
+                // isPreRecordIdle doesn't animate a layout pass over the transcript.
+                Group {
+                    if isPreRecordIdle {
+                        preRecordIdleMessage
+                            .transition(.opacity)
                     }
-                    .animation(Theme.Motion.spring, value: isPreRecordIdle)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .animation(Theme.Motion.spring, value: isPreRecordIdle)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .preview:
-            VStack(spacing: 0) {
-                previewSummaryBar
-                Divider()
-                TranscriptPreviewView(url: recording.lastTranscriptURL, reloadToken: recording.transcriptRevision)
+
+            OfflinePassBar()
+            VStack(spacing: Theme.Spacing.small) {
+                advisoryRows
+                if case .error(let message) = live.state {
+                    StatusBanner(.danger, message,
+                                 actionLabel: message.localizedCaseInsensitiveContains("microphone") ? "Open Settings" : nil,
+                                 action: message.localizedCaseInsensitiveContains("microphone") ? PermissionManager.openMicrophoneSettings : nil)
+                }
+                afterCallRow
+                composer
             }
+            .frame(maxWidth: 820)
+            .padding(.horizontal, Theme.Spacing.large)
+            .padding(.top, Theme.Spacing.small)
+            .padding(.bottom, Theme.Spacing.large)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Composer
+
+    /// The floating transport bar (Claude-composer style): audio sources on the left,
+    /// status + timer, then word count, model, and Start/Stop. Level meters ride on top
+    /// while recording.
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+            levelMeters
+            HStack(spacing: Theme.Spacing.medium) {
+                sourcesButton
+                statusBadge
+                timerView
+                Spacer(minLength: Theme.Spacing.small)
+                if live.liveWordCount > 0 {
+                    Text("\(live.liveWordCount) \(live.liveWordCount == 1 ? "word" : "words")")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .monospacedDigit()
+                }
+                audioModelBadge
+                recordButton
+                    .frame(width: 104)
+            }
+        }
+        .padding(.horizontal, Theme.Spacing.medium)
+        .padding(.vertical, Theme.Spacing.small + 2)
+        .glassSurface(in: Theme.Radius.rect(Theme.Radius.large))
+    }
+
+    /// "+ Mic · All apps ⌄": opens the capture-source and mic-mode controls.
+    private var sourcesButton: some View {
+        Button { showingSources.toggle() } label: {
+            HStack(spacing: Theme.Spacing.xSmall) {
+                Image(systemName: "plus")
+                    .font(Theme.Typography.controlLabel)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Theme.Palette.selection))
+                Text(sourcesSummary)
+                    .font(Theme.Typography.caption)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(Theme.Palette.textSecondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Audio sources")
+        .popover(isPresented: $showingSources, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+                railField("Other audio") {
+                    audioControls
+                }
+                railField("Microphone") {
+                    micModePicker
+                }
+                if recording.isRecording {
+                    Text("Audio sources are fixed while recording.")
+                        .font(Theme.Typography.captionSecondary)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                }
+            }
+            .padding(Theme.Spacing.large)
+            .frame(width: 320)
+        }
+    }
+
+    private var sourcesSummary: String {
+        let other: String
+        switch settings.captureMode {
+        case .perApp:
+            other = apps.first(where: { $0.id == recording.selectedAppPID })?.name ?? settings.captureMode.label
+        default:
+            other = settings.captureMode.label
+        }
+        return "\(live.micInputMode.label) mic · \(other)"
+    }
+
+    /// After a call: where the note went, the auto-clear countdown (with Keep), and
+    /// "Ready for next" to reset the live screen.
+    @ViewBuilder private var afterCallRow: some View {
+        if let url = recording.lastTranscriptURL, !recording.isRecording {
+            HStack(spacing: Theme.Spacing.medium) {
+                Image(systemName: "checkmark.circle")
+                    .foregroundStyle(Theme.Severity.success.color)
+                Text(recording.lastResult ?? "Saved")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    .buttonStyle(.chip)
+                    .font(Theme.Typography.caption)
+                Spacer(minLength: Theme.Spacing.small)
+                // Escape hatch for the post-meeting auto-clear: while the countdown
+                // ticks, show the remaining seconds and a Keep button that cancels it.
+                if let pc = recording.pendingClear {
+                    Text("Clearing in \(pc.remaining)s").monospacedDigit()
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                    Button("Keep") { recording.cancelPendingClear() }
+                        .buttonStyle(.chip)
+                        .font(Theme.Typography.caption)
+                }
+                Button("Ready for next") { recording.clearForNextMeeting() }
+                    .glassButton()
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, Theme.Spacing.xSmall)
         }
     }
 
@@ -268,30 +370,16 @@ struct RecordDetailView: View {
 
     // MARK: Inspector rail
 
-    /// The right-hand setup rail: audio + meeting metadata. Start/Stop lives in the
-    /// persistent `recordControlStrip` above the transcript so the action never moves.
+    /// The right-hand rail: meeting details and notes. Start/Stop and audio sources
+    /// live in the composer under the transcript.
     private var inspector: some View {
         // A VStack (not a ScrollView): the controls + metadata keep their natural
         // size and the Notes editor fills the remaining height. (A ScrollView would
         // give every child only its ideal height, so Notes could never grow.)
         VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
-            if isPreRecordIdle {
-                idleInspectorSections
-            } else {
-                audioControls
-                Divider().padding(.vertical, Theme.Spacing.xSmall)
-                metadataFields   // editable during recording too (e.g. a mid-call joiner)
-                liveAttachmentsField
-                notesField       // fills the rest of the rail
-            }
-
-            advisoryRows
-
-            if case .error(let message) = live.state {
-                StatusBanner(.danger, message,
-                             actionLabel: message.localizedCaseInsensitiveContains("microphone") ? "Open Settings" : nil,
-                             action: message.localizedCaseInsensitiveContains("microphone") ? PermissionManager.openMicrophoneSettings : nil)
-            }
+            metadataFields   // editable during recording too (e.g. a mid-call joiner)
+            liveAttachmentsField
+            notesField       // fills the rest of the rail
         }
         .padding(Theme.Spacing.large)
         .frame(width: inspectorWidth)
@@ -299,58 +387,7 @@ struct RecordDetailView: View {
         .chromeSurface()
     }
 
-    /// Persistent transport bar: Start/Stop always sits here, above the transcript.
-    private var recordControlStrip: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.small) {
-            ZStack {
-                HStack(alignment: .center, spacing: Theme.Spacing.medium) {
-                    recordButton
-                        .frame(width: 120)
-
-                    statusBadge
-
-                    timerView
-
-                    Spacer(minLength: Theme.Spacing.medium)
-
-                    audioModelBadge
-                }
-
-                micModePicker
-            }
-
-            levelMeters
-        }
-        .padding(.horizontal, Theme.Spacing.large)
-        .padding(.vertical, Theme.Spacing.small)
-        .chromeSurface()
-    }
-
-    /// Pre-record: tuck audio + metadata behind disclosures so the hero owns attention.
-    private var idleInspectorSections: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
-            DisclosureGroup(isExpanded: $audioSettingsExpanded) {
-                audioControls
-                    .padding(.top, Theme.Spacing.xSmall)
-            } label: {
-                Label("Audio", systemImage: "speaker.wave.2")
-                    .font(Theme.Typography.controlLabel)
-            }
-
-            DisclosureGroup(isExpanded: $meetingDetailsExpanded) {
-                VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
-                    metadataFields
-                    notesField
-                }
-                .padding(.top, Theme.Spacing.xSmall)
-            } label: {
-                Label("Meeting details", systemImage: "doc.text")
-                    .font(Theme.Typography.controlLabel)
-            }
-        }
-    }
-
-    /// Informational empty state; Start/Stop is in `recordControlStrip` above.
+    /// Informational empty state; Start/Stop is in the composer below.
     private var preRecordIdleMessage: some View {
         VStack(spacing: Theme.Spacing.large) {
             Image(systemName: settings.batchMode ? "waveform" : "text.bubble")
@@ -497,7 +534,6 @@ struct RecordDetailView: View {
                   systemImage: recording.isRecording ? "stop.fill" : "record.circle")
                 .frame(maxWidth: .infinity)
         }
-        .controlSize(.large)
         .buttonStyle(InkButtonStyle(role: recording.isRecording ? .primary : .clay))
         .disabled(live.state == .preparing || live.state == .stopping)
     }
@@ -505,7 +541,7 @@ struct RecordDetailView: View {
     private func toggleRecording() {
         Task {
             if recording.isRecording { recording.stop() }
-            else { mode = .live; await recording.start() }
+            else { await recording.start() }
         }
     }
 
@@ -514,7 +550,7 @@ struct RecordDetailView: View {
         if let started = live.recordingStarted {
             TimelineView(.periodic(from: started, by: 1)) { context in
                 Text(Self.elapsed(from: started, to: context.date))
-                    .font(Theme.Typography.monoLarge)
+                    .font(Theme.Typography.mono)
                     .monospacedDigit()
                     .contentTransition(.numericText())
             }
@@ -733,58 +769,6 @@ struct RecordDetailView: View {
         }
     }
 
-    // MARK: Footer
-
-    private var footer: some View {
-        HStack(spacing: Theme.Spacing.medium) {
-            // Word count is always shown; the saved-path line sits beneath it once a
-            // transcript has been written (own line, so the two never collide).
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                if live.liveWordCount > 0 {
-                    Text("\(live.liveWordCount) \(live.liveWordCount == 1 ? "word" : "words")")
-                        .font(Theme.Typography.body).foregroundStyle(.secondary)
-                }
-                if let result = recording.lastResult {
-                    Text(result)
-                        .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-                        .lineLimit(1).truncationMode(.middle)
-                }
-            }
-            Spacer()
-            // Escape hatch for the post-meeting auto-clear: while the countdown
-            // ticks, surface the remaining seconds and a Keep button that cancels
-            // it, so a finished recording is never discarded out from under the user.
-            if let pc = recording.pendingClear {
-                HStack(spacing: Theme.Spacing.xSmall) {
-                    Image(systemName: "clock.arrow.circlepath")
-                    Text("Clearing in \(pc.remaining)s").monospacedDigit()
-                    Button("Keep") { recording.cancelPendingClear() }
-                        .buttonStyle(.chip)
-                }
-                .font(Theme.Typography.caption)
-                .foregroundStyle(.secondary)
-            }
-            if recording.lastTranscriptURL != nil, !recording.isRecording {
-                Button("Ready for next") {
-                    mode = .live
-                    recording.clearForNextMeeting()
-                }
-                .font(Theme.Typography.caption)
-                .glassProminentButton()
-                .controlSize(.small)
-            }
-            if let url = recording.lastTranscriptURL {
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                }
-                .font(Theme.Typography.caption)
-            }
-        }
-        .padding(.horizontal, Theme.Spacing.large)
-        .padding(.vertical, Theme.Spacing.small)
-        .chromeSurface()
-    }
-
     // MARK: Status helpers
 
     private var statusText: String {
@@ -844,7 +828,7 @@ private struct RecordLevelMeters: View {
     @ObservedObject private var meters = RecordingController.shared.live.meters
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+        HStack(spacing: Theme.Spacing.large) {
             InputLevelBar(label: "Mic", level: meters.micLevel, warn: meters.micSeemsSilent)
             InputLevelBar(label: "Remote", level: meters.remoteLevel)
         }
@@ -884,7 +868,7 @@ private struct OfflinePassBar: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
-                .background(.quaternary.opacity(Theme.Opacity.surface))
+
             } else if offline.runningProgress != nil {
                 let running = offline.runningProgress.flatMap {
                     StageBarModel.fuse(offlineState: .running, offlineProgress: $0,
@@ -902,7 +886,7 @@ private struct OfflinePassBar: View {
                         }
                     }
                     .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
-                    .background(.quaternary.opacity(Theme.Opacity.surface))
+    
                 }
             } else if waitingCount > 0, !controller.sessionBatchMode, let remaining = controller.idleDrainRemaining {
                 HStack(spacing: Theme.Spacing.small) {
@@ -912,7 +896,7 @@ private struct OfflinePassBar: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, Theme.Spacing.large).padding(.vertical, Theme.Spacing.small)
-                .background(.quaternary.opacity(Theme.Opacity.surface))
+
             }
         }
         .animation(Theme.Motion.gentle, value: waitingCount)

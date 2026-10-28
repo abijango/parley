@@ -263,8 +263,45 @@ extension HistoryView {
         case .people:
             PeopleView(voiceprintStore: recording.voiceprints)
         case .notes:
-            detail
+            VStack(spacing: 0) {
+                detail
+                if recording.isRecording {
+                    stillRecordingBar
+                }
+            }
         }
+    }
+
+    /// Where the composer sits on the live screen: a reminder that a call is still
+    /// being recorded while you read another note, with a way back.
+    var stillRecordingBar: some View {
+        HStack(spacing: Theme.Spacing.small) {
+            Image(systemName: "record.circle.fill")
+                .foregroundStyle(Theme.Severity.danger.color)
+            Text(meetingTitleWhileRecording)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .lineLimit(1)
+            LiveElapsedLabel()
+            Spacer(minLength: Theme.Spacing.small)
+            Button("Back to live", action: showLive)
+                .glassButton()
+                .controlSize(.small)
+        }
+        .padding(.horizontal, Theme.Spacing.medium)
+        .padding(.vertical, Theme.Spacing.small)
+        .background(Theme.Radius.rect(Theme.Radius.large).fill(Theme.Palette.panelBg))
+        .overlay(Theme.Radius.rect(Theme.Radius.large)
+            .strokeBorder(Theme.Severity.danger.color.opacity(0.35), lineWidth: 0.5))
+        .frame(maxWidth: 820)
+        .padding(.horizontal, Theme.Spacing.large)
+        .padding(.bottom, Theme.Spacing.large)
+        .padding(.top, Theme.Spacing.small)
+    }
+
+    var meetingTitleWhileRecording: String {
+        let title = RecordingController.shared.meeting.meetingTitle
+        return title.isEmpty ? "Still recording" : "Still recording “\(title)”"
     }
 }
 
