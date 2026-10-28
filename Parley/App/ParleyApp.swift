@@ -46,9 +46,11 @@ struct ParleyApp: App {
         }
         // Settings defaults to contentSize (non-free resize). contentMinSize lets the
         // user grow the window past the content minimum — System Settings-style.
-        .defaultSize(width: 780, height: 560)
+        .defaultSize(width: 960, height: 680)
         .windowResizability(.contentMinSize)
-        .windowToolbarStyle(.unified)
+        // Same chrome as the main window: compact toolbar, title text hidden (the
+        // sidebar and page titles carry the context).
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
     }
 
     static let mainWindowID = "main"

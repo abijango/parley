@@ -1,10 +1,9 @@
 import SwiftUI
 import AppKit
 
-/// Settings pane: seven tabs, all rendered as grouped forms (the System
-/// Settings idiom) so every tab shares one container style, one inset rhythm,
-/// and native section cards — replacing the three ad-hoc layout idioms the
-/// design audit catalogued.
+/// The Settings window (Claude-app style): a sidebar with search and grouped pages, and
+/// a roomy content column of titled sections with label-left / control-right rows (see
+/// `SettingsLayout.swift`). Searching shows every matching row across all pages.
 struct SettingsView: View {
     @EnvironmentObject private var recording: RecordingController
     @EnvironmentObject private var settings: AppSettings
@@ -16,101 +15,519 @@ struct SettingsView: View {
     @State private var purgeDays = 14
     @State private var pendingBulkDelete: [RecordingFolder]?
     @State private var storageStatus: String?
-    /// AX trust has no change notification — refreshed when the Detection tab appears.
+    /// AX trust has no change notification — refreshed when the Permissions page appears.
     @State private var axTrusted = PermissionManager.accessibilityAuthorized()
     @StateObject private var groundTruthEval = SummaryGroundTruthEval()
+    @State private var knowledgeStatus: String?
 
-    /// Settings sections — rendered as a left sidebar (Cursor / System-Settings idiom)
-    /// rather than top tabs.
-    enum SettingsTab: String, CaseIterable, Identifiable {
-        case general, transcription, notes, summary, detection, storage, vault
+    @State private var page: Page = .general
+    @State private var searchText = ""
+    @State private var pageMatchCounts: [Page: Int] = [:]
+    @State private var editing: LongEditor?
+    @FocusState private var searchFocused: Bool
+
+    enum Page: String, CaseIterable, Identifiable {
+        case general, detection, transcription, summaries, contacts, storage, permissions, developer
         var id: String { rawValue }
         var title: String {
             switch self {
             case .general:       return "General"
+            case .detection:     return "Call detection"
             case .transcription: return "Transcription"
-            case .notes:         return "Notes"
-            case .summary:       return "Summary"
-            case .detection:     return "Detection"
+            case .summaries:     return "Summaries"
+            case .contacts:      return "Contacts and filing"
             case .storage:       return "Storage"
-            case .vault:         return "Vault"
+            case .permissions:   return "Permissions"
+            case .developer:     return "Developer"
             }
         }
         var icon: String {
             switch self {
             case .general:       return "gearshape"
+            case .detection:     return "phone.connection"
             case .transcription: return "waveform"
-            case .notes:         return "doc.text"
-            case .summary:       return "rectangle.split.3x1"
-            case .detection:     return "dot.radiowaves.left.and.right"
+            case .summaries:     return "sparkles"
+            case .contacts:      return "person.crop.rectangle.stack"
             case .storage:       return "internaldrive"
-            case .vault:         return "folder"
+            case .permissions:   return "lock.shield"
+            case .developer:     return "chevron.left.forwardslash.chevron.right"
+            }
+        }
+        var group: String {
+            switch self {
+            case .general, .detection, .transcription, .summaries: return "Settings"
+            case .contacts, .storage: return "Library"
+            case .permissions, .developer: return "Advanced"
             }
         }
     }
 
-    @State private var selection: SettingsTab? = .general
+    /// Long text settings, edited in a sheet.
+    enum LongEditor: String, Identifiable {
+        case summaryPrompt, checkerInstructions, notesPrompt, conferencingApps, scanRoots
+        var id: String { rawValue }
+    }
+
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespaces).lowercased()
+    }
 
     /// Cap the settings window to the visible screen (never larger than display).
     private var screenMaxSize: CGSize {
         let frame = NSScreen.main?.visibleFrame
             ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
-        return CGSize(
-            width: max(680, frame.width - 80),
-            height: max(420, frame.height - 80))
+        return CGSize(width: max(760, frame.width - 80), height: max(520, frame.height - 80))
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(SettingsTab.allCases, selection: $selection) { tab in
-                Label(tab.title, systemImage: tab.icon)
-                    .tag(tab)
-            }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 260)
-        } detail: {
-            Group {
-                detailContent
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            // Section name pinned like System Settings / Cursor preferences.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                HStack {
-                    Text((selection ?? .general).title)
-                        .font(Theme.Typography.screenTitle)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, Theme.Spacing.xLarge)
-                .padding(.top, Theme.Spacing.medium)
-                .padding(.bottom, Theme.Spacing.small)
-                .frame(maxWidth: .infinity)
-                .background(.bar)
-                .overlay(alignment: .bottom) { Divider() }
-            }
-            // macOS Form toggles default to a checkbox — force the switch.
-            .toggleStyle(.switch)
-            .tint(Theme.Palette.accent)
+        HStack(spacing: 0) {
+            sidebar
+            Divider().ignoresSafeArea(.container, edges: .top)
+            content
         }
-        .navigationSplitViewStyle(.balanced)
-        .navigationTitle("Settings")
-        .frame(minWidth: 680, minHeight: 420)
+        .frame(minWidth: 760, minHeight: 520)
+        .background(Theme.Palette.windowBg)
+        .toggleStyle(.switch)
+        .tint(Theme.Palette.ink)
         .background(SettingsWindowConfigurator(maxSize: screenMaxSize))
+        .sheet(item: $editing) { editor in editorSheet(editor) }
     }
 
-    @ViewBuilder
-    private var detailContent: some View {
-        switch selection ?? .general {
-        case .general:       generalTab
-        case .transcription: transcriptionTab
-        case .notes:         notesTab
-        case .summary:       summaryTab
-        case .detection:     detectionTab
-        case .storage:       storageTab
-        case .vault:         vaultTab
+    // MARK: Sidebar
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            searchField
+                .padding(.bottom, Theme.Spacing.small)
+            ForEach(["Settings", "Library", "Advanced"], id: \.self) { group in
+                Text(group)
+                    .font(Theme.Typography.captionSecondary)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .padding(.horizontal, Theme.Spacing.small)
+                    .padding(.top, Theme.Spacing.medium)
+                    .padding(.bottom, Theme.Spacing.xSmall)
+                ForEach(Page.allCases.filter { $0.group == group }) { p in
+                    navRow(p)
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Spacing.small)
+        .padding(.top, Theme.Spacing.small)
+        .frame(width: 220)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Theme.Palette.sidebarBg.ignoresSafeArea())
+    }
+
+    private var searchField: some View {
+        HStack(spacing: Theme.Spacing.small) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Theme.Palette.textTertiary)
+            TextField("Search settings", text: $searchText)
+                .textFieldStyle(.plain)
+                .focused($searchFocused)
+                .onAppear { searchFocused = true }
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.Palette.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+        }
+        .font(Theme.Typography.body)
+        .padding(.horizontal, Theme.Spacing.small + 2)
+        .frame(height: 30)
+        .background(Theme.Radius.rect(Theme.Radius.small).fill(Theme.Palette.panelBg))
+        .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(Theme.Palette.divider, lineWidth: 0.5))
+    }
+
+    private func navRow(_ p: Page) -> some View {
+        let count = pageMatchCounts[p] ?? 0
+        let dimmed = !query.isEmpty && count == 0
+        return Button {
+            searchText = ""
+            page = p
+        } label: {
+            HStack(spacing: Theme.Spacing.small) {
+                Image(systemName: p.icon)
+                    .frame(width: 20)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                Text(p.title)
+                    .foregroundStyle(Theme.Palette.textBody)
+                Spacer(minLength: 0)
+                if !query.isEmpty, count > 0 {
+                    Text("\(count)")
+                        .font(Theme.Typography.captionSecondary)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .monospacedDigit()
+                }
+            }
+            .font(Theme.Typography.body)
+        }
+        .buttonStyle(.row(selected: query.isEmpty && page == p))
+        .opacity(dimmed ? 0.4 : 1)
+    }
+
+    // MARK: Content
+
+    private var content: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if query.isEmpty {
+                    pageTitle(page.title)
+                    pageBody(page)
+                } else {
+                    pageTitle("Results for “\(searchText.trimmingCharacters(in: .whitespaces))”")
+                    ForEach(Page.allCases) { p in
+                        SearchPageGroup(page: p, query: query) { pageBody(p) }
+                    }
+                    if pageMatchCounts.values.reduce(0, +) == 0 {
+                        Text("No settings match. Try “audio”, “summary”, or “log”.")
+                            .font(Theme.Typography.body)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                            .padding(.top, Theme.Spacing.large)
+                    }
+                }
+            }
+            .environment(\.settingsQuery, query)
+            .frame(maxWidth: 760, alignment: .leading)
+            .padding(.horizontal, Theme.Spacing.xxLarge)
+            .padding(.top, Theme.Spacing.large)
+            .padding(.bottom, Theme.Spacing.xxLarge)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onPreferenceChange(PageMatchCountsKey.self) { pageMatchCounts = $0 }
+        }
+        .scrollContentBackground(.hidden)
+    }
+
+    private func pageTitle(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.Typography.screenTitle)
+            .foregroundStyle(Theme.Palette.textPrimary)
+            .padding(.bottom, Theme.Spacing.xSmall)
+    }
+
+    @ViewBuilder private func pageBody(_ p: Page) -> some View {
+        switch p {
+        case .general:       generalPage
+        case .detection:     detectionPage
+        case .transcription: transcriptionPage
+        case .summaries:     summariesPage
+        case .contacts:      contactsPage
+        case .storage:       storagePage
+        case .permissions:   permissionsPage
+        case .developer:     developerPage
         }
     }
 
-    /// One consistent caption treatment for explanatory text under a control.
+    // MARK: Shared bits
+
+    /// A compact menu picker sized for the control column.
+    private func menuPicker<V: Hashable, Content: View>(_ selection: Binding<V>,
+                                                        @ViewBuilder _ options: () -> Content) -> some View {
+        Picker("", selection: selection, content: options)
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+    }
+
+    private func editButton(_ editor: LongEditor) -> some View {
+        Button("Edit…") { editing = editor }.glassButton()
+    }
+
+    private func pathField(_ placeholder: String, _ text: Binding<String>) -> some View {
+        TextField(placeholder, text: text)
+            .textFieldStyle(.parley)
+            .font(Theme.Typography.mono)
+            .frame(width: 280)
+    }
+
+    @ViewBuilder private func editorSheet(_ editor: LongEditor) -> some View {
+        switch editor {
+        case .summaryPrompt:
+            SettingsEditorSheet(
+                title: "Summary prompt",
+                detail: "The instructions the summarizer follows (same for every backend). Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.",
+                text: $settings.summaryPromptTemplate,
+                resetValue: AppSettings.defaultSummaryPrompt)
+        case .checkerInstructions:
+            SettingsEditorSheet(
+                title: "Checker instructions",
+                detail: "Rules the checker follows when reviewing the writer's draft. The transcript, contacts, attendees, and draft are appended automatically — no {{tokens}} here.",
+                text: $settings.summaryCheckerPromptTemplate,
+                resetValue: SummaryCheckerPromptBuilder.defaultInstructions)
+        case .notesPrompt:
+            SettingsEditorSheet(
+                title: "Meeting notes prompt",
+                detail: "Used by Claude when generating meeting notes from a recording.",
+                text: $settings.claudePromptTemplate,
+                resetValue: AppSettings.defaultClaudePrompt)
+        case .conferencingApps:
+            SettingsEditorSheet(
+                title: "Known conferencing apps",
+                detail: "Bundle IDs, one per line. Known apps can auto-record; others only notify.",
+                text: $settings.conferencingBundleIDsRaw,
+                resetValue: AppSettings.defaultConferencingBundleIDs)
+        case .scanRoots:
+            SettingsEditorSheet(
+                title: "Filing locations",
+                detail: "Scan roots, one per line. Their subfolders become the filing destinations offered in the picker.",
+                text: $settings.scanRootsRaw)
+        }
+    }
+
+    // MARK: General
+
+    private var generalPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("Vault") {
+                SettingRow("Obsidian vault", description: "Where notes, transcripts, and contacts live.",
+                           keywords: "path folder") {
+                    pathField("path to your vault", $settings.vaultPath)
+                }
+                SettingRow("Transcripts folder", description: AppPaths.unprocessedURL.path) {
+                    Button("Reveal") {
+                        NSWorkspace.shared.activateFileViewerSelecting([AppPaths.unprocessedURL])
+                    }
+                    .glassButton()
+                }
+            }
+            SettingsSection("Recording") {
+                SettingRow("Default other-audio capture",
+                           description: "How the far side of a call is captured when a recording starts.",
+                           keywords: "system audio per app") {
+                    PillPicker(selection: Binding(
+                        get: { settings.captureMode }, set: { settings.captureMode = $0 }
+                    ), options: CaptureMode.allCases) { Text($0.label) }
+                }
+                SettingRow("Start or stop recording",
+                           description: "Keyboard shortcut, from anywhere in Parley.",
+                           keywords: "shortcut hotkey keyboard") {
+                    Text(RecordingCommands.shortcutLabel)
+                        .font(Theme.Typography.controlLabel)
+                        .padding(.horizontal, Theme.Spacing.small)
+                        .frame(height: 24)
+                        .background(Theme.Radius.rect(Theme.Radius.chip).fill(Theme.Palette.selection))
+                }
+            }
+        }
+    }
+
+    // MARK: Call detection
+
+    private var detectionPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("Detection") {
+                SettingRow("Detect calls automatically",
+                           description: "Watches which apps hold the microphone to spot a call.",
+                           keywords: "teams zoom webex meet") {
+                    Toggle("", isOn: $settings.callDetectionEnabled)
+                }
+                SettingRow("Auto-record when a known app starts a call",
+                           description: "When off, a notification with a Start button appears instead.") {
+                    Toggle("", isOn: $settings.autoRecordEnabled)
+                        .disabled(!settings.callDetectionEnabled)
+                }
+                SettingRow("Suggest meeting title and attendees",
+                           description: "Reads the meeting window via Accessibility. In-call people are added automatically; invite-list names are not.",
+                           keywords: "accessibility metadata") {
+                    Toggle("", isOn: $settings.metadataDiscoveryEnabled)
+                        .disabled(!settings.callDetectionEnabled)
+                }
+                SettingRow("Call-end grace",
+                           description: "How long after the app releases the microphone before the call is treated as ended and recording stops.") {
+                    HStack(spacing: Theme.Spacing.small) {
+                        Slider(value: $settings.callEndGraceSeconds, in: 5...60, step: 1)
+                            .frame(width: 160)
+                        Text("\(Int(settings.callEndGraceSeconds))s")
+                            .font(Theme.Typography.mono).foregroundStyle(.secondary).monospacedDigit()
+                            .frame(width: 32, alignment: .trailing)
+                    }
+                    .disabled(!settings.callDetectionEnabled)
+                }
+            }
+            SettingsSection("After a meeting") {
+                SettingRow("Clear for the next call",
+                           description: "Once a recording finishes, reset the title, attendees, filing, notes, and transcript. Any edit cancels it.") {
+                    menuPicker($settings.autoClearSeconds) {
+                        Text("Off").tag(0.0)
+                        Text("15 seconds").tag(15.0)
+                        Text("30 seconds").tag(30.0)
+                        Text("1 minute").tag(60.0)
+                        Text("2 minutes").tag(120.0)
+                    }
+                }
+                SettingRow("Idle before background work",
+                           description: "How long to stay idle after a call before summaries and speaker detection start. A new recording cancels the wait.") {
+                    menuPicker($settings.idleDrainSeconds) {
+                        Text("Off").tag(0.0)
+                        Text("30 seconds").tag(30.0)
+                        Text("1 minute").tag(60.0)
+                        Text("2 minutes").tag(120.0)
+                    }
+                }
+                SettingRow("Quiet hours for held jobs",
+                           description: "Held speaker passes and summaries stay parked during the day. From 22:00–07:00 they may run after the idle wait.") {
+                    Toggle("", isOn: $settings.quietHoursEnabled)
+                }
+            }
+        }
+    }
+
+    // MARK: Transcription
+
+    private var transcriptionPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("Speech model") {
+                FluidModelRow(models: recording.fluidModels, settings: settings, isRecording: recording.isRecording)
+            }
+            SettingsSection("Live transcript") {
+                SettingRow("Batch mode",
+                           description: "Record audio only; transcribe when the call ends. English uses the accurate offline model, other languages Parakeet v3.") {
+                    Toggle("", isOn: $settings.batchMode)
+                }
+                if settings.batchMode {
+                    SettingRow("Transcribe", description: "When batch transcription runs.") {
+                        PillPicker(selection: Binding(
+                            get: { settings.transcriptionTiming },
+                            set: { settings.transcriptionTiming = $0 }
+                        ), options: [TranscriptionTiming.afterCall, .window]) {
+                            Text($0 == .afterCall ? "After each call" : "Daily window")
+                        }
+                    }
+                    if settings.transcriptionTiming == .window {
+                        SettingRow("Window",
+                                   description: "Outside this window, recordings wait. Overnight windows are allowed, e.g. 22:00 to 07:00.") {
+                            HStack(spacing: Theme.Spacing.medium) {
+                                Stepper(value: $settings.transcriptionWindowStartHour, in: 0...23) {
+                                    Text(String(format: "%02d:00", settings.transcriptionWindowStartHour)).monospacedDigit()
+                                }
+                                Text("to").foregroundStyle(.secondary)
+                                Stepper(value: $settings.transcriptionWindowEndHour, in: 0...23) {
+                                    Text(String(format: "%02d:00", settings.transcriptionWindowEndHour)).monospacedDigit()
+                                }
+                            }
+                        }
+                    }
+                }
+                if FluidAsrRouting.usesParakeetUnified(settings: settings) {
+                    SettingRow("Latency", description: "Parakeet Unified streams at 2080 ms (English). Latency tiers apply to the multilingual model only.") {
+                        EmptyView()
+                    }
+                } else {
+                    SettingRow("Latency", description: "Smaller chunks show text sooner; larger chunks are more accurate.") {
+                        menuPicker(Binding(
+                            get: { settings.liveStreamingTier },
+                            set: { settings.liveStreamingTier = $0 }
+                        )) {
+                            ForEach(FluidStreamingTier.allCases) { Text($0.label).tag($0) }
+                        }
+                        .disabled(recording.isRecording)
+                    }
+                }
+                SettingRow("Language",
+                           description: "Auto uses the full multilingual model; a Latin-script language loads a smaller, faster one.") {
+                    menuPicker($settings.liveStreamingLanguage) {
+                        Text("Auto (all languages)").tag("auto")
+                        Text("English").tag("en-US")
+                        Text("Spanish").tag("es")
+                        Text("French").tag("fr")
+                        Text("German").tag("de")
+                        Text("Italian").tag("it")
+                        Text("Portuguese").tag("pt")
+                        Text("Chinese").tag("zh-CN")
+                        Text("Japanese").tag("ja")
+                    }
+                    .disabled(recording.isRecording)
+                }
+            }
+            SettingsSection("English") {
+                SettingRow("Parakeet Unified",
+                           description: "For English sessions: ~2 s streaming latency and a full-attention offline pass.") {
+                    Toggle("", isOn: $settings.useParakeetUnified)
+                        .disabled(recording.isRecording)
+                }
+                SettingRow("Boost attendee names",
+                           description: "Adds attendee and title words to the offline re-pass vocabulary (multilingual path). Short, ordinary words are held back.",
+                           keywords: "vocabulary") {
+                    Toggle("", isOn: $settings.boostAttendeeNames)
+                        .disabled(recording.isRecording)
+                }
+                if settings.boostAttendeeNames {
+                    SettingsBlock { vocabularyPreview }
+                }
+            }
+            SettingsSection("Final transcript") {
+                SettingRow("Re-transcribe after stopping",
+                           description: "A full-context pass over the recording, more accurate than the live chunks. Adds a few seconds at stop.",
+                           keywords: "repass accuracy") {
+                    Toggle("", isOn: $settings.offlineAsrRepass)
+                }
+                SettingRow("GPU encoder",
+                           description: "Runs the Parakeet v3 encoder on the GPU during the offline pass (~8% faster).") {
+                    Toggle("", isOn: $settings.fluidGpuEncoder)
+                        .disabled(recording.isRecording)
+                }
+            }
+            SettingsSection("Speakers") {
+                SettingRow("Speaker separation",
+                           description: "How readily two voices are treated as the same person. Too high merges speakers; too low splits one person. ~0.6–0.7 suits most calls.",
+                           keywords: "diarization threshold") {
+                    sliderControl($settings.diarizationThreshold, 0.40...0.80, step: 0.05,
+                                  label: String(format: "%.2f", settings.diarizationThreshold))
+                        .disabled(recording.isRecording)
+                }
+                SettingRow("Recognition threshold",
+                           description: "How close a voice must be to a saved person before it's auto-named. Higher is stricter.",
+                           keywords: "voiceprint identify") {
+                    sliderControl($settings.identificationThreshold, 0.40...0.85, step: 0.05,
+                                  label: String(format: "%.2f", settings.identificationThreshold))
+                }
+                SettingRow("Speech before naming",
+                           description: "Clean speech needed before a speaker is auto-identified.",
+                           keywords: "voiceprint identify") {
+                    sliderControl($settings.minSpeechToIdentify, 2...15, step: 1,
+                                  label: "\(Int(settings.minSpeechToIdentify)) s")
+                }
+                SettingsNote("Manage voiceprints — rebuild, delete, and back up — in People.")
+            }
+            SettingsSection("Memory") {
+                SettingRow("Unload the model when idle",
+                           description: "Frees memory between calls. It reloads on the next call; capture starts immediately.") {
+                    Toggle("", isOn: $settings.idleUnloadEnabled)
+                }
+                if settings.idleUnloadEnabled {
+                    SettingRow("Unload after") {
+                        Stepper("\(Int(settings.idleUnloadMinutes)) min",
+                                value: $settings.idleUnloadMinutes, in: 1...60, step: 1)
+                            .labelsHidden()
+                        Text("\(Int(settings.idleUnloadMinutes)) min").monospacedDigit()
+                    }
+                }
+                SettingRow("Reset model cache",
+                           description: "If transcription crashes on load, the compiled-model cache may be corrupt. Resetting rebuilds it.") {
+                    Button("Reset") {
+                        FluidModelManager.clearCompiledCache()
+                        Task { _ = await recording.fluidModels.prepare() }
+                    }
+                    .glassButton()
+                    .disabled(recording.isRecording)
+                }
+            }
+        }
+    }
+
+    private func sliderControl(_ value: Binding<Double>, _ range: ClosedRange<Double>,
+                               step: Double, label: String) -> some View {
+        HStack(spacing: Theme.Spacing.small) {
+            Slider(value: value, in: range, step: step).frame(width: 160)
+            Text(label)
+                .font(Theme.Typography.mono).foregroundStyle(.secondary).monospacedDigit()
+                .frame(width: 40, alignment: .trailing)
+        }
+    }
+
     /// Shows the terms this meeting would boost, and why the rejects were rejected.
     /// The 2026-09-14 corruption was invisible precisely because nothing surfaced
     /// that "Steps", "Next" and "Carlos" had been handed to the recogniser.
@@ -164,7 +581,6 @@ struct SettingsView: View {
                     }
                 }
             }
-            .padding(.leading, Theme.Spacing.small)
         }
     }
 
@@ -174,472 +590,383 @@ struct SettingsView: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// One consistent border treatment for every TextEditor in Settings.
-    private func editorStyle<V: View>(_ editor: V, height: CGFloat) -> some View {
-        editor
-            .font(Theme.Typography.mono)
-            .frame(height: height)
-            .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
-    }
+    // MARK: Summaries
 
-    // MARK: General
-
-    private var generalTab: some View {
-        Form {
-            Section("Paths") {
-                LabeledContent("Obsidian vault") {
-                    TextField("path to your vault", text: $settings.vaultPath)
-                        .textFieldStyle(.parley).frame(maxWidth: 280)
-                }
-                SettingRow("Transcripts folder") {
-                    Text(AppPaths.unprocessedURL.path)
-                        .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                        .frame(maxWidth: 280, alignment: .trailing)
-                }
-            }
-            Section("Recording") {
-                SettingRow("Default other-audio capture",
-                           description: "How the far side of a call is captured when a recording starts.") {
-                    Picker("", selection: Binding(
-                        get: { settings.captureMode }, set: { settings.captureMode = $0 }
-                    )) {
-                        ForEach(CaptureMode.allCases) { Text($0.label).tag($0) }
-                    }
-                    .labelsHidden().fixedSize()
-                }
-            }
-            Section("Logs") {
-                SettingRow("Diagnostic log", description: AppLog.fileURL.path) {
-                    HStack(spacing: Theme.Spacing.small) {
-                        Button("Reveal") {
-                            NSWorkspace.shared.activateFileViewerSelecting([AppLog.fileURL])
-                        }
-                        Button("Clear") { AppLog.clear() }
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    // MARK: Summary
-
-    private var summaryTab: some View {
-        Form {
-            Section("Meeting summaries") {
-                helpText("After a recording's speakers are assigned, a summary is written in the background. When it's ready, review it in History → \"Review\", set where it's filed, then commit it to your vault. The filed note includes the raw transcript at the bottom.")
+    private var summariesPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("Behaviour") {
                 SettingRow("Pipeline",
-                           description: "Summary v1 runs one backend. Summary v2 runs a writer then a checker that proposes structured edits for markup review.") {
-                    Picker("", selection: $settings.summaryPipelineRaw) {
-                        ForEach(SummaryPipeline.allCases) { p in
-                            Text(p.label).tag(p.rawValue)
-                        }
+                           description: "v1 runs one backend. v2 runs a writer, then a checker that proposes edits for markup review.") {
+                    menuPicker($settings.summaryPipelineRaw) {
+                        ForEach(SummaryPipeline.allCases) { p in Text(p.label).tag(p.rawValue) }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(maxWidth: 280)
                 }
                 SettingRow("Auto-summarize after speakers are assigned",
-                           description: "When off, summaries only run when you press Summarize on a transcript in History.") {
-                    Toggle("", isOn: $settings.autoRunClaude).labelsHidden()
-                }
-                SettingRow("Delete audio after committing its summary",
-                           description: "Once a summary is filed the note includes the raw transcript inline, so the audio is redundant. Frees significant disk.") {
-                    Toggle("", isOn: $settings.deleteAudioAfterFiling).labelsHidden()
+                           description: "When off, summaries run only when you press Summarize on a meeting.") {
+                    Toggle("", isOn: $settings.autoRunClaude)
                 }
                 SettingRow("Ask before summarizing a batch",
-                           description: "When several notes become ready at once (a backlog, or naming speakers across many), ask once rather than running them all silently — so a burst never unexpectedly burns API usage.") {
+                           description: "When several notes become ready at once, ask once rather than running them all.") {
                     Stepper(value: $settings.summaryBulkThreshold, in: 2...50) {
-                        Text("\(settings.summaryBulkThreshold) notes").font(Theme.Typography.body)
+                        Text("\(settings.summaryBulkThreshold) notes").monospacedDigit()
                     }
-                    .frame(maxWidth: 150)
                 }
                 SettingRow("Auto-resume after a usage limit",
-                           description: "If the summary CLI hits a usage/rate limit, the queue pauses and resumes automatically when the limit lifts. Off keeps it paused until you press Resume.") {
-                    Toggle("", isOn: $settings.summaryAutoResumeAfterLimit).labelsHidden()
+                           description: "Resume the paused queue when the CLI's usage limit lifts. Off keeps it paused until you press Resume.") {
+                    Toggle("", isOn: $settings.summaryAutoResumeAfterLimit)
+                }
+                SettingRow("Delete audio after filing",
+                           description: "The filed note includes the transcript, so the audio is redundant. Frees significant disk.") {
+                    Toggle("", isOn: $settings.deleteAudioAfterFiling)
                 }
             }
 
-            Section("Provider") {
+            SettingsSection("Provider") {
                 if settings.summaryPipeline == .v2 {
-                    SettingRow("Writer", description: settings.summaryWriterBackend.blurb) {
-                        Picker("", selection: $settings.summaryWriterBackendRaw) {
-                            ForEach(SummaryBackend.writerBackends) { backend in
-                                Text(backend.displayName).tag(backend.rawValue)
-                            }
+                    SettingRow("Writer", description: settings.summaryWriterBackend.blurb, keywords: "model backend") {
+                        menuPicker($settings.summaryWriterBackendRaw) {
+                            ForEach(SummaryBackend.writerBackends) { b in Text(b.displayName).tag(b.rawValue) }
                         }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                        .frame(maxWidth: 280)
                     }
-                    SettingRow("Checker", description: settings.summaryCheckerBackend.blurb) {
-                        Picker("", selection: $settings.summaryCheckerBackendRaw) {
-                            ForEach(SummaryBackend.checkerBackends) { backend in
-                                Text(backend.displayName).tag(backend.rawValue)
-                            }
+                    SettingRow("Checker", description: settings.summaryCheckerBackend.blurb, keywords: "model backend") {
+                        menuPicker($settings.summaryCheckerBackendRaw) {
+                            ForEach(SummaryBackend.checkerBackends) { b in Text(b.displayName).tag(b.rawValue) }
                         }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                        .frame(maxWidth: 280)
                     }
                 } else {
-                    SettingRow("Summarize with", description: settings.summaryBackend.blurb) {
-                        Picker("", selection: $settings.summaryBackendRaw) {
-                            ForEach(SummaryBackend.allCases) { backend in
-                                Text(backend.displayName).tag(backend.rawValue)
-                            }
+                    SettingRow("Summarize with", description: settings.summaryBackend.blurb, keywords: "model backend") {
+                        menuPicker($settings.summaryBackendRaw) {
+                            ForEach(SummaryBackend.allCases) { b in Text(b.displayName).tag(b.rawValue) }
                         }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                        .frame(maxWidth: 280)
                     }
+                }
+            }
+
+            SettingsSection("Claude") {
+                SettingsBlock(keywords: "claude cli connection status") { ClaudeConnectionView() }
+                SettingRow("Model", description: "Used for summaries and meeting notes.", keywords: "claude") {
+                    TextField("sonnet", text: $settings.claudeModel)
+                        .textFieldStyle(.parley).font(Theme.Typography.mono).frame(width: 200)
+                }
+                SettingRow("CLI path", description: "Runs `claude -p` (raw prompt, no tools).", keywords: "claude binary") {
+                    pathField("~/.local/bin/claude", $settings.claudeBinaryPath)
                 }
             }
 
             if settings.summaryPipeline == .v2
                 || (settings.summaryPipeline == .classic && settings.summaryBackend.isCursorAgent) {
-                Section("Cursor Agent") {
-                    CursorConnectionView()
+                SettingsSection("Cursor Agent") {
+                    SettingsBlock(keywords: "cursor cli connection status") { CursorConnectionView() }
                     if settings.summaryPipeline == .classic {
-                        LabeledContent("Model id") {
+                        SettingRow("Model id", keywords: "cursor") {
                             Text(settings.summaryBackend.rawValue)
-                                .font(Theme.Typography.mono)
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
+                                .font(Theme.Typography.mono).foregroundStyle(.secondary).textSelection(.enabled)
                         }
                     }
-                    LabeledContent("CLI") {
-                        TextField("/usr/local/bin/cursor", text: $settings.cursorBinaryPath)
-                            .textFieldStyle(.parley).font(Theme.Typography.mono)
+                    SettingRow("CLI path",
+                               description: "Runs `cursor agent -p --mode ask` with your Cursor subscription (read-only).",
+                               keywords: "cursor binary") {
+                        pathField("/usr/local/bin/cursor", $settings.cursorBinaryPath)
                     }
-                    helpText("Runs `cursor agent -p --mode ask --output-format json` with your Cursor subscription. Ask mode is read-only (no vault edits). Sign in once via Terminal if prompted.")
                 }
             }
 
-            if settings.summaryPipeline == .classic && settings.summaryBackend == .claude {
-                Section("Claude") {
-                    ClaudeConnectionView()
-                    LabeledContent("Model") {
-                        TextField("sonnet", text: $settings.claudeModel)
-                            .textFieldStyle(.parley).font(Theme.Typography.mono)
-                            .frame(maxWidth: 220)
-                    }
-                    LabeledContent("CLI") {
-                        TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
-                            .textFieldStyle(.parley).font(Theme.Typography.mono)
-                    }
-                    helpText("Runs `claude -p` (raw prompt, no skill/tools). The status above shows whether the CLI is installed and logged in.")
-                }
-            } else if settings.summaryPipeline == .classic && settings.summaryBackend == .grok {
-                Section("Grok") {
-                    GrokConnectionView()
-                    LabeledContent("Model") {
+            if settings.summaryPipeline == .classic && settings.summaryBackend == .grok {
+                SettingsSection("Grok") {
+                    SettingsBlock(keywords: "grok cli connection status") { GrokConnectionView() }
+                    SettingRow("Model", keywords: "grok") {
                         TextField("grok-4.6", text: $settings.grokModel)
-                            .textFieldStyle(.parley).font(Theme.Typography.mono)
-                            .frame(maxWidth: 220)
+                            .textFieldStyle(.parley).font(Theme.Typography.mono).frame(width: 200)
                     }
-                    LabeledContent("CLI") {
-                        TextField("~/.grok/bin/grok", text: $settings.grokBinaryPath)
-                            .textFieldStyle(.parley).font(Theme.Typography.mono)
+                    SettingRow("CLI path", description: "Runs `grok -p` (raw prompt, JSON on stdout).", keywords: "grok binary") {
+                        pathField("~/.grok/bin/grok", $settings.grokBinaryPath)
                     }
-                    helpText("Runs `grok -p` (raw prompt, no vault tools; JSON on stdout). The status above shows whether the CLI is installed and logged in.")
                 }
             }
 
-            Section("Attachments") {
-                SettingRow("Include in summaries",
-                           description: settings.attachmentUnderstanding.blurb) {
-                    Picker("", selection: $settings.attachmentUnderstandingRaw) {
-                        ForEach(AttachmentUnderstanding.allCases) { mode in
-                            Text(mode.label).tag(mode.rawValue)
-                        }
+            SettingsSection("Attachments") {
+                SettingRow("Include in summaries", description: settings.attachmentUnderstanding.blurb,
+                           keywords: "screenshots images vision") {
+                    menuPicker($settings.attachmentUnderstandingRaw) {
+                        ForEach(AttachmentUnderstanding.allCases) { m in Text(m.label).tag(m.rawValue) }
                     }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 280)
                 }
                 if settings.attachmentUnderstanding == .vision {
-                    Picker("Vision backend", selection: $settings.attachmentVisionBackendRaw) {
-                        ForEach(SummaryBackend.allCases.filter(\.isCursorAgent)) { backend in
-                            Text(backend.displayName).tag(backend.rawValue)
+                    SettingRow("Vision backend",
+                               description: "A read-only Cursor agent pass describes images before summarizing.") {
+                        menuPicker($settings.attachmentVisionBackendRaw) {
+                            ForEach(SummaryBackend.allCases.filter(\.isCursorAgent)) { b in
+                                Text(b.displayName).tag(b.rawValue)
+                            }
                         }
                     }
-                    .pickerStyle(.menu)
-                    helpText("Runs a read-only Cursor agent pass in plan mode to describe images before summarizing.")
                 }
             }
 
-            Section("Prompt") {
-                helpText("The instructions the summarizer follows (same for every backend). Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.")
-                editorStyle(TextEditor(text: $settings.summaryPromptTemplate), height: 220)
-                HStack {
-                    Spacer()
-                    Button("Reset to default") { settings.summaryPromptTemplate = AppSettings.defaultSummaryPrompt }
+            SettingsSection("Prompts") {
+                SettingRow("Summary prompt", description: "The instructions every summarizer follows.",
+                           keywords: "template") {
+                    editButton(.summaryPrompt)
+                }
+                if settings.summaryPipeline == .v2 {
+                    SettingRow("Checker instructions", description: "Rules the checker follows when reviewing a draft.",
+                               keywords: "template") {
+                        editButton(.checkerInstructions)
+                    }
+                }
+                SettingRow("Meeting notes prompt", description: "Used when Claude generates meeting notes.",
+                           keywords: "template") {
+                    editButton(.notesPrompt)
                 }
             }
 
-            Section("Ground truth check") {
-                helpText("Re-runs the selected summarizer on one approved meeting and scores it against the filed note. Use it when a new model ships to compare cost, speed, and how many approved facts it still captures. Fact recall is lexical: a fact counts when most of its names and numbers show up. The check does not file a note.")
+            SettingsSection("Ground truth check") {
                 SettingRow("Example", description: SummaryGroundTruth.rationale) {
                     Text(SummaryGroundTruth.displayTitle)
-                        .font(Theme.Typography.body)
+                        .font(Theme.Typography.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 280, alignment: .trailing)
+                        .frame(maxWidth: 240, alignment: .trailing)
                 }
-                SettingRow(settings.summaryPipeline == .v2 ? "Writer" : "Summarizer",
-                           description: settings.summaryPipeline == .v2
-                               ? "Scores the writer alone, not the checker pass."
-                               : nil) {
+                SettingRow(settings.summaryPipeline == .v2 ? "Run with the writer" : "Run with the summarizer",
+                           description: "Re-runs one approved meeting and scores fact recall against the filed note. Doesn't file a note.",
+                           keywords: "evaluate benchmark recall") {
                     Button(groundTruthEval.phase == .running ? "Running…" : "Run check") {
                         let backend = settings.summaryPipeline == .v2
                             ? settings.summaryWriterBackend
                             : settings.summaryBackend
                         groundTruthEval.run(backend: backend, settings: settings)
                     }
+                    .glassButton()
                     .disabled(groundTruthEval.phase == .running)
                 }
                 if case .failed(let reason) = groundTruthEval.phase {
-                    helpText(reason)
+                    SettingsBlock { helpText(reason) }
                 }
                 if let report = groundTruthEval.report {
                     let recall = Int((report.score.recall * 100).rounded())
-                    let metricsLine = SummaryMetricsFormat.compactLine(metrics: report.metrics)?.text
-                    SettingRow(report.backendName) {
-                        Text("\(recall)% fact recall (\(report.score.matched)/\(report.score.total))")
-                            .font(Theme.Typography.body)
-                            .monospacedDigit()
-                    }
-                    if let metricsLine {
-                        helpText(metricsLine)
-                    }
-                    if !report.score.missedPreviews.isEmpty {
-                        helpText("Missed: " + report.score.missedPreviews.prefix(4).joined(separator: " · "))
+                    SettingRow(report.backendName,
+                               description: [SummaryMetricsFormat.compactLine(metrics: report.metrics)?.text,
+                                             report.score.missedPreviews.isEmpty ? nil
+                                                : "Missed: " + report.score.missedPreviews.prefix(4).joined(separator: " · ")]
+                                   .compactMap { $0 }.joined(separator: "\n")) {
+                        Text("\(recall)% recall (\(report.score.matched)/\(report.score.total))")
+                            .font(Theme.Typography.body).monospacedDigit()
                     }
                 }
             }
+        }
+    }
 
-            if settings.summaryPipeline == .v2 {
-                Section("Checker instructions") {
-                    helpText("Rules the checker follows when reviewing the writer's draft. The transcript, contacts, attendees, and draft are appended automatically — no {{tokens}} here.")
-                    editorStyle(TextEditor(text: $settings.summaryCheckerPromptTemplate), height: 220)
-                    HStack {
-                        Spacer()
-                        Button("Reset to default") {
-                            settings.summaryCheckerPromptTemplate = SummaryCheckerPromptBuilder.defaultInstructions
+    // MARK: Contacts and filing
+
+    private var contactsPage: some View {
+        let rec = vault.reconcileCustomers()
+        return VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("Filing") {
+                SettingRow("Filing locations",
+                           description: "Scan roots whose subfolders become filing destinations: \(settings.scanRoots.joined(separator: ", ")).",
+                           keywords: "scan roots folders destinations") {
+                    editButton(.scanRoots)
+                }
+                SettingRow("Contacts file", description: "Your rolodex, inside the vault.", keywords: "rolodex") {
+                    TextField("Rolodex.md", text: $settings.contactsFileName)
+                        .textFieldStyle(.parley).frame(width: 200)
+                }
+            }
+            SettingsSection("Knowledge") {
+                SettingRow("Knowledge database",
+                           description: knowledgeStatus ?? "Move contacts and knowledge between machines as JSON.",
+                           keywords: "export import json") {
+                    HStack(spacing: Theme.Spacing.small) {
+                        Button("Export…") { exportKnowledgeJSON() }.glassButton()
+                        Button("Import…") { importKnowledgeJSON() }.glassButton()
+                    }
+                }
+                SettingRow("Rolodex",
+                           description: "Sync the knowledge database with \(settings.contactsFileName).",
+                           keywords: "contacts import export") {
+                    HStack(spacing: Theme.Spacing.small) {
+                        Button("Import") { importRolodexToDB() }.glassButton()
+                        Button("Write file") { exportDBToRolodex() }.glassButton()
+                    }
+                }
+            }
+            SettingsSection("Customer reconciliation") {
+                SettingRow("Customers",
+                           description: "\(vault.customerFolderNames.count) folders ⟷ \(vault.fileCustomers.count) listed in \(settings.contactsFileName).",
+                           keywords: "reconcile folders") {
+                    Button("Refresh") { vault.refresh() }.glassButton()
+                }
+                SettingsBlock(keywords: "reconcile customers") {
+                    if rec.isClean {
+                        Label("All customers reconciled.", systemImage: "checkmark.seal.fill")
+                            .foregroundStyle(Theme.Severity.success.color)
+                            .font(Theme.Typography.secondary)
+                    } else {
+                        if !rec.nearMatches.isEmpty {
+                            reconcileSection("Likely the same, spelled differently",
+                                             systemImage: "exclamationmark.triangle.fill",
+                                             tint: Theme.Severity.warning.color) {
+                                ForEach(rec.nearMatches) { nm in
+                                    VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
+                                        Text("\(nm.folderName)  ⟷  \(nm.fileName)")
+                                            .font(Theme.Typography.secondary)
+                                        Text(nm.reason)
+                                            .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                        if !rec.fileOnly.isEmpty {
+                            reconcileSection("In \(settings.contactsFileName), no folder yet",
+                                             systemImage: "folder.badge.plus",
+                                             tint: Theme.Palette.accent) {
+                                ForEach(rec.fileOnly, id: \.self) { name in
+                                    HStack {
+                                        Text(name).font(Theme.Typography.secondary)
+                                        Spacer()
+                                        Button("Create folder") {
+                                            let root = settings.scanRoots.first ?? "Internal"
+                                            vault.ensureDestination("\(root)/Customers/\(name)")
+                                        }
+                                        .buttonStyle(.chip)
+                                    }
+                                }
+                            }
+                        }
+                        if !rec.folderOnly.isEmpty {
+                            reconcileSection("Folders with no contacts logged",
+                                             systemImage: "person.crop.circle.badge.questionmark",
+                                             tint: .secondary) {
+                                ForEach(rec.folderOnly, id: \.self) { name in
+                                    Text(name)
+                                        .font(Theme.Typography.secondary).foregroundStyle(.secondary)
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        .formStyle(.grouped)
-    }
-
-    // MARK: Detection
-
-    private var detectionTab: some View {
-        Form {
-            Section("Call detection") {
-                SettingRow("Detect calls automatically") {
-                    Toggle("", isOn: $settings.callDetectionEnabled).labelsHidden()
-                }
-                SettingRow("Auto-record when a known app starts a call",
-                           description: "When off, a notification with a Start button appears instead.") {
-                    Toggle("", isOn: $settings.autoRecordEnabled).labelsHidden()
-                        .disabled(!settings.callDetectionEnabled)
-                }
-                SettingRow("Suggest meeting title & attendees",
-                           description: "Reads the meeting window via Accessibility. In-call people are added automatically; invite-list names are not. Rooms and devices stay as chips.") {
-                    Toggle("", isOn: $settings.metadataDiscoveryEnabled).labelsHidden()
-                        .disabled(!settings.callDetectionEnabled)
-                }
-                SettingRow("Call-end grace",
-                           description: "How long after the app releases the microphone before the call is treated as ended and recording stops.") {
-                    HStack(spacing: Theme.Spacing.medium) {
-                        Slider(value: $settings.callEndGraceSeconds, in: 5...60, step: 1)
-                            .frame(maxWidth: 260)
-                        Text("\(Int(settings.callEndGraceSeconds))s")
-                            .font(Theme.Typography.mono).foregroundStyle(.secondary).monospacedDigit()
-                    }
-                    .disabled(!settings.callDetectionEnabled)
-                }
-            }
-
-            Section("After a meeting") {
-                SettingRow("Clear for the next call",
-                           description: "Once a recording finishes, reset the title, attendees, filing, notes and transcript. Pauses only during speaker review; any edit cancels it.") {
-                    Picker("", selection: $settings.autoClearSeconds) {
-                        Text("Off").tag(0.0)
-                        Text("15s").tag(15.0)
-                        Text("30s").tag(30.0)
-                        Text("1m").tag(60.0)
-                        Text("2m").tag(120.0)
-                    }
-                    .labelsHidden().fixedSize()
-                }
-                SettingRow("Idle before background work",
-                           description: "How long to stay idle after a call before summaries start, and before speaker detection when Batch mode is off. Batch transcription starts as soon as the recording is saved. Starting a new recording cancels this wait.") {
-                    Picker("", selection: $settings.idleDrainSeconds) {
-                        Text("Off").tag(0.0)
-                        Text("30s").tag(30.0)
-                        Text("1m").tag(60.0)
-                        Text("2m").tag(120.0)
-                    }
-                    .labelsHidden().fixedSize()
-                }
-                SettingRow("Quiet hours for held jobs",
-                           description: "Held speaker passes and summaries stay parked during the day. From 22:00–07:00 they may run after the idle wait above.") {
-                    Toggle("", isOn: $settings.quietHoursEnabled).labelsHidden()
-                }
-            }
-
-            Section("Permissions") {
-                permissionRow("Microphone", ok: !recording.micDenied,
-                              fix: PermissionManager.openMicrophoneSettings)
-                permissionRow("System-audio recording", ok: recording.systemAudioAvailable ?? true,
-                              unknown: recording.systemAudioAvailable == nil,
-                              fix: PermissionManager.openPrivacySettings)
-                permissionRow("Accessibility (meeting details)", ok: axTrusted,
-                              fix: PermissionManager.openAccessibilitySettings)
-                helpText("Call detection watches which apps hold the microphone. Accessibility is only needed for title/attendee suggestions — recording works without it.")
-            }
-
-            Section("Known conferencing apps") {
-                helpText("Bundle IDs, one per line (known = auto-record / unknown = notify only).")
-                editorStyle(TextEditor(text: $settings.conferencingBundleIDsRaw), height: 120)
-            }
-
-            Section("Logging") {
-                SettingRow("Verbose detection logging") {
-                    Toggle("", isOn: $settings.verboseDetectionLogging).labelsHidden()
-                }
-                SettingRow("Detection log") {
-                    Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([AppLog.fileURL]) }
-                }
-            }
-
-            Section("Live detector status") {
-                if let call = detector.activeCall {
-                    Label("Active call: \(call.displayName)", systemImage: "phone.connection.fill")
-                        .foregroundStyle(Theme.Severity.success.color)
-                        .font(Theme.Typography.secondary)
-                } else {
-                    Text("No active call.")
-                        .font(Theme.Typography.secondary).foregroundStyle(.secondary)
-                }
-                if detector.capturing.isEmpty {
-                    Text("No apps capturing the microphone right now.")
-                        .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-                } else {
-                    ForEach(detector.capturing, id: \.pid) { p in
-                        Text("• \(p.bundleID ?? "pid \(p.pid)")")
-                            .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
-                    }
-                }
-            }
+        .onAppear {
+            vault.refresh()
+            vault.importRolodexIfDBEmpty()
         }
-        .formStyle(.grouped)
-        .onAppear { axTrusted = PermissionManager.accessibilityAuthorized() }
     }
 
-    /// A granted/denied status line with a one-tap "Open Settings" when denied.
-    private func permissionRow(_ label: String, ok: Bool, unknown: Bool = false,
-                               fix: @escaping () -> Void) -> some View {
-        HStack(spacing: Theme.Spacing.small) {
-            Image(systemName: unknown ? "questionmark.circle" : (ok ? "checkmark.circle.fill" : "xmark.circle.fill"))
-                .foregroundStyle(unknown ? Color.secondary
-                                 : (ok ? Theme.Severity.success.color : Theme.Severity.danger.color))
-            Text(label).font(Theme.Typography.secondary)
-            Spacer()
-            if unknown {
-                Text("Checking…")
-                    .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-            } else if !ok {
-                Button("Open Settings", action: fix)
-            }
+    private func exportKnowledgeJSON() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "parley-knowledge.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try KnowledgeExportImport.exportJSON()
+            try data.write(to: url)
+            knowledgeStatus = "Exported knowledge to \(url.lastPathComponent)."
+        } catch {
+            knowledgeStatus = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importKnowledgeJSON() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try KnowledgeExportImport.importJSON(Data(contentsOf: url))
+            vault.refresh(waitForCompletion: true)
+            knowledgeStatus = "Imported knowledge from \(url.lastPathComponent)."
+        } catch {
+            knowledgeStatus = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importRolodexToDB() {
+        vault.importRolodexToKnowledgeDB(force: true)
+        knowledgeStatus = "Imported Rolodex into knowledge database."
+    }
+
+    private func exportDBToRolodex() {
+        vault.exportKnowledgeDBToRolodex()
+        knowledgeStatus = "Wrote contacts to \(settings.contactsFileName)."
+    }
+
+    @ViewBuilder
+    private func reconcileSection<Content: View>(_ title: String, systemImage: String, tint: Color,
+                                                 @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
+            Label(title, systemImage: systemImage)
+                .font(Theme.Typography.caption.weight(.semibold)).foregroundStyle(tint)
+            content()
+                .padding(.leading, Theme.Spacing.small)
         }
     }
 
     // MARK: Storage (manual recordings management)
 
-    private var storageTab: some View {
-        Form {
-            Section {
-                helpText("Raw call audio is kept here indefinitely — it's the source for re-transcribing or re-processing a recording. Deleting a session removes only its audio; the transcript and any note in your vault are untouched.")
-                HStack {
-                    Button("Reveal in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([AppPaths.recordingsDirectory])
+    private var storagePage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("Recordings") {
+                SettingRow("Recorded audio",
+                           description: "\(recordings.sessions.count) sessions · \(storageTotalLabel). Raw audio is kept for re-transcribing; deleting a session never touches its transcript or note.",
+                           keywords: "disk space size") {
+                    HStack(spacing: Theme.Spacing.small) {
+                        Button("Reveal") {
+                            NSWorkspace.shared.activateFileViewerSelecting([AppPaths.recordingsDirectory])
+                        }
+                        .glassButton()
+                        Button("Refresh") { recordings.refresh() }.glassButton()
                     }
-                    Spacer()
-                    if !selectedSessions.isEmpty {
-                        Button("Delete selected (\(selectedSessions.count))", role: .destructive) { confirmDeleteSelected() }
-                    }
-                    Button("Refresh") { recordings.refresh() }
-                }
-            } header: {
-                HStack {
-                    Text("Recordings")
-                    Spacer()
-                    Text("\(recordings.sessions.count) · \(storageTotalLabel)")
-                        .foregroundStyle(.secondary).monospacedDigit()
                 }
             }
-
-            Section("Cleanup") {
-                HStack(spacing: Theme.Spacing.small) {
-                    Text("Delete recordings older than")
-                    Picker("", selection: $purgeDays) {
-                        ForEach([7, 14, 30, 60, 90], id: \.self) { Text("\($0) days").tag($0) }
+            SettingsSection("Cleanup") {
+                SettingRow("Delete recordings older than",
+                           description: "Moves old session audio to the Trash.",
+                           keywords: "purge free space") {
+                    HStack(spacing: Theme.Spacing.small) {
+                        menuPicker($purgeDays) {
+                            ForEach([7, 14, 30, 60, 90], id: \.self) { Text("\($0) days").tag($0) }
+                        }
+                        Button("Delete", role: .destructive) { confirmPurge() }.glassButton()
                     }
-                    .labelsHidden().fixedSize()
-                    Button("Delete older", role: .destructive) { confirmPurge() }
-                    Spacer()
                 }
                 let orphans = orphanedSessions
                 if !orphans.isEmpty {
                     let orphanBytes = orphans.compactMap(\.sizeBytes).reduce(Int64(0), +)
                     let orphanSuffix = orphans.contains { $0.sizeBytes == nil } ? "+" : ""
-                    HStack(spacing: Theme.Spacing.small) {
-                        Image(systemName: "questionmark.folder")
-                            .foregroundStyle(Theme.Severity.warning.color)
-                        Text("\(orphans.count) orphaned · \(byteText(orphanBytes))\(orphanSuffix)")
-                            .font(Theme.Typography.secondary).foregroundStyle(.secondary).monospacedDigit()
-                        Text("audio with no transcript in History")
-                            .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-                        Spacer()
-                        Button("Delete orphaned", role: .destructive) {
+                    SettingRow("Orphaned audio",
+                               description: "\(orphans.count) sessions · \(byteText(orphanBytes))\(orphanSuffix) with no transcript in History.",
+                               keywords: "orphan") {
+                        Button("Delete", role: .destructive) {
                             storageStatus = nil; pendingBulkDelete = orphans
                         }
-                        .help("Raw audio whose transcript was deleted — you can no longer reach it from History.")
+                        .glassButton()
+                    }
+                }
+                if !selectedSessions.isEmpty {
+                    SettingRow("Selected sessions", description: "\(selectedSessions.count) chosen below.") {
+                        Button("Delete selected", role: .destructive) { confirmDeleteSelected() }.glassButton()
                     }
                 }
                 if let storageStatus {
-                    Text(storageStatus)
-                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
+                    SettingsBlock { helpText(storageStatus) }
                 }
             }
-
-            Section("Sessions") {
-                if recordings.sessions.isEmpty {
-                    Label {
-                        VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                            Text("No recordings yet")
-                            Text("Session folders appear here after you record a meeting.")
-                                .font(Theme.Typography.caption)
-                                .foregroundStyle(.secondary)
+            SettingsSection("Sessions") {
+                SettingsBlock(keywords: "sessions recordings list") {
+                    if recordings.sessions.isEmpty {
+                        helpText("No recordings yet. Session folders appear here after you record a meeting.")
+                    } else {
+                        ForEach(recordings.sessions) { folder in
+                            sessionRow(folder)
                         }
-                    } icon: {
-                        Image(systemName: "internaldrive")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(recordings.sessions) { folder in
-                        sessionRow(folder)
                     }
                 }
             }
         }
-        .formStyle(.grouped)
         // Refresh transcripts too so orphaned-audio detection is accurate (a session looks
         // orphaned only when no transcript references it).
         .onAppear { recordings.refresh(); recording.store.refresh() }
@@ -763,318 +1090,121 @@ struct SettingsView: View {
         return f.string(from: date)
     }
 
-    // MARK: Transcription
+    // MARK: Permissions
 
-    /// Cross-session speaker-recognition sliders for FluidAudio.
-    @ViewBuilder private var speakerRecognitionSection: some View {
-        Section("Speaker recognition") {
-            HStack(spacing: Theme.Spacing.medium) {
-                Slider(value: $settings.identificationThreshold, in: 0.40...0.85, step: 0.05)
-                    .frame(maxWidth: 260)
-                Text(String(format: "%.2f", settings.identificationThreshold))
-                    .font(Theme.Typography.mono).foregroundStyle(.secondary)
+    private var permissionsPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("Access") {
+                permissionRow("Microphone", detail: "Records your side of the call.",
+                              ok: !recording.micDenied, fix: PermissionManager.openMicrophoneSettings)
+                permissionRow("System audio", detail: "Records the far side and powers call detection.",
+                              ok: recording.systemAudioAvailable ?? true,
+                              unknown: recording.systemAudioAvailable == nil,
+                              fix: PermissionManager.openPrivacySettings)
+                permissionRow("Accessibility", detail: "Only for meeting title and attendee suggestions; recording works without it.",
+                              ok: axTrusted, fix: PermissionManager.openAccessibilitySettings)
             }
-            helpText("How close a voice must be to a saved person before it's auto-named. Higher = stricter (fewer wrong names, but may miss a known voice); lower = more eager (may attach the wrong person).")
-            HStack(spacing: Theme.Spacing.medium) {
-                Slider(value: $settings.minSpeechToIdentify, in: 2...15, step: 1)
-                    .frame(maxWidth: 260)
-                Text("\(Int(settings.minSpeechToIdentify)) s")
-                    .font(Theme.Typography.mono).foregroundStyle(.secondary)
+        }
+        .onAppear { axTrusted = PermissionManager.accessibilityAuthorized() }
+    }
+
+    /// A granted/denied status row with a one-tap "Open Settings" when denied.
+    private func permissionRow(_ label: String, detail: String, ok: Bool, unknown: Bool = false,
+                               fix: @escaping () -> Void) -> some View {
+        SettingRow(label, description: detail, keywords: "permission privacy") {
+            HStack(spacing: Theme.Spacing.small) {
+                Image(systemName: unknown ? "questionmark.circle" : (ok ? "checkmark.circle.fill" : "xmark.circle.fill"))
+                    .foregroundStyle(unknown ? Color.secondary
+                                     : (ok ? Theme.Severity.success.color : Theme.Severity.danger.color))
+                Text(unknown ? "Checking…" : (ok ? "Allowed" : "Not allowed"))
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                if !ok && !unknown {
+                    Button("Open Settings", action: fix).glassButton()
+                }
             }
-            helpText("How much clean speech from a speaker before they're auto-identified and named. Lower names people sooner but on less evidence.")
-            helpText("Manage voiceprints — rebuild, delete, and backup — in the People tab.")
         }
     }
 
-    private var transcriptionTab: some View {
-        Form {
-            Section("Batch mode") {
-                SettingRow("Batch mode",
-                           description: "Record audio only. Transcription starts as soon as the call ends and keeps running while the next call records. English uses the accurate offline model. Any other language uses Parakeet v3.") {
-                    Toggle("", isOn: $settings.batchMode).labelsHidden()
-                }
-                Picker("When", selection: Binding(
-                    get: { settings.transcriptionTiming },
-                    set: { settings.transcriptionTiming = $0 }
-                )) {
-                    Text("After each call").tag(TranscriptionTiming.afterCall)
-                    Text("During a daily window").tag(TranscriptionTiming.window)
-                }
-                .disabled(!settings.batchMode)
-                if settings.batchMode && settings.transcriptionTiming == .window {
-                    Stepper(value: $settings.transcriptionWindowStartHour, in: 0...23) {
-                        Text(String(format: "Starts %02d:00", settings.transcriptionWindowStartHour))
+    // MARK: Developer
+
+    private var developerPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("Logs") {
+                SettingRow("Diagnostic log", description: AppLog.fileURL.path) {
+                    HStack(spacing: Theme.Spacing.small) {
+                        Button("Reveal") {
+                            NSWorkspace.shared.activateFileViewerSelecting([AppLog.fileURL])
+                        }
+                        .glassButton()
+                        Button("Clear") { AppLog.clear() }.glassButton()
                     }
-                    Stepper(value: $settings.transcriptionWindowEndHour, in: 0...23) {
-                        Text(String(format: "Ends %02d:00", settings.transcriptionWindowEndHour))
-                    }
-                    helpText("Outside this window, recordings wait. Transcribe Now on a History row runs that one next. Overnight windows are allowed, for example 22:00 to 07:00.")
+                }
+                SettingRow("Verbose detection logging",
+                           description: "Log every microphone and window check call detection makes.") {
+                    Toggle("", isOn: $settings.verboseDetectionLogging)
                 }
             }
-
-            FluidModelSection(models: recording.fluidModels, settings: settings, isRecording: recording.isRecording)
-
-                Section("English optimization") {
-                    Toggle("Parakeet Unified (English)", isOn: $settings.useParakeetUnified)
-                        .disabled(recording.isRecording)
-                    helpText("When the live language is English, use Parakeet Unified 0.6B for streaming (~2 s latency) and a full-attention offline batch pass. Non-English sessions keep Nemotron multilingual + TDT v3.")
-                    Toggle("Boost attendee names in transcript", isOn: $settings.boostAttendeeNames)
-                        .disabled(recording.isRecording)
-                    helpText("Imports attendee names and meeting-title tokens into custom vocabulary for the offline batch re-pass (multilingual path only). Boosting doesn't just hint — it overwrites speech that resembles a term, so short and ordinary words are held back or rejected. The list below shows exactly what this meeting would boost.")
-                    if settings.boostAttendeeNames {
-                        vocabularyPreview
-                    }
+            SettingsSection("Call detection") {
+                SettingRow("Known conferencing apps",
+                           description: "Bundle IDs watched for calls. Known apps can auto-record; others only notify.",
+                           keywords: "bundle teams zoom") {
+                    editButton(.conferencingApps)
                 }
-
-                Section("Speaker separation") {
-                    HStack(spacing: Theme.Spacing.medium) {
-                        Slider(value: $settings.diarizationThreshold, in: 0.40...0.80, step: 0.05)
-                            .frame(maxWidth: 260)
-                            .disabled(recording.isRecording)
-                        Text(String(format: "%.2f", settings.diarizationThreshold))
-                            .font(Theme.Typography.mono).foregroundStyle(.secondary)
-                    }
-                    helpText("How readily two voice samples are treated as the same person during in-session clustering. Too high merges distinct speakers into one; too low fragments a single person's natural variation into several \"speakers\". ~0.6–0.7 suits most calls — only nudge it if you see one of those failure modes.")
-                }
-
-                speakerRecognitionSection
-
-                Section("Live transcript") {
-                    if FluidAsrRouting.usesParakeetUnified(settings: settings) {
-                        Text("Parakeet Unified 2080 ms streaming (English). Latency tier applies to the Nemotron multilingual path only.")
-                            .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                SettingRow("Live detector status",
+                           description: detector.capturing.isEmpty
+                               ? "No apps capturing the microphone right now."
+                               : detector.capturing.map { $0.bundleID ?? "pid \($0.pid)" }.joined(separator: ", ")) {
+                    if let call = detector.activeCall {
+                        Label("Active: \(call.displayName)", systemImage: "phone.connection.fill")
+                            .foregroundStyle(Theme.Severity.success.color)
+                            .font(Theme.Typography.caption)
                     } else {
-                        Picker("Latency", selection: Binding(
-                            get: { settings.liveStreamingTier },
-                            set: { settings.liveStreamingTier = $0 }
-                        )) {
-                            ForEach(FluidStreamingTier.allCases) { Text($0.label).tag($0) }
-                        }
-                        .disabled(recording.isRecording)
+                        Text("No active call")
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textSecondary)
                     }
-                    Picker("Language", selection: $settings.liveStreamingLanguage) {
-                        Text("Auto (all languages)").tag("auto")
-                        Text("English").tag("en-US")
-                        Text("Spanish").tag("es")
-                        Text("French").tag("fr")
-                        Text("German").tag("de")
-                        Text("Italian").tag("it")
-                        Text("Portuguese").tag("pt")
-                        Text("Chinese").tag("zh-CN")
-                        Text("Japanese").tag("ja")
-                    }
-                    .disabled(recording.isRecording)
-                    helpText("Cache-aware streaming ASR shows the transcript within ~one chunk while recording — far faster than the old sliding-window (~11 s) approach. Smaller chunks = lower latency, larger = higher accuracy. \"Auto\" uses the full multilingual model (covers Chinese/Japanese); picking a Latin-script language loads a smaller, faster model. The accurate final transcript still comes from the re-pass below.")
-                }
-
-                Section("Final transcript") {
-                    Toggle("Re-transcribe the whole recording after stopping", isOn: $settings.offlineAsrRepass)
-                    helpText("A full-context batch pass over the recorded audio — more accurate than the live streaming chunks. Runs once at stop (adds a few seconds) and rewrites the saved transcript. Turn off to keep the live transcript as-is.")
-                }
-
-                Section("Advanced") {
-                    Toggle("GPU encoder (Parakeet v3 offline)", isOn: $settings.fluidGpuEncoder)
-                        .disabled(recording.isRecording)
-                    helpText("Runs the multilingual TDT v3 conformer encoder on GPU during the offline re-pass (~8% faster, WER-neutral). Parakeet Unified manages placement internally.")
-                }
-
-            Section("Memory") {
-                SettingRow("Unload the model when idle",
-                           description: "Reclaims streaming model memory after inactivity. It reloads on the next detected call or recording — capture starts immediately and the transcript catches up once the model finishes loading.") {
-                    Toggle("", isOn: $settings.idleUnloadEnabled).labelsHidden()
-                }
-                if settings.idleUnloadEnabled {
-                    SettingRow("Unload after idle") {
-                        Stepper("\(Int(settings.idleUnloadMinutes)) min",
-                                value: $settings.idleUnloadMinutes, in: 1...60, step: 1)
-                            .fixedSize()
-                    }
-                }
-                SettingRow("Reset model cache",
-                           description: "If transcription crashes on load, the compiled-model cache may be corrupt. Resetting rebuilds it on the next load.") {
-                    Button("Reset") {
-                        FluidModelManager.clearCompiledCache()
-                        Task { _ = await recording.fluidModels.prepare() }
-                    }
-                    .disabled(recording.isRecording)
                 }
             }
         }
-        .formStyle(.grouped)
-    }
-
-    // MARK: Vault reconciliation
-
-    @State private var knowledgeStatus: String?
-
-    private var vaultTab: some View {
-        let rec = vault.reconcileCustomers()
-        return Form {
-            Section("Filing locations") {
-                helpText("Scan roots (one per line) — their subfolders become the filing destinations offered in the picker.")
-                editorStyle(TextEditor(text: $settings.scanRootsRaw), height: 44)
-                LabeledContent("Contacts file") {
-                    TextField("Rolodex.md", text: $settings.contactsFileName)
-                        .textFieldStyle(.parley)
-                }
-            }
-
-            Section("Knowledge export / import") {
-                if let knowledgeStatus {
-                    Text(knowledgeStatus)
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(.secondary)
-                }
-                HStack {
-                    Button("Export JSON…") { exportKnowledgeJSON() }
-                    Button("Import JSON…") { importKnowledgeJSON() }
-                    Button("Import from Rolodex") { importRolodexToDB() }
-                    Button("Export Rolodex.md") { exportDBToRolodex() }
-                }
-            }
-
-            Section {
-                Text("Customer folders (\(vault.customerFolderNames.count)) ⟷ \(settings.contactsFileName) (\(vault.fileCustomers.count) listed)")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
-
-                if rec.isClean {
-                    Label("All customers reconciled.", systemImage: "checkmark.seal.fill")
-                        .foregroundStyle(Theme.Severity.success.color)
-                        .font(Theme.Typography.secondary)
-                } else {
-                    if !rec.nearMatches.isEmpty {
-                        reconcileSection("Likely the same, spelled differently",
-                                         systemImage: "exclamationmark.triangle.fill",
-                                         tint: Theme.Severity.warning.color) {
-                            ForEach(rec.nearMatches) { nm in
-                                VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                                    Text("\(nm.folderName)  ⟷  \(nm.fileName)")
-                                        .font(Theme.Typography.secondary)
-                                    Text(nm.reason)
-                                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                    if !rec.fileOnly.isEmpty {
-                        reconcileSection("In \(settings.contactsFileName), no folder yet",
-                                         systemImage: "folder.badge.plus",
-                                         tint: Theme.Palette.accent) {
-                            ForEach(rec.fileOnly, id: \.self) { name in
-                                HStack {
-                                    Text(name).font(Theme.Typography.secondary)
-                                    Spacer()
-                                    Button("Create folder") {
-                                        let root = settings.scanRoots.first ?? "Internal"
-                                        vault.ensureDestination("\(root)/Customers/\(name)")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if !rec.folderOnly.isEmpty {
-                        reconcileSection("Folders with no contacts logged",
-                                         systemImage: "person.crop.circle.badge.questionmark",
-                                         tint: .secondary) {
-                            ForEach(rec.folderOnly, id: \.self) { name in
-                                Text(name)
-                                    .font(Theme.Typography.secondary).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("Customer reconciliation")
-                    Spacer()
-                    Button("Refresh") { vault.refresh() }
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .onAppear {
-            vault.refresh()
-            vault.importRolodexIfDBEmpty()
-        }
-    }
-
-    private func exportKnowledgeJSON() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "parley-knowledge.json"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let data = try KnowledgeExportImport.exportJSON()
-            try data.write(to: url)
-            knowledgeStatus = "Exported knowledge to \(url.lastPathComponent)."
-        } catch {
-            knowledgeStatus = "Export failed: \(error.localizedDescription)"
-        }
-    }
-
-    private func importKnowledgeJSON() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try KnowledgeExportImport.importJSON(Data(contentsOf: url))
-            vault.refresh(waitForCompletion: true)
-            knowledgeStatus = "Imported knowledge from \(url.lastPathComponent)."
-        } catch {
-            knowledgeStatus = "Import failed: \(error.localizedDescription)"
-        }
-    }
-
-    private func importRolodexToDB() {
-        vault.importRolodexToKnowledgeDB(force: true)
-        knowledgeStatus = "Imported Rolodex into knowledge database."
-    }
-
-    private func exportDBToRolodex() {
-        vault.exportKnowledgeDBToRolodex()
-        knowledgeStatus = "Wrote contacts to \(settings.contactsFileName)."
-    }
-
-    @ViewBuilder
-    private func reconcileSection<Content: View>(_ title: String, systemImage: String, tint: Color,
-                                                 @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
-            Label(title, systemImage: systemImage)
-                .font(Theme.Typography.caption.weight(.semibold)).foregroundStyle(tint)
-            content()
-                .padding(.leading, Theme.Spacing.small)
-        }
-    }
-
-    // MARK: Notes
-
-    private var notesTab: some View {
-        Form {
-            Section {
-                LabeledContent("CLI") {
-                    TextField("~/.local/bin/claude", text: $settings.claudeBinaryPath)
-                        .textFieldStyle(.parley).font(Theme.Typography.mono)
-                }
-                LabeledContent("Model") {
-                    TextField("sonnet", text: $settings.claudeModel)
-                        .textFieldStyle(.parley).font(Theme.Typography.mono)
-                        .frame(maxWidth: 220)
-                }
-            } header: {
-                Text("Claude")
-            } footer: {
-                Text("Meeting notes are generated from the Preview tab after a recording — use the “Generate meeting notes” button on the action bar.")
-            }
-            Section("Prompt template") {
-                editorStyle(TextEditor(text: $settings.claudePromptTemplate), height: 120)
-            }
-        }
-        .formStyle(.grouped)
     }
 }
+
+// MARK: - Search results grouping
+
+/// Match counts per page, collected while searching (every page renders at once).
+private struct PageMatchCountsKey: PreferenceKey {
+    static let defaultValue: [SettingsView.Page: Int] = [:]
+    static func reduce(value: inout [SettingsView.Page: Int], nextValue: () -> [SettingsView.Page: Int]) {
+        value.merge(nextValue(), uniquingKeysWith: +)
+    }
+}
+
+/// One page's matching rows in the search results, under a "Page" heading that hides
+/// when nothing on the page matches.
+private struct SearchPageGroup<Content: View>: View {
+    let page: SettingsView.Page
+    let query: String
+    @ViewBuilder let content: () -> Content
+    @State private var count = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if count > 0 {
+                Label(page.title, systemImage: page.icon)
+                    .font(Theme.Typography.captionSecondary)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .padding(.top, Theme.Spacing.xLarge)
+            }
+            content()
+                .environment(\.settingsContext, page.title)
+                .onPreferenceChange(SettingsMatchCountKey.self) { count = $0 }
+        }
+        .preference(key: PageMatchCountsKey.self, value: [page: count])
+    }
+}
+
+// MARK: - Provider status
 
 /// Status for the Cursor CLI used by Composer / Cursor Grok summary backends.
 private struct CursorConnectionView: View {
@@ -1091,6 +1221,7 @@ private struct CursorConnectionView: View {
             }
             Spacer()
             Button("Re-check") { connection.refresh() }
+                .glassButton()
                 .disabled(connection.isChecking)
         }
         .onAppear { connection.refresh() }
@@ -1111,7 +1242,9 @@ private struct CursorConnectionView: View {
     }
 }
 
-private struct FluidModelSection: View {
+/// The on-device speech model as one settings row: name and storage on the left,
+/// download / status on the right.
+private struct FluidModelRow: View {
     @ObservedObject var models: FluidModelManager
     @ObservedObject var settings: AppSettings
     let isRecording: Bool
@@ -1124,59 +1257,35 @@ private struct FluidModelSection: View {
     }
 
     var body: some View {
-        Section("Speech model") {
-            Text("FluidAudio runs Parakeet on-device for transcription, plus diarization and speaker identification.")
-                .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .onAppear { models.refreshPresence() }
-
-            HStack(alignment: .top, spacing: Theme.Spacing.medium) {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xxSmall) {
-                    Text(modelLabel)
-                        .font(Theme.Typography.controlLabel)
-                    Text("Streaming on-device ASR. Downloads on first use.")
-                        .font(Theme.Typography.captionSecondary).foregroundStyle(.secondary)
-                }
-                Spacer()
-                statusControl
-            }
-
-            if models.status == .downloaded {
-                Label("Active — used automatically when you record. Start a recording to use it.",
-                      systemImage: "checkmark.seal.fill")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Text("Stored in \(FluidModelManager.modelsDirectory.path)")
-                .font(Theme.Typography.captionSecondary).foregroundStyle(.tertiary)
-                .lineLimit(1).truncationMode(.middle)
+        SettingRow(modelLabel,
+                   description: "On-device transcription, diarization, and speaker ID via FluidAudio. Stored in \(FluidModelManager.modelsDirectory.path).",
+                   keywords: "parakeet fluidaudio download asr") {
+            statusControl
         }
+        .onAppear { models.refreshPresence() }
     }
 
     @ViewBuilder private var statusControl: some View {
         switch models.status {
         case .unknown, .notDownloaded:
-            Button("Download") { models.download() }.disabled(isRecording)
+            Button("Download") { models.download() }.glassButton().disabled(isRecording)
         case .downloading:
             HStack(spacing: Theme.Spacing.small) {
                 ProgressView().controlSize(.small)
-                Text("Downloading…")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                Text("Downloading…").font(Theme.Typography.caption).foregroundStyle(.secondary)
             }
         case .loading:
             HStack(spacing: Theme.Spacing.small) {
                 ProgressView().controlSize(.small)
-                Text("Loading…")
-                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                Text("Loading…").font(Theme.Typography.caption).foregroundStyle(.secondary)
             }
         case .downloaded:
             Label("Active", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(Theme.Severity.success.color)
-                .font(Theme.Typography.secondary)
+                .font(Theme.Typography.caption)
         case .failed(let msg):
             VStack(alignment: .trailing, spacing: Theme.Spacing.xxSmall) {
-                Button("Retry") { models.download() }.disabled(isRecording)
+                Button("Retry") { models.download() }.glassButton().disabled(isRecording)
                 Text(msg)
                     .font(Theme.Typography.captionSecondary)
                     .foregroundStyle(Theme.Severity.danger.color).lineLimit(2)
@@ -1185,7 +1294,8 @@ private struct FluidModelSection: View {
     }
 }
 
-/// Makes the Settings window freely resizable and clamps max size to the screen.
+/// Makes the Settings window freely resizable, hides its title text (the sidebar and
+/// page titles carry the context), and clamps max size to the screen.
 private struct SettingsWindowConfigurator: NSViewRepresentable {
     var maxSize: CGSize
 
@@ -1207,7 +1317,12 @@ private struct SettingsWindowConfigurator: NSViewRepresentable {
             coordinator.didConfigure = true
             window.styleMask.insert(.resizable)
             window.title = "Settings"
-            window.minSize = NSSize(width: 680, height: 420)
+            window.titleVisibility = .hidden
+            // Let the sidebar and page run up under the (transparent) title bar, as in
+            // the Claude app, instead of a separate white strip above them.
+            window.titlebarAppearsTransparent = true
+            window.styleMask.insert(.fullSizeContentView)
+            window.minSize = NSSize(width: 760, height: 520)
         }
         window.maxSize = NSSize(width: maxSize.width, height: maxSize.height)
     }
