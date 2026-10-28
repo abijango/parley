@@ -192,10 +192,12 @@ private struct SpeakerChip<Menu: View>: View {
             .popover(isPresented: $isMenuOpen, arrowEdge: .bottom) { menu() }
         }
         .background(
-            Capsule().fill(color.opacity(speaker.isNamed ? Theme.Opacity.tintSubtle
+            Theme.Radius.rect(Theme.Radius.chip).fill(color.opacity(speaker.isNamed ? Theme.Opacity.tintSubtle
                                          : (isMenuOpen ? Theme.Opacity.selection : Theme.Opacity.tintFill))))
         .overlay(
-            Capsule().strokeBorder(Theme.Palette.accent, lineWidth: 1.5).opacity(nudging ? 1 : 0))
+            Theme.Radius.rect(Theme.Radius.chip).strokeBorder(Theme.Palette.divider, lineWidth: 0.5))
+        .overlay(
+            Theme.Radius.rect(Theme.Radius.chip).strokeBorder(Theme.Palette.accent, lineWidth: 1.5).opacity(nudging ? 1 : 0))
         .scaleEffect(nudging ? 1.06 : 1)
     }
 

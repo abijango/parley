@@ -41,8 +41,11 @@ enum Theme {
     // surfaces via `Theme.Radius.rect(_:)` so the style is consistent.
 
     enum Radius {
-        /// 8pt — buttons, text fields, sidebar rows, chips.
+        /// 8pt — buttons, text fields, sidebar rows.
         static let small: CGFloat = 8
+        /// 6pt — chips and tokens (attendee names, speakers): button-shaped, a touch
+        /// tighter to suit their smaller height.
+        static let chip: CGFloat = 6
         /// 12pt — cards, banners, list surfaces.
         static let medium: CGFloat = 12
         /// 18pt — the composer bar, sheets, large floating panels.

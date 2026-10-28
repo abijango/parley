@@ -458,7 +458,7 @@ struct RecordDetailView: View {
         }
         .padding(.horizontal, Theme.Spacing.small)
         .padding(.vertical, Theme.Spacing.xxSmall + 1)
-        .background(Capsule().fill(Theme.Palette.selection))
+        .background(Theme.Radius.rect(Theme.Radius.chip).fill(Theme.Palette.selection))
         .lineLimit(1)
         .truncationMode(.tail)
         .fixedSize(horizontal: true, vertical: false)

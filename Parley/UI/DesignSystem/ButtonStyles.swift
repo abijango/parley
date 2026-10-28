@@ -140,9 +140,9 @@ extension ButtonStyle where Self == RowButtonStyle {
     }
 }
 
-/// Hover-aware capsule chip for compact inline affordances (file chips, token-like
-/// pills). Quaternary fill at rest, brightening slightly on hover/press — the
-/// missing hover affordance the audit catalogued on every custom chip.
+/// Hover-aware chip for compact inline affordances (file chips, "Keep", "Reveal"):
+/// a small button shape — 6pt corners, panel fill, hairline — with a faint wash on
+/// hover/press.
 struct ChipButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         ChipLabel(configuration: configuration)
@@ -158,12 +158,14 @@ struct ChipButtonStyle: ButtonStyle {
                 .padding(.vertical, Theme.Spacing.xxSmall + 1)
                 .background(
                     ZStack {
-                        Capsule().fill(.quaternary.opacity(Theme.Opacity.surface))
-                        Capsule().fill(Color.primary.opacity(
-                            configuration.isPressed ? 0.10 : (hovering ? 0.05 : 0)))
+                        Theme.Radius.rect(Theme.Radius.chip).fill(Theme.Palette.panelBg)
+                        Theme.Radius.rect(Theme.Radius.chip).fill(Theme.Palette.textPrimary.opacity(
+                            configuration.isPressed ? 0.08 : (hovering ? 0.04 : 0)))
                     }
                 )
-                .contentShape(Capsule())
+                .overlay(Theme.Radius.rect(Theme.Radius.chip)
+                    .strokeBorder(Theme.Palette.divider, lineWidth: 0.5))
+                .contentShape(Theme.Radius.rect(Theme.Radius.chip))
                 .onHover { hovering = $0 }
                 .animation(Theme.Motion.quick, value: hovering)
         }
@@ -171,7 +173,7 @@ struct ChipButtonStyle: ButtonStyle {
 }
 
 extension ButtonStyle where Self == ChipButtonStyle {
-    /// Hover-aware capsule chip. Use `.buttonStyle(.chip)`.
+    /// Hover-aware chip. Use `.buttonStyle(.chip)`.
     static var chip: ChipButtonStyle { ChipButtonStyle() }
 }
 

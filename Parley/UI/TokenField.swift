@@ -108,7 +108,8 @@ struct TokenField: View {
         }
         .padding(.horizontal, Theme.Spacing.small)
         .padding(.vertical, Theme.Spacing.xxSmall + 1)
-        .background(Capsule().fill(Theme.Palette.selection))
+        .background(Theme.Radius.rect(Theme.Radius.chip).fill(Theme.Palette.panelBg))
+        .overlay(Theme.Radius.rect(Theme.Radius.chip).strokeBorder(Theme.Palette.divider, lineWidth: 0.5))
     }
 
     private var overflowChip: some View {
@@ -117,7 +118,8 @@ struct TokenField: View {
             .foregroundStyle(Theme.Palette.textSecondary)
             .padding(.horizontal, Theme.Spacing.small)
             .padding(.vertical, Theme.Spacing.xxSmall + 1)
-            .background(Capsule().fill(Theme.Palette.selection))
+            .background(Theme.Radius.rect(Theme.Radius.chip).fill(Theme.Palette.panelBg))
+            .overlay(Theme.Radius.rect(Theme.Radius.chip).strokeBorder(Theme.Palette.divider, lineWidth: 0.5))
             .buttonStyle(.plain)
             .popover(isPresented: $showOverflow) {
                 ScrollView {
