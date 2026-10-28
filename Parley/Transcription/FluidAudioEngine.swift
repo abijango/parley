@@ -94,6 +94,17 @@ final class FluidAudioEngine {
     private var derivedConfirmedCache: [Segment] = []
     private var derivedConfirmedUnitCount = 0
     private var deriveCacheValid = false
+    /// Live-only settled history. Confirmed units that ended more than `lockHorizon`
+    /// before the newest speech are derived once and frozen, so diarization catching
+    /// up never rewrites lines the user is reading. Off outside streaming: the final
+    /// pass re-derives everything with the whole-call diarization.
+    private var lockEnabled = false
+    private var lockedSegments: [Segment] = []
+    private var lockedUnitCount = 0
+    let lockHorizon: TimeInterval = 30
+    /// Live speaker merges: diarization speakerId → canonical speakerId (flattened).
+    /// Applied at display time only; cleared when the final pass replaces the ids.
+    private var speakerAliases: [String: String] = [:]
 
     /// Diarized speaker turns on the session timeline (speakerId + start/end seconds).
     private var diarSegments: [(speakerId: String, start: TimeInterval, end: TimeInterval)] = []
@@ -142,8 +153,35 @@ final class FluidAudioEngine {
     }
     func seed(_ segments: [Segment]) {
         seeded = segments
-        invalidateDerivedCache()
+        resetLock()
         publish(immediate: true)
+    }
+
+    /// Drop the frozen prefix (the units under it were replaced or the session ended).
+    private func resetLock() {
+        lockedSegments = []
+        lockedUnitCount = 0
+        invalidateDerivedCache()
+    }
+
+    /// Freeze confirmed units that ended more than `lockHorizon` before the newest
+    /// speech. They are derived one last time with the current diarization and
+    /// appended to `lockedSegments`; run ids are keyed by start, so a row keeps the
+    /// identity it had while it was still open (or folds into the frozen row above).
+    private func advanceLock(_ confirmed: [ASRUnit], newest: TimeInterval) {
+        guard lockEnabled, lockedUnitCount < confirmed.count else { return }
+        var end = lockedUnitCount
+        while end < confirmed.count,
+              let last = confirmed[end].tokens.last, last.end < newest - lockHorizon {
+            end += 1
+        }
+        guard end > lockedUnitCount else { return }
+        // Continue a same-speaker run into the last frozen row rather than starting a
+        // new row at every lock step.
+        lockedSegments = Self.mergeAdjacentSegments(
+            lockedSegments, diarizationFirst(Array(confirmed[lockedUnitCount..<end])))
+        lockedUnitCount = end
+        invalidateDerivedCache()
     }
 
     private func invalidateDerivedCache() {
@@ -158,22 +196,30 @@ final class FluidAudioEngine {
     /// units (track-labelled).
     private func derive(_ confirmed: [ASRUnit], volatile: ASRUnit?) -> [Segment] {
         guard !diarSegments.isEmpty else {
-            return build(units: confirmed + (volatile.map { [$0] } ?? []))
+            return build(units: confirmed + (volatile.map { [$0] } ?? [])).map(displayLabelled)
         }
 
-        if !deriveCacheValid || derivedConfirmedUnitCount != confirmed.count {
-            if deriveCacheValid, derivedConfirmedUnitCount < confirmed.count {
-                let newUnits = Array(confirmed.suffix(confirmed.count - derivedConfirmedUnitCount))
+        // Only freeze what diarization has actually covered: if it lags, a frozen
+        // line would keep a nearest-turn guess until stop.
+        let newest = volatile?.tokens.last?.end ?? confirmed.last?.tokens.last?.end ?? 0
+        let covered = diarSegments.lazy.map(\.end).max() ?? 0
+        advanceLock(confirmed, newest: min(newest, covered))
+        let open = Array(confirmed.dropFirst(lockedUnitCount))
+
+        if !deriveCacheValid || derivedConfirmedUnitCount != open.count {
+            if deriveCacheValid, derivedConfirmedUnitCount < open.count {
+                let newUnits = Array(open.suffix(open.count - derivedConfirmedUnitCount))
                 let newSegs = diarizationFirst(newUnits)
                 derivedConfirmedCache = Self.mergeAdjacentSegments(derivedConfirmedCache, newSegs)
             } else {
-                derivedConfirmedCache = diarizationFirst(confirmed)
+                derivedConfirmedCache = diarizationFirst(open)
             }
-            derivedConfirmedUnitCount = confirmed.count
+            derivedConfirmedUnitCount = open.count
             deriveCacheValid = true
         }
 
         var out = seeded
+        out.append(contentsOf: lockedSegments)
         out.append(contentsOf: derivedConfirmedCache)
         // Keep the in-progress tail as a SINGLE stable row (splitting it each update
         // caused the earlier flicker); label it by the speaker at its midpoint.
@@ -182,7 +228,26 @@ final class FluidAudioEngine {
             out.append(Segment(id: v.id, track: .remote, start: f.start, end: l.end, text: v.text,
                                confirmed: false, speakerId: spk, speakerName: spk.flatMap { resolvedNames[$0] }))
         }
-        return out.sorted { $0.start < $1.start }
+        return out.sorted { $0.start < $1.start }.map(displayLabelled)
+    }
+
+    /// Apply live speaker merges and the current names. Done at output time so frozen
+    /// rows pick up a rename or merge without being re-derived (ids stay put).
+    private func displayLabelled(_ segment: Segment) -> Segment {
+        guard let raw = segment.speakerId else { return segment }
+        var s = segment
+        let id = canonicalSpeaker(raw)
+        s.speakerId = id
+        s.speakerName = resolvedNames[id] ?? resolvedNames[raw] ?? segment.speakerName
+        return s
+    }
+
+    func canonicalSpeaker(_ id: String) -> String { speakerAliases[id] ?? id }
+
+    /// Every diarization id merged into `id`'s person (including itself).
+    private func speakerGroup(_ id: String) -> [String] {
+        let c = canonicalSpeaker(id)
+        return [c] + speakerAliases.filter { $0.value == c }.map(\.key)
     }
 
     /// Merge consecutive same-speaker segments when incremental units continue a run.
@@ -447,6 +512,8 @@ final class FluidAudioEngine {
         let nemotron = nemotronAsr
         unifiedAsr = nil
         nemotronAsr = nil
+        lockEnabled = false
+        resetLock()
         await Task.detached {
             if let unified {
                 _ = try? await unified.finish()
@@ -465,6 +532,7 @@ final class FluidAudioEngine {
                                          startElapsed: TimeInterval, clusterThreshold: Float) {
         streamStart = Date()
         liveSegStart = startElapsed
+        lockEnabled = true
 
         // Mix both capture rings into one mono stream; feed the recognizer AND
         // buffer the same samples for the diarizer.
@@ -797,6 +865,8 @@ final class FluidAudioEngine {
         // Time-ordered so the diarization-first attribution scans turns in order.
         diarSegments = segs.map { ($0.id, $0.start, $0.end) }.sorted { $0.start < $1.start }
         compactDiarSegments()
+        speakerAliases = [:]   // live merges referred to the old cluster ids
+        invalidateDerivedCache()
         var emb: [String: [[Float]]] = [:]
         var secs: [String: TimeInterval] = [:]
         for s in segs where s.q >= minSegmentQuality && !s.emb.isEmpty {
@@ -947,7 +1017,7 @@ final class FluidAudioEngine {
         confirmedUnits = units
         volatileUnit = nil
         runIds.removeAll()   // fresh, stable ids for the final transcript
-        invalidateDerivedCache()
+        resetLock()
     }
 
     /// After stop (mixed.caf now exists), retain a short voice clip for every
@@ -1002,7 +1072,7 @@ final class FluidAudioEngine {
             confirmedUnits.removeAll()
             runIds.removeAll()
             liveSegStart = startElapsed
-            invalidateDerivedCache()
+            resetLock()
         }
 
         let startIdx = text.index(text.startIndex, offsetBy: min(liveCommittedChars, text.count))
@@ -1096,8 +1166,14 @@ final class FluidAudioEngine {
     /// quality-gated audio was captured for them yet).
     @discardableResult
     func setSpeakerName(_ speakerId: String, as name: String) -> [Float]? {
-        resolvedNames[speakerId] = name
-        invalidateDerivedCache()
+        // Same name as another live speaker means the same person: merge them.
+        if let other = resolvedNames.first(where: {
+            $0.value.caseInsensitiveCompare(name) == .orderedSame
+                && canonicalSpeaker($0.key) != canonicalSpeaker(speakerId)
+        })?.key {
+            alias(speakerId, to: other)
+        }
+        for member in speakerGroup(speakerId) { resolvedNames[member] = name }
         publish(immediate: true)
         // Only enroll a voiceprint from enough clean, quality-gated speech — don't
         // pollute the store with a centroid built from a tiny/low-quality clip.
@@ -1107,6 +1183,38 @@ final class FluidAudioEngine {
         let centroid = VoiceprintStore.normalized(VoiceprintStore.mean(embs))
         compactSpeakerEmbeddings(for: speakerId, centroid: centroid)
         return centroid
+    }
+
+    /// Live "same person as…": fold `speakerId`'s cluster into `target`'s. Display
+    /// only — diarization is untouched, and the final pass re-derives from scratch.
+    func mergeSpeaker(_ speakerId: String, into target: String) {
+        alias(speakerId, to: target)
+        let group = speakerGroup(target)
+        if let name = group.lazy.compactMap({ self.resolvedNames[$0] }).first {
+            for member in group { resolvedNames[member] = name }
+        }
+        publish(immediate: true)
+    }
+
+    // MARK: Test seams (live derive without audio or models)
+
+    func beginLiveForTesting() { lockEnabled = true }
+    func endLiveForTesting() { lockEnabled = false; resetLock() }
+
+    func appendConfirmedForTesting(_ text: String, start: TimeInterval, end: TimeInterval) {
+        confirmedUnits.append(ASRUnit(id: UUID(), tokens: Self.wordToks(text, start: start, end: end),
+                                      text: text, confirmed: true))
+    }
+
+    func ingestDiarizationForTesting(_ turns: [(speakerId: String, start: TimeInterval, end: TimeInterval)]) {
+        ingestDiarization(turns.map { ($0.speakerId, $0.start, $0.end, [], 0) })
+    }
+
+    private func alias(_ speakerId: String, to target: String) {
+        let from = canonicalSpeaker(speakerId), to = canonicalSpeaker(target)
+        guard from != to else { return }
+        for (k, v) in speakerAliases where v == from { speakerAliases[k] = to }
+        speakerAliases[from] = to
     }
 
     /// Extract a short (<=4s) audio clip of a speaker's longest segment from the

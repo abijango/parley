@@ -5,9 +5,13 @@ import Combine
 /// the whole `[Segment]` array on every ASR tick.
 @MainActor
 final class LiveSegmentStore: ObservableObject {
-    @Published private(set) var segments: [Segment] = []
+    @Published private(set) var segments: [Segment] = [] {
+        didSet { roster.update(from: segments) }
+    }
+    let roster = LiveSpeakerRoster()
 
     func reset() {
+        roster.reset()
         guard !segments.isEmpty else { return }
         segments = []
     }

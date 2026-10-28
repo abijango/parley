@@ -339,6 +339,8 @@ struct RecordDetailView: View {
                     attendees: TranscriptWriter.splitAttendees(meeting.attendees),
                     onNameSpeaker: settings.batchMode
                         ? nil : { id, name in recording.nameSpeaker(id, as: name) },
+                    onMergeSpeaker: settings.batchMode
+                        ? nil : { id, target in recording.mergeSpeaker(id, into: target) },
                     liveDisabled: settings.batchMode,
                     hidesEmptyState: isPreRecordIdle
                 )

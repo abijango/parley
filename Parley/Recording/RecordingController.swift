@@ -357,6 +357,17 @@ final class RecordingController: ObservableObject {
         }
     }
 
+    /// Live "same person as…": merge one diarized speaker into another. If the target
+    /// is already named, this is naming (which also refines their voiceprint).
+    func mergeSpeaker(_ speakerId: String, into target: String) {
+        guard let eng = pendingSpeakerReview?.engine ?? engine else { return }
+        if let name = eng.resolvedName(for: eng.canonicalSpeaker(target)) {
+            nameSpeaker(speakerId, as: name)
+        } else {
+            eng.mergeSpeaker(speakerId, into: target)
+        }
+    }
+
     /// Enrol (or refine) a voiceprint for `name` from a centroid embedding, keyed by the
     /// embedding model. Returns the voiceprint id. Shared by the live-engine and
     /// cache-backed naming paths.

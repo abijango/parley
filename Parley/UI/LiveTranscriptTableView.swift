@@ -5,12 +5,16 @@ import SwiftUI
 /// Live transcript as an AppKit table. `sizeThatFits` returns the SwiftUI proposal so
 /// row count is not a term in the window's layout pass. The coordinator observes
 /// `LiveSegmentStore` directly; `[Segment]` never crosses a SwiftUI `body`.
+///
+/// Scrolling: at the bottom the table follows new text. Once the reader scrolls up it
+/// holds their place (anchored to the top visible row, not a pixel offset) and shows
+/// a "new lines" pill; scrolling back down, End, or the pill resumes following. It
+/// also holds while a speaker's naming menu is open, so the tinted lines stay put.
 struct LiveTranscriptTable: NSViewRepresentable {
     let store: LiveSegmentStore
     var isRecording: Bool
-    var people: [String]
-    var attendees: [String]
-    var onNameSpeaker: ((String, String) -> Void)?
+    /// Speaker labels open the strip's naming menu (off in batch mode).
+    var canNameSpeakers: Bool
     var liveDisabled: Bool
     var hidesEmptyState: Bool
 
@@ -41,6 +45,7 @@ struct LiveTranscriptTable: NSViewRepresentable {
         table.intercellSpacing = NSSize(width: 0, height: Theme.Spacing.small)
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.style = .plain
+        table.postsFrameChangedNotifications = true
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("line"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
@@ -52,9 +57,7 @@ struct LiveTranscriptTable: NSViewRepresentable {
             isRecording: isRecording,
             liveDisabled: liveDisabled,
             hidesEmptyState: hidesEmptyState,
-            people: people,
-            attendees: attendees,
-            onNameSpeaker: onNameSpeaker)
+            canNameSpeakers: canNameSpeakers)
         return scroll
     }
 
@@ -63,9 +66,7 @@ struct LiveTranscriptTable: NSViewRepresentable {
             isRecording: isRecording,
             liveDisabled: liveDisabled,
             hidesEmptyState: hidesEmptyState,
-            people: people,
-            attendees: attendees,
-            onNameSpeaker: onNameSpeaker)
+            canNameSpeakers: canNameSpeakers)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
@@ -79,22 +80,35 @@ struct LiveTranscriptTable: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        /// Within this distance of the bottom counts as "at the latest line".
+        private static let bottomSlack: CGFloat = 24
+
         private let store: LiveSegmentStore
         private var rows: [Segment] = []
-        private var cancellable: AnyCancellable?
-        private var boundsObserver: NSObjectProtocol?
+        private var cancellables: Set<AnyCancellable> = []
+        private var observers: [NSObjectProtocol] = []
+        private var keyMonitor: Any?
         private weak var tableView: NSTableView?
         private weak var scrollView: NSScrollView?
         private var emptyHost: NSHostingView<EmptyStateView>?
-        private var pinnedToBottom = true
-        private var applyingProgrammaticScroll = false
+        private var pillHost: NSHostingView<NewLinesPill>?
 
-        var people: [String] = []
-        var attendees: [String] = []
-        var onNameSpeaker: ((String, String) -> Void)?
+        /// The reader is at the bottom and wants new text to scroll into view.
+        private var following = true
+        /// Rows added while holding position, for the pill.
+        private var pendingNew = 0
+        /// Top visible row and its offset from the viewport top, restored after edits.
+        private var anchor: (id: UUID, offset: CGFloat)?
+        private var scrollingProgrammatically = false
+        private var lastClipSize: NSSize = .zero
+        private var focusedSpeakerId: String?
+
         var isRecording = false
         var liveDisabled = false
         var hidesEmptyState = false
+        var canNameSpeakers = false
+
+        private var holding: Bool { !following || focusedSpeakerId != nil }
 
         init(store: LiveSegmentStore) {
             self.store = store
@@ -114,21 +128,41 @@ struct LiveTranscriptTable: NSViewRepresentable {
             ])
             emptyHost = host
 
-            boundsObserver = NotificationCenter.default.addObserver(
-                forName: NSView.boundsDidChangeNotification,
-                object: scroll.contentView,
-                queue: .main
+            let pill = NSHostingView(rootView: NewLinesPill(count: 0, action: {}))
+            pill.translatesAutoresizingMaskIntoConstraints = false
+            pill.isHidden = true
+            scroll.addSubview(pill)
+            NSLayoutConstraint.activate([
+                pill.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+                pill.bottomAnchor.constraint(equalTo: scroll.bottomAnchor, constant: -Theme.Spacing.medium),
+            ])
+            pillHost = pill
+
+            // Synchronous (queue: nil) so our own scrolls are recognised by the flag
+            // they run under; a hop would judge them after the flag was cleared.
+            observers.append(NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: nil
             ) { [weak self] _ in
-                Task { @MainActor in
-                    self?.noteUserScroll()
-                }
+                MainActor.assumeIsolated { self?.clipBoundsChanged() }
+            })
+            observers.append(NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: table, queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.contentResized() }
+            })
+
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                MainActor.assumeIsolated { self?.handleEndKey(event) ?? event }
             }
 
-            cancellable = store.$segments.sink { [weak self] new in
-                Task { @MainActor in
-                    self?.apply(new)
-                }
-            }
+            store.$segments
+                .sink { [weak self] new in MainActor.assumeIsolated { self?.apply(new) } }
+                .store(in: &cancellables)
+            store.roster.$focusedSpeakerId
+                .removeDuplicates()
+                .sink { [weak self] id in MainActor.assumeIsolated { self?.focusChanged(id) } }
+                .store(in: &cancellables)
+            lastClipSize = scroll.contentView.bounds.size
             apply(store.segments)
         }
 
@@ -136,26 +170,27 @@ struct LiveTranscriptTable: NSViewRepresentable {
             isRecording: Bool,
             liveDisabled: Bool,
             hidesEmptyState: Bool,
-            people: [String],
-            attendees: [String],
-            onNameSpeaker: ((String, String) -> Void)?
+            canNameSpeakers: Bool
         ) {
             self.isRecording = isRecording
             self.liveDisabled = liveDisabled
             self.hidesEmptyState = hidesEmptyState
-            self.people = people
-            self.attendees = attendees
-            self.onNameSpeaker = onNameSpeaker
+            if self.canNameSpeakers != canNameSpeakers {
+                self.canNameSpeakers = canNameSpeakers
+                if let table = tableView, table.numberOfRows > 0 {
+                    table.reloadData(forRowIndexes: IndexSet(integersIn: 0..<table.numberOfRows),
+                                     columnIndexes: IndexSet(integer: 0))
+                }
+            }
             refreshEmpty()
         }
 
         func teardown() {
-            cancellable?.cancel()
-            cancellable = nil
-            if let boundsObserver {
-                NotificationCenter.default.removeObserver(boundsObserver)
-            }
-            boundsObserver = nil
+            cancellables.removeAll()
+            observers.forEach { NotificationCenter.default.removeObserver($0) }
+            observers.removeAll()
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            keyMonitor = nil
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
@@ -167,10 +202,11 @@ struct LiveTranscriptTable: NSViewRepresentable {
                 ?? LiveTranscriptRowView()
             cell.identifier = id
             let segment = rows[row]
-            let canName = segment.speakerId != nil && onNameSpeaker != nil
+            let canName = segment.speakerId != nil && canNameSpeakers
             cell.apply(segment, textWidth: Self.textWidth(in: tableView), canName: canName) { [weak self] in
-                self?.presentNamer(for: segment, from: cell.speakerButton)
+                self?.store.roster.menuRequest = segment.speakerId
             }
+            cell.setHighlighted(focusedSpeakerId != nil && segment.speakerId == focusedSpeakerId)
             return cell
         }
 
@@ -179,29 +215,37 @@ struct LiveTranscriptTable: NSViewRepresentable {
             table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<table.numberOfRows))
         }
 
+        // MARK: Edits
+
         private func apply(_ new: [Segment]) {
             guard let table = tableView else {
                 rows = new
                 return
             }
+            if holding, anchor == nil { recordAnchor() }
             let edit = LiveTranscriptTableDiff.edit(from: rows, to: new)
             rows = new
-            let columns = IndexSet(integer: 0)
             switch edit {
             case .none:
                 break
             case .reloadAll:
                 table.reloadData()
-            case .append(let indexes):
-                table.insertRows(at: indexes, withAnimation: [])
-            case .reload(let indexes):
-                table.reloadData(forRowIndexes: indexes, columnIndexes: columns)
-            case .reloadAndAppend(let reload, let append):
-                table.reloadData(forRowIndexes: reload, columnIndexes: columns)
-                table.insertRows(at: append, withAnimation: [])
+                pendingNew = 0
+                anchor = nil
+            case .update(let remove, let insert, let reload):
+                table.beginUpdates()
+                if !remove.isEmpty { table.removeRows(at: remove, withAnimation: []) }
+                if !insert.isEmpty { table.insertRows(at: insert, withAnimation: []) }
+                table.endUpdates()
+                if !reload.isEmpty {
+                    table.reloadData(forRowIndexes: reload, columnIndexes: IndexSet(integer: 0))
+                    table.noteHeightOfRows(withIndexesChanged: reload)
+                }
+                if holding { pendingNew += max(0, insert.count - remove.count) }
             }
             refreshEmpty()
-            scrollToTailIfPinned()
+            settlePosition()
+            refreshPill()
         }
 
         private func refreshEmpty() {
@@ -210,38 +254,118 @@ struct LiveTranscriptTable: NSViewRepresentable {
             emptyHost?.isHidden = !show
         }
 
-        private func scrollToTailIfPinned() {
-            guard pinnedToBottom, let table = tableView, table.numberOfRows > 0 else { return }
-            applyingProgrammaticScroll = true
-            table.scrollRowToVisible(table.numberOfRows - 1)
-            applyingProgrammaticScroll = false
+        // MARK: Scrolling
+
+        /// After content changed: stick to the bottom, or put the reader's line back.
+        private func settlePosition() {
+            if holding { restoreAnchor() } else { scrollToBottom() }
         }
 
-        private func noteUserScroll() {
-            guard !applyingProgrammaticScroll, let scroll = scrollView, let table = tableView else { return }
-            let visible = scroll.contentView.bounds
-            let gap = table.bounds.maxY - visible.maxY
-            pinnedToBottom = gap < 48
+        private func contentResized() {
+            guard !scrollingProgrammatically else { return }
+            settlePosition()
         }
 
-        private func presentNamer(for segment: Segment, from anchor: NSView) {
-            guard let id = segment.speakerId, let commit = onNameSpeaker else { return }
-            var popover: NSPopover?
-            let root = TranscriptSpeakerNamer(
-                draft: segment.speakerName ?? "",
-                people: people,
-                attendees: attendees,
-                onCommit: { name in
-                    commit(id, name)
-                    popover?.performClose(nil)
-                }
-            )
-            let hosting = NSHostingController(rootView: root)
-            let pop = NSPopover()
-            pop.behavior = .transient
-            pop.contentViewController = hosting
-            popover = pop
-            pop.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        private func clipBoundsChanged() {
+            guard !scrollingProgrammatically, let clip = scrollView?.contentView else { return }
+            // A viewport resize (window or split drag) is not the reader scrolling.
+            if clip.bounds.size != lastClipSize {
+                lastClipSize = clip.bounds.size
+                settlePosition()
+                return
+            }
+            following = isAtBottom
+            if following { pendingNew = 0 }
+            recordAnchor()
+            refreshPill()
+        }
+
+        private var isAtBottom: Bool {
+            guard let clip = scrollView?.contentView, let table = tableView else { return true }
+            return table.frame.height - clip.bounds.maxY <= Self.bottomSlack
+        }
+
+        private func scrollToBottom() {
+            guard let clip = scrollView?.contentView, let table = tableView else { return }
+            scroll(toY: table.frame.height - clip.bounds.height)
+            pendingNew = 0
+        }
+
+        private func recordAnchor() {
+            guard let clip = scrollView?.contentView, let table = tableView else { return }
+            let visible = table.rows(in: clip.bounds)
+            guard visible.length > 0, rows.indices.contains(visible.location) else {
+                anchor = nil
+                return
+            }
+            let row = visible.location
+            anchor = (rows[row].id, table.rect(ofRow: row).minY - clip.bounds.minY)
+        }
+
+        private func restoreAnchor() {
+            guard let table = tableView, let anchor else { return }
+            guard let row = rows.firstIndex(where: { $0.id == anchor.id }) else {
+                recordAnchor()
+                return
+            }
+            scroll(toY: table.rect(ofRow: row).minY - anchor.offset)
+        }
+
+        private func scroll(toY y: CGFloat) {
+            guard let scroll = scrollView, let table = tableView else { return }
+            let clip = scroll.contentView
+            let target = min(max(0, y), max(0, table.frame.height - clip.bounds.height))
+            guard abs(clip.bounds.origin.y - target) > 0.5 else { return }
+            scrollingProgrammatically = true
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
+            scroll.reflectScrolledClipView(clip)
+            scrollingProgrammatically = false
+        }
+
+        private func jumpToLatest() {
+            following = true
+            anchor = nil
+            if focusedSpeakerId != nil { store.roster.focusedSpeakerId = nil }
+            scrollToBottom()
+            refreshPill()
+        }
+
+        /// End (fn-→ on laptops) jumps to the latest line, unless someone is typing.
+        private func handleEndKey(_ event: NSEvent) -> NSEvent? {
+            let kVKEnd: UInt16 = 119
+            guard event.keyCode == kVKEnd, !rows.isEmpty,
+                  let window = scrollView?.window, event.window === window,
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+            else { return event }
+            if let editor = window.firstResponder as? NSTextView, editor.isEditable { return event }
+            jumpToLatest()
+            return nil
+        }
+
+        private func refreshPill() {
+            guard let pill = pillHost else { return }
+            let show = !rows.isEmpty && (!following || (focusedSpeakerId != nil && pendingNew > 0))
+            if show {
+                pill.rootView = NewLinesPill(count: pendingNew) { [weak self] in self?.jumpToLatest() }
+            }
+            pill.isHidden = !show
+        }
+
+        // MARK: Speaker focus
+
+        private func focusChanged(_ id: String?) {
+            if id != nil, focusedSpeakerId == nil { recordAnchor() }
+            focusedSpeakerId = id
+            tableView?.enumerateAvailableRowViews { rowView, row in
+                guard let cell = rowView.view(atColumn: 0) as? LiveTranscriptRowView,
+                      self.rows.indices.contains(row) else { return }
+                cell.setHighlighted(id != nil && self.rows[row].speakerId == id)
+            }
+            if id == nil, following {
+                anchor = nil
+                scrollToBottom()
+            }
+            refreshPill()
         }
 
         private static func textWidth(in table: NSTableView) -> CGFloat {
@@ -268,6 +392,25 @@ struct LiveTranscriptTable: NSViewRepresentable {
                     : "Your live transcript will appear here as people speak.",
                 animateIcon: isRecording)
         }
+    }
+}
+
+/// Floating "↓ N new lines" control shown while the transcript holds the reader's place.
+struct NewLinesPill: View {
+    let count: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(count > 0 ? "\(count) new line\(count == 1 ? "" : "s")" : "Jump to latest",
+                  systemImage: "arrow.down")
+                .font(Theme.Typography.secondary.weight(.medium))
+                .monospacedDigit()
+        }
+        .glassProminentButton()
+        .elevation(Theme.Shadow.floating)
+        .help("Jump to the latest line (End)")
+        .accessibilityLabel(count > 0 ? "\(count) new lines, jump to latest" : "Jump to latest")
     }
 }
 
@@ -330,12 +473,21 @@ final class LiveTranscriptRowView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
+    /// Tint for the speaker whose naming menu is open.
+    func setHighlighted(_ on: Bool) {
+        wantsLayer = true
+        layer?.cornerRadius = Theme.Radius.small
+        layer?.backgroundColor = on
+            ? speakerButton.contentTintColor?.withAlphaComponent(Theme.Opacity.tintFill).cgColor
+            : nil
+    }
+
     func apply(_ segment: Segment, textWidth: CGFloat, canName: Bool, onName: @escaping () -> Void) {
         self.onName = canName ? onName : nil
         timeField.stringValue = segment.timestamp
         speakerButton.title = segment.displaySpeaker
         speakerButton.contentTintColor = Self.nsColor(for: segment)
-        speakerButton.toolTip = canName ? "Click to name this speaker" : nil
+        speakerButton.toolTip = canName ? "Name this speaker" : nil
         textField.stringValue = segment.text
         textField.preferredMaxLayoutWidth = textWidth
         textField.textColor = segment.confirmed ? .labelColor : .secondaryLabelColor
@@ -347,11 +499,7 @@ final class LiveTranscriptRowView: NSView {
     }
 
     private static func nsColor(for segment: Segment) -> NSColor {
-        if let id = segment.speakerId {
-            let palette: [NSColor] = [.systemGreen, .systemOrange, .systemPurple, .systemPink,
-                                      .systemTeal, .systemIndigo, .systemBrown, .systemCyan]
-            return palette[abs(id.hashValue) % palette.count]
-        }
+        if let id = segment.speakerId { return SpeakerPalette.nsColor(for: id) }
         switch segment.track {
         case .me: return .controlAccentColor
         case .remote: return .systemGreen

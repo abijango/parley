@@ -2,15 +2,16 @@ import Foundation
 
 /// Incremental table mutation derived from two timeline snapshots.
 ///
-/// The engine still publishes a full `[Segment]` array. This is the structure that
-/// recovers the actual event (tail revision, confirm+append, identity churn) so
-/// `NSTableView` never has to `reloadData()` on a 1 Hz tick.
+/// The engine still publishes a full `[Segment]` array. This recovers the actual
+/// event — rows inserted or removed by id, rows whose content changed in place — so
+/// `NSTableView` keeps measured row heights and the reader's scroll position instead
+/// of `reloadData()`-ing whenever diarization re-splits the open tail.
 enum LiveTranscriptTableEdit: Equatable {
     case none
     case reloadAll
-    case append(IndexSet)
-    case reload(IndexSet)
-    case reloadAndAppend(reload: IndexSet, append: IndexSet)
+    /// `remove` indexes the old rows, `insert` the new rows (NSTableView's
+    /// begin/endUpdates semantics); `reload` indexes the new rows.
+    case update(remove: IndexSet, insert: IndexSet, reload: IndexSet)
 }
 
 enum LiveTranscriptTableDiff {
@@ -20,21 +21,23 @@ enum LiveTranscriptTableDiff {
         }
         if new.isEmpty { return .reloadAll }
 
-        if new.count == old.count, zip(old, new).allSatisfy({ $0.0.id == $0.1.id }) {
-            let changed = IndexSet(old.indices.filter { old[$0] != new[$0] })
-            return changed.isEmpty ? .none : .reload(changed)
-        }
-
-        if new.count > old.count {
-            let prefix = old.count
-            if zip(old, new.prefix(prefix)).allSatisfy({ $0.0.id == $0.1.id }) {
-                let reload = IndexSet(old.indices.filter { old[$0] != new[$0] })
-                let append = IndexSet(integersIn: prefix..<new.count)
-                if reload.isEmpty { return .append(append) }
-                return .reloadAndAppend(reload: reload, append: append)
+        let diff = new.map(\.id).difference(from: old.map(\.id))
+        var remove = IndexSet()
+        var insert = IndexSet()
+        for change in diff {
+            switch change {
+            case .remove(let offset, _, _): remove.insert(offset)
+            case .insert(let offset, _, _): insert.insert(offset)
             }
         }
+        // Nothing survived: a reset, not an edit.
+        if remove.count == old.count { return .reloadAll }
 
-        return .reloadAll
+        let oldById = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let reload = IndexSet(new.indices.filter { i in
+            !insert.contains(i) && oldById[new[i].id].map { $0 != new[i] } == true
+        })
+        if remove.isEmpty, insert.isEmpty, reload.isEmpty { return .none }
+        return .update(remove: remove, insert: insert, reload: reload)
     }
 }
