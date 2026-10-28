@@ -31,6 +31,10 @@ struct MainWindowView: View {
                     }
                     .help(sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
                 }
+                ToolbarSpacer(.flexible)
+                ToolbarItem(placement: .automatic) {
+                    NotesPanelToggle()
+                }
             }
             .background(WindowConfigurator())   // hide the "Parley" title text
             .environmentObject(recording.store)
@@ -87,7 +91,6 @@ struct RecordDetailView: View {
     @ObservedObject private var meeting = RecordingController.shared.meeting
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var vault: VaultDirectory
-    @ObservedObject private var summaryService = RecordingController.shared.summaryService
     @State private var apps: [CapturableApp] = []
     @State private var showingSources = false
     @State private var pendingPerson: PendingPerson?
@@ -101,14 +104,12 @@ struct RecordDetailView: View {
     /// rail. AX trust only changes via System Settings, so re-reading on activation
     /// (plus at appear) catches it. See docs/RECORDING_FREEZE_INVESTIGATION.md.
     @State private var axTrusted = PermissionManager.accessibilityAuthorized()
-    /// User-resizable inspector width (drag the divider). View-local presentation
-    /// state — deliberately not in AppSettings. Default 340 (a touch roomier than
-    /// the old fixed 300); double-clicking the divider resets to it.
-    @AppStorage("parley.inspectorWidth") private var inspectorWidth: Double = 340
+    // Notes panel (right rail) visibility + section disclosure — view-local
+    // presentation state, deliberately not in AppSettings.
+    @AppStorage(NotesPanel<EmptyView>.visibleKey) private var notesPanelVisible = true
+    @AppStorage("parley.liveNotesExpanded") private var liveNotesExpanded = true
     @AppStorage("parley.meetingDetailsExpanded") private var meetingDetailsExpanded = false
-    @State private var dragBaseWidth: Double?
-    private static let inspectorWidthRange: ClosedRange<Double> = 280...440
-    private static let defaultInspectorWidth: Double = 340
+    @AppStorage("parley.liveSummaryExpanded") private var liveSummaryExpanded = false
 
     /// Pre-first-recording: no live segments yet and not actively recording.
     private var isPreRecordIdle: Bool {
@@ -133,8 +134,10 @@ struct RecordDetailView: View {
         HStack(spacing: 0) {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            inspectorDivider
-            inspector
+            if notesPanelVisible {
+                inspector
+                    .transition(.move(edge: .trailing))
+            }
         }
         .frame(minWidth: 480, minHeight: 520)
         .onAppear {
@@ -345,46 +348,30 @@ struct RecordDetailView: View {
         }
     }
 
-    private var previewSummaryBar: some View {
-        HStack(spacing: Theme.Spacing.medium) {
-            if summaryService.runningID != nil {
-                ProgressView().controlSize(.small)
-                Text(summaryService.runningActivity ?? "Generating notes…")
-                    .font(Theme.Typography.secondary)
-                    .foregroundStyle(.secondary)
-            } else {
-                Button {
-                    recording.enqueuePreviewSummary()
-                } label: {
-                    Label("Generate meeting notes", systemImage: "sparkles")
-                }
-                .clayButton()
-                .disabled(recording.lastTranscriptURL == nil)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, Theme.Spacing.large)
-        .padding(.vertical, Theme.Spacing.small)
-        .chromeSurface()
-    }
+    // MARK: Notes panel
 
-    // MARK: Inspector rail
-
-    /// The right-hand rail: meeting details and notes. Start/Stop and audio sources
-    /// live in the composer under the transcript.
+    /// The right-hand notes panel: My notes (fills the rail), meeting details, and the
+    /// summary placeholder. Start/Stop and audio sources live in the composer.
     private var inspector: some View {
-        // A VStack (not a ScrollView): the controls + metadata keep their natural
-        // size and the Notes editor fills the remaining height. (A ScrollView would
-        // give every child only its ideal height, so Notes could never grow.)
-        VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
-            metadataFields   // editable during recording too (e.g. a mid-call joiner)
-            liveAttachmentsField
-            notesField       // fills the rest of the rail
+        NotesPanel {
+            NotesPanelSection("My notes", symbol: "square.and.pencil",
+                              isExpanded: $liveNotesExpanded, fills: true) {
+                notesField
+            }
+            NotesPanelSection("Details", symbol: "doc.text", isExpanded: $meetingDetailsExpanded) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
+                    metadataFields   // editable during recording too (e.g. a mid-call joiner)
+                    liveAttachmentsField
+                }
+            }
+            NotesPanelSection("Summary", symbol: "sparkles", isExpanded: $liveSummaryExpanded) {
+                Text("Meeting notes are generated after the call ends. The finished note opens here when it's ready.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !liveNotesExpanded { Spacer(minLength: 0) }
         }
-        .padding(Theme.Spacing.large)
-        .frame(width: inspectorWidth)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .chromeSurface()
     }
 
     /// Informational empty state; Start/Stop is in the composer below.
@@ -412,33 +399,6 @@ struct RecordDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(Theme.Spacing.xLarge)
-    }
-
-    /// The divider between the transcript and the inspector, doubled as a resize
-    /// handle: a slim transparent grab area straddles the 1pt line, shows the
-    /// horizontal-resize cursor on hover, and drags the rail width within range.
-    /// Dragging left (negative translation) widens the rail; double-click resets.
-    private var inspectorDivider: some View {
-        Divider()
-            .overlay {
-                Color.clear
-                    .frame(width: 8)
-                    .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-                    }
-                    .gesture(
-                        DragGesture(minimumDistance: 1)
-                            .onChanged { value in
-                                if dragBaseWidth == nil { dragBaseWidth = inspectorWidth }
-                                let proposed = dragBaseWidth! - value.translation.width
-                                inspectorWidth = min(max(proposed, Self.inspectorWidthRange.lowerBound),
-                                                     Self.inspectorWidthRange.upperBound)
-                            }
-                            .onEnded { _ in dragBaseWidth = nil }
-                    )
-                    .onTapGesture(count: 2) { inspectorWidth = Self.defaultInspectorWidth }
-            }
     }
 
     /// Persistent warnings the user should fix before recording: denied
@@ -709,20 +669,28 @@ struct RecordDetailView: View {
         }
     }
 
-    /// The Notes editor — the flexible last element of the inspector, so it grows to
-    /// fill the rail's remaining height (and grows further as the window does). The
-    /// `TextEditor` scrolls its own content internally once notes exceed the frame.
+    /// The My notes editor (serif prose) — fills the panel's remaining height and
+    /// scrolls its own content once notes exceed the frame.
     private var notesField: some View {
-        railField("Notes") {
-            TextEditor(text: $meeting.manualNotes)
-                .font(Theme.Typography.prose)
-                .frame(maxWidth: .infinity,
-                       minHeight: isPreRecordIdle ? 100 : 140,
-                       maxHeight: .infinity)
-                .overlay(Theme.Radius.rect(Theme.Radius.small).strokeBorder(.quaternary))
-                .onChange(of: meeting.manualNotes) { recording.userInteracted() }
-        }
-        .frame(maxHeight: .infinity)
+        TextEditor(text: $meeting.manualNotes)
+            .font(Theme.Typography.prose)
+            .scrollContentBackground(.hidden)
+            .padding(Theme.Spacing.small)
+            .frame(maxWidth: .infinity, minHeight: 120, maxHeight: .infinity)
+            .background(Theme.Radius.rect(Theme.Radius.small).fill(Theme.Palette.panelBg))
+            .overlay(Theme.Radius.rect(Theme.Radius.small)
+                .strokeBorder(Theme.Palette.divider, lineWidth: 0.5))
+            .overlay(alignment: .topLeading) {
+                if meeting.manualNotes.isEmpty {
+                    Text("Jot down anything worth remembering…")
+                        .font(Theme.Typography.prose)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .padding(.horizontal, Theme.Spacing.small + 5)
+                        .padding(.vertical, Theme.Spacing.small)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onChange(of: meeting.manualNotes) { recording.userInteracted() }
     }
 
     /// A stacked label-over-control field for the inspector rail.

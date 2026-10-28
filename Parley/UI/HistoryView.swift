@@ -9,6 +9,12 @@ struct HistoryView: View {
     @EnvironmentObject var recording: RecordingController
     @EnvironmentObject var shell: MainShellModel
     @AppStorage("parley.sidebarCollapsed") var sidebarCollapsed = false
+    @AppStorage(NotesPanel<EmptyView>.visibleKey) var notesPanelVisible = true
+    @AppStorage("parley.noteDetailsExpanded") var noteDetailsExpanded = true
+    @AppStorage("parley.noteSummaryExpanded") var noteSummaryExpanded = true
+    /// The staged summary's full review (preview / edit / checker) has been opened
+    /// into the center, replacing the transcript. Reset when the selection changes.
+    @State var summaryInCenter = false
     @EnvironmentObject var store: TranscriptStore
     @EnvironmentObject var vault: VaultDirectory
     @ObservedObject var settings = AppSettings.shared
@@ -163,6 +169,7 @@ struct HistoryView: View {
         .onChange(of: searchInContents) { updateContentSearch() }
         .onChange(of: selection) {
             seedReviewDestination()
+            summaryInCenter = false
             if !selection.isEmpty { shell.route = .notes }
         }
         .onChange(of: selectedItem?.summaryReadyURL) { seedReviewDestination() }
@@ -476,19 +483,21 @@ struct HistoryView: View {
         if selection.count > 1 {
             bulkPanel
         } else if let item = selectedItem {
-            VStack(spacing: 0) {
-                detailHeader(item)
-                Divider()
-                if let staged = item.summaryReadyURL {
-                    if isV2Review(item: item, staged: staged) {
-                        SummaryMarkupReviewView(item: item, reviewDestination: $reviewDestination)
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    detailHeader(item)
+                    Divider()
+                    if summaryInCenter, let staged = item.summaryReadyURL {
+                        summaryReviewCenter(item, staged: staged)
                     } else {
-                        reviewPane(item, staged: staged)
+                        TranscriptPreviewView(url: item.url, reloadToken: recording.transcriptRevision)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                } else {
-                    summaryStatusBar(item)
-                    TranscriptPreviewView(url: item.url, reloadToken: recording.transcriptRevision)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if notesPanelVisible {
+                    notePanel(item)
+                        .transition(.move(edge: .trailing))
                 }
             }
         } else {
@@ -708,34 +717,17 @@ struct HistoryView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
                     TextField("Meeting title", text: headerTitleBinding(for: item))
-                        .textFieldStyle(.parley)
+                        .textFieldStyle(.plain)
                         .font(Theme.Typography.screenTitle)
                         .onSubmit { persistHeaderTitle(item) }
                         .disabled(summaryService.hasPendingWork(item))
                         .help(summaryService.hasPendingWork(item)
-                              ? "Renaming is available once the summary finishes" : "")
+                              ? "Renaming is available once the summary finishes" : "Click to rename")
                     metadataLine(item)
-                    DestinationField(path: headerFilingBinding(for: item),
-                                     destinations: vault.destinations,
-                                     firstRoot: settings.scanRoots.first ?? "Internal")
                 }
                 Spacer()
                 statusBadge(item)
-                Menu {
-                    Button("Reveal transcript in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([item.url])
-                    }
-                    Divider()
-                    Button("Delete…", role: .destructive) { beginDelete([item]) }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton).fixedSize()
-                .help("Reveal or delete this meeting")
             }
-            attendeesEditor(item)
-            historyAttachmentsEditor(item)
-            filesStrip(item)
             HistorySpeakerStrip(item: item, audioAvailable: audioAvailable(item)) {
                 if item.summaryReadyURL != nil { summaryService.regenerate(item) } else { summarize(item) }
             }
@@ -744,7 +736,8 @@ struct HistoryView: View {
             // (detecting / queued / summarizing / failed), hidden when idle.
             PipelineStageBar(item: item, style: .full)
         }
-        .padding(Theme.Spacing.large)
+        .padding(.horizontal, Theme.Spacing.xLarge)
+        .padding(.vertical, Theme.Spacing.large)
         .onAppear { seedHeaderFields(item) }
         .onChange(of: item.id) { seedHeaderFields(item) }
     }
@@ -875,29 +868,6 @@ struct HistoryView: View {
                 .glassButton()
             }
 
-            if let audioPath = item.meta.audio, !audioPath.isEmpty {
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: audioPath)])
-                } label: {
-                    Label("Reveal audio", systemImage: "waveform")
-                }
-                .glassButton()
-            }
-
-            addAttendeeButton(item)
-
-            Button { beginMerge(item) } label: {
-                Label("Combine with\u{2026}", systemImage: "arrow.triangle.merge")
-            }
-            .glassButton()
-            .help("Combine this recording with another leg of the same call")
-
-            Button { compareItem = item } label: {
-                Label("Compare models\u{2026}", systemImage: "rectangle.split.3x1")
-            }
-            .glassButton()
-            .help("Side-by-side summaries from Claude, Cursor, and Grok")
-
             if audioAvailable(item) {
                 if item.hasUnnamedSpeakers {
                     Button { detectSpeakers(item) } label: {
@@ -913,6 +883,8 @@ struct HistoryView: View {
                     .help("Re-run diarization + speaker ID on this recording's audio")
                 }
             }
+
+            moreMenu(item)
 
             Spacer()
 
@@ -935,6 +907,33 @@ struct HistoryView: View {
                 }
             }
         }
+    }
+
+    /// Less-used per-meeting actions, folded into one menu so the row fits beside the
+    /// notes panel. (Attendees are added from the panel's Details section.)
+    func moreMenu(_ item: TranscriptItem) -> some View {
+        Menu {
+            Button("Combine with\u{2026}") { beginMerge(item) }
+            Button("Compare models\u{2026}") { compareItem = item }
+            Divider()
+            if let audioPath = item.meta.audio, !audioPath.isEmpty {
+                Button("Reveal audio in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: audioPath)])
+                }
+            }
+            Button("Reveal transcript in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([item.url])
+            }
+            Divider()
+            Button("Rename\u{2026}") { beginRename(item) }
+            Button("Delete\u{2026}", role: .destructive) { beginDelete([item]) }
+        } label: {
+            Label("More", systemImage: "ellipsis")
+        }
+        .menuStyle(.button)
+        .glassButton()
+        .fixedSize()
+        .help("Combine, compare, reveal, rename, or delete")
     }
 
     /// Add a present-but-non-speaking (or forgotten) attendee to this transcript.

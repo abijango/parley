@@ -200,7 +200,7 @@ extension HistoryView {
     }
 
     /// Compact one-line row: title, then an attention icon / status badge only when the
-    /// meeting isn't simply done. In-flight work shows as a thin stage bar underneath.
+    /// meeting is in flight or needs the user. In-flight work shows as a thin stage bar underneath.
     func sidebarRow(_ item: TranscriptItem) -> some View {
         let model = rowIndex.row(for: item)
         return VStack(alignment: .leading, spacing: Theme.Spacing.xSmall) {
@@ -212,7 +212,10 @@ extension HistoryView {
                     .truncationMode(.tail)
                 Spacer(minLength: Theme.Spacing.xSmall)
                 rowIndicator(item)
-                if model.stage != .processed, model.rowIndicator == nil {
+                // Resting states (processed, or unprocessed and simply waiting) stay
+                // quiet; only work in flight or needing the user gets a badge.
+                if model.stage != .processed, model.stage != .idleUnprocessed,
+                   model.rowIndicator == nil {
                     StatusBadge(model.statusLabel, severity: model.statusSeverity)
                 }
             }
