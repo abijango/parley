@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Shell sidebar + center
 //
@@ -169,6 +170,7 @@ extension HistoryView {
             if filter == .processing {
                 ForEach(filteredItems) { item in
                     sidebarRow(item).tag(item.id)
+                        .listRowBackground(rowSelectionBackground(item))
                         .contextMenu { rowMenu(item) }
                 }
                 .onMove(perform: moveAction)
@@ -177,6 +179,7 @@ extension HistoryView {
                     Section {
                         ForEach(section.items) { item in
                             sidebarRow(item).tag(item.id)
+                                .listRowBackground(rowSelectionBackground(item))
                                 .contextMenu { rowMenu(item) }
                         }
                     } header: {
@@ -189,8 +192,22 @@ extension HistoryView {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-        .tint(Theme.Palette.selection)
+        // The system's selection is a saturated accent capsule that ignores `.tint`;
+        // switch it off on the backing table and draw the neutral wash ourselves.
+        .background(PlainTableSelection())
         .onDeleteCommand { if !selectedItems.isEmpty { beginDelete(selectedItems) } }
+    }
+
+    /// Claude-style selection: a soft neutral rounded wash, inset from the edges,
+    /// with the row's own (dark) text kept as is.
+    @ViewBuilder func rowSelectionBackground(_ item: TranscriptItem) -> some View {
+        if selection.contains(item.id) {
+            Theme.Radius.rect(Theme.Radius.small)
+                .fill(Theme.Palette.selection)
+                .padding(.horizontal, Theme.Spacing.small)
+        } else {
+            Color.clear
+        }
     }
 
     var groupedItems: [(group: MeetingDateGroup, items: [TranscriptItem])] {
@@ -343,6 +360,45 @@ struct PipelineStageBar: View {
                 SegmentedStageBar(segments: bar.segments,
                                   statusLabel: bar.statusLabel, sublabel: bar.sublabel)
             }
+        }
+    }
+}
+
+/// Turns off the system selection highlight on the `NSTableView` behind a SwiftUI
+/// `List`, so rows can draw their own (neutral) selection via `listRowBackground`.
+/// Selection itself — click, ⌘/⇧-click, arrow keys, context menus — is unchanged.
+private struct PlainTableSelection: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { Self.apply(from: view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { Self.apply(from: nsView) }
+    }
+
+    /// The marker sits beside the List, so search the nearest ancestor that contains
+    /// a table and update every table found under it.
+    private static func apply(from view: NSView) {
+        var ancestor = view.superview
+        while let current = ancestor {
+            let tables = current.descendants(of: NSTableView.self)
+            if !tables.isEmpty {
+                for table in tables where table.selectionHighlightStyle != .none {
+                    table.selectionHighlightStyle = .none
+                }
+                return
+            }
+            ancestor = current.superview
+        }
+    }
+}
+
+private extension NSView {
+    func descendants<T: NSView>(of type: T.Type) -> [T] {
+        subviews.flatMap { sub -> [T] in
+            (sub as? T).map { [$0] } ?? sub.descendants(of: type)
         }
     }
 }
