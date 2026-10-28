@@ -153,6 +153,22 @@ final class SummaryRunStore: @unchecked Sendable {
         }
     }
 
+    /// Re-points a transcript's run history at its new path after a rename (runs are
+    /// keyed by the transcript path, so the markup review would otherwise lose them).
+    func retargetRuns(fromTranscriptPath oldPath: String, to newPath: String) {
+        db.withDB { sqlite in
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_prepare_v2(sqlite,
+                "UPDATE summary_runs SET transcript_id = ?, transcript_path = ? WHERE transcript_id = ?;",
+                -1, &stmt, nil)
+            KnowledgeSQL.bind(stmt, 1, newPath)
+            KnowledgeSQL.bind(stmt, 2, newPath)
+            KnowledgeSQL.bind(stmt, 3, oldPath)
+            sqlite3_step(stmt)
+        }
+    }
+
     func insertHunk(_ hunk: SummaryHunk) {
         // Public wrapper used when the reviewer adds a human correction hunk.
         insertHunkPrivate(hunk)

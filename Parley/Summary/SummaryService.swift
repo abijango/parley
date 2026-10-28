@@ -258,6 +258,43 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         runNext()
     }
 
+    /// `item` with its frontmatter re-read from disk (date kept — the scan resolves it from
+    /// the filename). Unchanged when the file can't be parsed.
+    nonisolated static func reloadingMeta(_ item: TranscriptItem) -> TranscriptItem {
+        guard var meta = TranscriptWriter.parseFrontmatter(item.url) else { return item }
+        meta.date = item.meta.date
+        var fresh = item
+        fresh.meta = meta
+        return fresh
+    }
+
+    /// Moves every staged summary (v2, per-backend, legacy) from `oldTranscript`'s stem to
+    /// `newTranscript`'s. Staging is keyed by the transcript filename, so a rename that
+    /// skipped this would orphan the draft and drop the meeting out of review.
+    nonisolated static func moveStaging(from oldTranscript: URL, to newTranscript: URL, stagingDir: URL) {
+        let fm = FileManager.default
+        var pairs = [(v2StagingURL(for: oldTranscript, stagingDir: stagingDir),
+                      v2StagingURL(for: newTranscript, stagingDir: stagingDir)),
+                     (legacyStagingURL(for: oldTranscript, stagingDir: stagingDir),
+                      legacyStagingURL(for: newTranscript, stagingDir: stagingDir))]
+        for backend in SummaryBackend.allCases {
+            pairs.append((stagingURL(for: oldTranscript, backend: backend, stagingDir: stagingDir),
+                          stagingURL(for: newTranscript, backend: backend, stagingDir: stagingDir)))
+        }
+        for (from, to) in pairs where from != to && fm.fileExists(atPath: from.path) {
+            if fm.fileExists(atPath: to.path) { try? fm.removeItem(at: to) }
+            do { try fm.moveItem(at: from, to: to) }
+            catch { AppLog.log("move staged summary failed: \(error.localizedDescription)", category: "summary") }
+        }
+    }
+
+    /// A summary for this item is queued, running, or awaiting bulk confirmation — its
+    /// transcript URL is captured in that job, so the file must not be renamed under it.
+    func hasPendingWork(_ item: TranscriptItem) -> Bool {
+        if case .pending = jobs[item.id] { return true }
+        return pendingBulkConfirm?.items.contains { $0.id == item.id } ?? false
+    }
+
     /// Re-run the *active* backend only — other backends' staging files are kept for comparison.
     func regenerate(_ item: TranscriptItem) {
         let settings = AppSettings.shared
@@ -520,7 +557,9 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }) else { return }
         isRunning = true
         lastSummaryStartedAt = Date()
-        let item = queue.remove(at: idx)
+        // The queue holds a snapshot from enqueue time; attendee/filing edits made while
+        // the job waited live only on disk, so build the prompt from the file as it is now.
+        let item = Self.reloadingMeta(queue.remove(at: idx))
         runningID = item.id
         if settings.summaryPipeline == .v2, pendingRepair(for: item) == nil {
             runV2(item: item, settings: settings)

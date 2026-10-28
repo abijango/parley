@@ -1378,12 +1378,31 @@ final class RecordingController: ObservableObject {
     /// the History attendees editor. Mirrors `addAttendeeToTranscript` but REPLACES rather
     /// than appends; an empty list clears the field in both places. Trims/dedupes so a
     /// stray blank or duplicate never lands in the note.
-    func setAttendees(on url: URL, to names: [String]) {
+    func setAttendees(on url: URL, to names: [String], unassignRemovedSpeakers: Bool = true) {
         var clean: [String] = []
         for n in names.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }) where !n.isEmpty {
             if !clean.contains(where: { $0.caseInsensitiveCompare(n) == .orderedSame }) { clean.append(n) }
         }
+        let previous = TranscriptWriter.parseFrontmatter(url)
         TranscriptWriter.updateFrontmatter(at: url) { $0.attendees = clean }
+        // Removing a chip means "this person wasn't on the call". When the voiceprint pass
+        // had pinned that name on a speaker, the body still labels their lines with it and
+        // every re-summary would list them again — hand those lines back to "Speaker N".
+        let removed = (previous?.attendees ?? []).filter { old in
+            !clean.contains { $0.caseInsensitiveCompare(old) == .orderedSame }
+        }
+        if unassignRemovedSpeakers, !removed.isEmpty,
+           let dir = MeetingFiles.sessionDir(forAudioPath: previous?.audio),
+           var cache = SpeakerCache.read(dir),
+           let body = try? String(contentsOf: url, encoding: .utf8) {
+            let before = cache
+            let relabeled = SpeakerCache.unassign(removed, in: &cache, body: body)
+            if relabeled != body { try? relabeled.write(to: url, atomically: true, encoding: .utf8) }
+            if cache != before {
+                cache.write(to: dir)
+                AppLog.log("Unassigned removed attendee(s) from speakers on \(url.lastPathComponent)", category: "history")
+            }
+        }
         if let text = try? String(contentsOf: url, encoding: .utf8) {
             let updated = Self.replaceAttendeeHeader(in: text, with: clean)
             if updated != text { try? updated.write(to: url, atomically: true, encoding: .utf8) }

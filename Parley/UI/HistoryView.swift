@@ -780,6 +780,9 @@ struct HistoryView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(Theme.Typography.screenTitle)
                         .onSubmit { persistHeaderTitle(item) }
+                        .disabled(summaryService.hasPendingWork(item))
+                        .help(summaryService.hasPendingWork(item)
+                              ? "Renaming is available once the summary finishes" : "")
                     metadataLine(item)
                     DestinationField(path: headerFilingBinding(for: item),
                                      destinations: vault.destinations,
@@ -849,7 +852,8 @@ struct HistoryView: View {
 
     private func persistHeaderTitle(_ item: TranscriptItem) {
         let trimmed = headerTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != item.meta.title else { return }
+        guard !trimmed.isEmpty, trimmed != item.meta.title,
+              !summaryService.hasPendingWork(item) else { return }
         let url = store.rename(item, to: trimmed)
         selection = [url.path]
     }
@@ -890,7 +894,10 @@ struct HistoryView: View {
                            recording.setAttendees(on: item.url, to: item.meta.attendees + [name])
                        })
             if !item.meta.attendees.isEmpty {
-                Button("Clear all attendees") { recording.setAttendees(on: item.url, to: []) }
+                Button("Clear all attendees") {
+                    // A bulk reset to retype the list — not a claim that nobody spoke.
+                    recording.setAttendees(on: item.url, to: [], unassignRemovedSpeakers: false)
+                }
                     .buttonStyle(.chip)
                     .help("Remove every attendee from this meeting")
             }
@@ -1230,13 +1237,20 @@ struct HistoryView: View {
                 Button("Rename") { commitRename(item) }
                     .glassProminentButton()
                     .keyboardShortcut(.defaultAction)
-                    .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              || summaryService.hasPendingWork(item))
+            }
+            if summaryService.hasPendingWork(item) {
+                Text("A summary is being generated for this meeting. Rename it once that finishes.")
+                    .font(Theme.Typography.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(Theme.Spacing.large).frame(width: 380)
     }
 
     private func commitRename(_ item: TranscriptItem) {
+        guard !summaryService.hasPendingWork(item) else { return }
         let newURL = store.rename(item, to: renameDraft)
         selection = [newURL.path]
         fileOp = nil

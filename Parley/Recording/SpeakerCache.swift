@@ -51,6 +51,34 @@ struct SpeakerCache: Codable, Equatable {
         return out
     }
 
+    /// Undo auto-identification for attendees the user removed: each removed name that
+    /// resolves to exactly one diarized speaker has its transcript lines turned back into
+    /// `Speaker {id}` and its `resolvedName` cleared, so the speaker can be named again.
+    /// A name shared by several speakers is left alone — its lines can't be told apart.
+    /// Matching suggestions are dropped too. Returns the relabeled body.
+    static func unassign(_ names: [String], in cache: inout SpeakerCache, body: String) -> String {
+        let removed = Set(names.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                               .filter { !$0.isEmpty })
+        func key(_ name: String?) -> String? {
+            name?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        var out = body
+        for name in removed {
+            let matches = cache.speakers.indices.filter { key(cache.speakers[$0].resolvedName) == name }
+            guard matches.count == 1, let i = matches.first,
+                  let label = cache.speakers[i].resolvedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            else { continue }
+            out = out.replacingOccurrences(of: "] \(label):", with: "] Speaker \(cache.speakers[i].id):")
+            cache.speakers[i].resolvedName = nil
+        }
+        for i in cache.speakers.indices {
+            if let guess = key(cache.speakers[i].guessedName), removed.contains(guess) {
+                cache.speakers[i].guessedName = nil
+            }
+        }
+        return out
+    }
+
     /// Merge user-assigned names with any auto-resolved names already on the cache.
     /// User assignments win on id collision so a rename sticks.
     static func mergedAssignments(cache: SpeakerCache?, user: [String: String]) -> [String: String] {

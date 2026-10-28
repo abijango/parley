@@ -280,9 +280,10 @@ final class TranscriptStore: ObservableObject {
     }
 
     /// Retitles a meeting: updates the `title:` frontmatter, renames the transcript file
-    /// (preserving its `YYYY-MM-DD-HHMM - ` stamp prefix and extension), and — when processed —
-    /// renames the filed note to match and relinks `note:`. Returns the transcript's new URL
-    /// (the `id` changes, so the caller should re-select it).
+    /// (preserving its `YYYY-MM-DD-HHMM - ` stamp prefix and extension) along with its staged
+    /// summaries and run history, and — when processed — renames the filed note to match and
+    /// relinks `note:`. Returns the transcript's new URL (the `id` changes, so the caller
+    /// should re-select it). Callers must not rename while a summary job holds the old URL.
     @discardableResult
     func rename(_ item: TranscriptItem, to rawTitle: String) -> URL {
         let newTitle = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -301,6 +302,17 @@ final class TranscriptStore: ObservableObject {
         if dest.standardizedFileURL != item.url.standardizedFileURL {
             do { try fm.moveItem(at: item.url, to: dest); transcriptURL = dest }
             catch { AppLog.log("rename transcript failed: \(error.localizedDescription)", category: "history") }
+        }
+        if transcriptURL != item.url {
+            // Everything keyed by the transcript's path or filename follows it: the staged
+            // summary under review, the v2 run history, and the session manifest.
+            SummaryService.moveStaging(from: item.url, to: transcriptURL, stagingDir: AppPaths.stagingURL)
+            SummaryRunStore().retargetRuns(fromTranscriptPath: item.url.path, to: transcriptURL.path)
+            if let dir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio),
+               var manifest = SessionStore.read(dir), manifest.transcriptPath == item.url.path {
+                manifest.transcriptPath = transcriptURL.path
+                SessionStore.write(manifest, to: dir)
+            }
         }
 
         // Rename the filed note (leave its contents untouched to avoid reshaping the user's

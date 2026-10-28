@@ -61,6 +61,9 @@ enum SummaryPromptBuilder {
         if let speakerHints, !speakerHints.isEmpty {
             prompt = injectSpeakerHints(speakerHints, into: prompt)
         }
+        if let roster = attendeeAuthorityBlock(attendees: attendeeNames, transcript: transcript) {
+            prompt = insertBeforeTranscript(roster, into: prompt)
+        }
         return Built(prompt: prompt, transcriptChars: transcript.count)
     }
 
@@ -99,6 +102,42 @@ enum SummaryPromptBuilder {
 
     static func injectSpeakerHints(_ block: String, into prompt: String) -> String {
         insertBeforeTranscript(block.trimmingCharacters(in: .whitespacesAndNewlines), into: prompt)
+    }
+
+    /// Makes the user-edited attendee list the source of truth for the note's Attendees.
+    /// The body keeps the speaker labels the voiceprint pass wrote, so a chip the user
+    /// removed (a misidentified speaker) still names whole stretches of the transcript —
+    /// and the template's "list who spoke" rule would put it straight back. Labels that
+    /// aren't on the list are called out as misidentifications. Nil when no attendees.
+    static func attendeeAuthorityBlock(attendees: [String], transcript: String) -> String? {
+        guard !attendees.isEmpty else { return nil }
+        let listed = Set(attendees.map { $0.lowercased() })
+        let unlisted = speakerLabels(in: transcript).filter { !listed.contains($0.lowercased()) }
+        var lines = [
+            "ATTENDEE LIST (authoritative — confirmed by the user, overrides the transcript's speaker labels):",
+            "The Attendees section must list exactly these people: \(attendees.joined(separator: ", ")).",
+            "Do not add anyone else. Keep a row for each of them even if they barely speak; mark one \"(invited — not present)\" only when the transcript clearly shows they were absent.",
+        ]
+        if !unlisted.isEmpty {
+            lines.append("These transcript speaker labels are misidentifications the user removed: \(unlisted.joined(separator: ", ")). They are NOT attendees — never list them or attribute statements to them by name. Treat those lines as an unidentified speaker (or a listed attendee when the context makes it clear).")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Distinct named speaker labels (`**[HH:MM:SS] Name:**`) in first-seen order, skipping
+    /// the generic `Me` / `Remote` / `Speaker N` labels.
+    static func speakerLabels(in transcript: String) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for line in transcript.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard line.hasPrefix("**["), let close = line.range(of: "] "),
+                  let colon = line[close.upperBound...].firstIndex(of: ":") else { continue }
+            let name = line[close.upperBound..<colon].trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, name.count <= 60, name != "Me", name != "Remote",
+                  !name.hasPrefix("Speaker "), !name.contains("*") else { continue }
+            if seen.insert(name.lowercased()).inserted { out.append(name) }
+        }
+        return out
     }
 
     /// Inserts `section` just before the last TRANSCRIPT section, or appends it.
