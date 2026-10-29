@@ -489,6 +489,14 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         }
     }
 
+    /// Owner identity from Settings plus the invite list saved with the recording session.
+    static func promptExtras(sessionDir: URL?, settings: AppSettings) -> SummaryPromptBuilder.Extras {
+        SummaryPromptBuilder.Extras(
+            me: settings.ownerName,
+            myCompany: settings.ownerCompany,
+            invitees: sessionDir.flatMap { SessionStore.read($0)?.invitees } ?? [])
+    }
+
     /// Pure exponential backoff (no jitter), capped at 1 hour — unit-testable.
     nonisolated static func backoffSeconds(attempt: Int) -> TimeInterval {
         min(3600, 60 * pow(2, Double(max(0, attempt - 1))))
@@ -593,6 +601,7 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let speakerHints = SpeakerGuessResolver.readPromptBlock(
             sessionDir: sessionDir,
             attendees: item.meta.attendees.joined(separator: ", "))
+        let extras = Self.promptExtras(sessionDir: sessionDir, settings: settings)
         let repairJob = pendingRepair(for: item)
         let repairTemplate = settings.summaryRepairPromptTemplate
 
@@ -628,7 +637,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     terminologyBlock: terminology.isEmpty ? nil : terminology,
                     visionDigest: vision,
                     attachmentUnderstanding: attachmentUnderstanding,
-                    speakerHints: speakerHints)
+                    speakerHints: speakerHints,
+                    extras: extras)
             } else {
                 built = SummaryPromptBuilder.build(
                     template: summaryPromptTemplate,
@@ -641,7 +651,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                     terminologyBlock: terminology.isEmpty ? nil : terminology,
                     visionDigest: vision,
                     attachmentUnderstanding: attachmentUnderstanding,
-                    speakerHints: speakerHints)
+                    speakerHints: speakerHints,
+                    extras: extras)
             }
             let runStart = DispatchTime.now().uptimeNanoseconds
             let result = await Self.runBackend(backend, prompt: built.prompt, config: config, processHandle: handle, onActivity: reportActivity)
@@ -731,15 +742,12 @@ final class SummaryService: ObservableObject, ProcessingQueue {
         let summaryPromptTemplate = settings.summaryPromptTemplate
         let contactsURL = settings.contactsURL
         let transcriptText = SummaryPromptBuilder.readTranscript(item.url)
-        let contactsText = SummaryPromptBuilder.readContacts(contactsURL,
-                                                             dbContacts: dbContacts)
-        let attendeesText = SummaryPromptBuilder.annotate(
-            attendees: item.meta.attendees.joined(separator: ", "),
-            contacts: SummaryPromptBuilder.parseContactsList(contactsText))
+        let v2SessionDir = MeetingFiles.sessionDir(forAudioPath: item.meta.audio)
+        let extras = Self.promptExtras(sessionDir: v2SessionDir, settings: settings)
         let checkerInstructions = settings.summaryCheckerPromptTemplate
         let attachmentCaptions = MeetingAttachmentStore.promptBlock(attachments: item.meta.attachments)
         let v2SpeakerHints = SpeakerGuessResolver.readPromptBlock(
-            sessionDir: MeetingFiles.sessionDir(forAudioPath: item.meta.audio),
+            sessionDir: v2SessionDir,
             attendees: item.meta.attendees.joined(separator: ", "))
 
         let reportActivity: @Sendable (String) -> Void = { [weak self] line in
@@ -770,7 +778,8 @@ final class SummaryService: ObservableObject, ProcessingQueue {
                 terminologyBlock: terminology.isEmpty ? nil : terminology,
                 visionDigest: vision,
                 attachmentUnderstanding: attachmentUnderstanding,
-                speakerHints: v2SpeakerHints)
+                speakerHints: v2SpeakerHints,
+                extras: extras)
 
             await MainActor.run { [weak self] in
                 self?.runningActivity = "Writer is drafting…"
@@ -810,6 +819,20 @@ final class SummaryService: ObservableObject, ProcessingQueue {
 
             await MainActor.run { [weak self] in
                 self?.runningActivity = "Checker is reviewing…"
+            }
+            let attendeeList = item.meta.attendees.joined(separator: ", ")
+            let contactsText: String
+            let attendeesText: String
+            if peopleRecords.isEmpty {
+                contactsText = SummaryPromptBuilder.readContacts(contactsURL, dbContacts: dbContacts)
+                attendeesText = SummaryPromptBuilder.annotate(
+                    attendees: attendeeList, contacts: SummaryPromptBuilder.parseContactsList(contactsText))
+            } else {
+                let scoped = SummaryPromptBuilder.scopedContacts(
+                    records: peopleRecords, attendees: item.meta.attendees,
+                    transcript: transcriptText, extras: extras)
+                contactsText = scoped.text
+                attendeesText = SummaryPromptBuilder.annotate(attendees: attendeeList, contacts: scoped.contacts)
             }
             let checkerPrompt = SummaryCheckerPromptBuilder.build(
                 transcript: transcriptText,

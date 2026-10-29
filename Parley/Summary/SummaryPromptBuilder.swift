@@ -13,6 +13,14 @@ enum SummaryPromptBuilder {
         let transcriptChars: Int
     }
 
+    /// Owner identity and invite list for `{{me}}`, `{{my_company}}`, `{{invitees}}`.
+    /// Every field may be empty; the tokens then render a placeholder, never `{{…}}`.
+    struct Extras: Sendable {
+        var me: String = ""
+        var myCompany: String = ""
+        var invitees: [MeetingInvitee] = []
+    }
+
     static func build(template: String,
                       transcriptURL: URL,
                       attendees: String,
@@ -23,7 +31,8 @@ enum SummaryPromptBuilder {
                       terminologyBlock: String? = nil,
                       visionDigest: String? = nil,
                       attachmentUnderstanding: AttachmentUnderstanding = .captionsOnly,
-                      speakerHints: String? = nil) -> Built {
+                      speakerHints: String? = nil,
+                      extras: Extras = Extras()) -> Built {
         let transcript = readTranscript(transcriptURL)
         let dbContacts = contactsFromDB ?? peopleRecords?.map { $0.asContact() }
         let attendeeNames = attendees
@@ -31,22 +40,33 @@ enum SummaryPromptBuilder {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         let contacts: String
+        let annotationContacts: [Contact]
         if let peopleRecords {
-            let block = PeoplePromptRenderer.render(attendeeNames: attendeeNames, records: peopleRecords)
-            contacts = block.isEmpty ? "(no matching people for this meeting)" : block
+            let scoped = scopedContacts(records: peopleRecords, attendees: attendeeNames,
+                                        transcript: transcript, extras: extras)
+            contacts = scoped.text
+            annotationContacts = scoped.contacts
         } else {
             contacts = readContacts(contactsURL, dbContacts: dbContacts)
+            annotationContacts = dbContacts ?? parseContactsList(contacts)
         }
         let annotatedAttendees = attendees.isEmpty
             ? "(none provided)"
-            : annotate(attendees: attendees, contacts: dbContacts ?? parseContactsList(contacts))
+            : annotate(attendees: attendees, contacts: annotationContacts)
+        let glossary = terminologyBlock?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let templateHasGlossary = template.contains("{{glossary}}")
         var prompt = template
             .replacingOccurrences(of: "{{contacts}}", with: contacts.isEmpty ? "(no contacts file found)" : contacts)
             .replacingOccurrences(of: "{{attendees}}", with: annotatedAttendees)
+            .replacingOccurrences(of: "{{invitees}}", with: renderInvitees(extras.invitees))
+            .replacingOccurrences(of: "{{me}}", with: orPlaceholder(extras.me))
+            .replacingOccurrences(of: "{{my_company}}", with: orPlaceholder(extras.myCompany))
+            .replacingOccurrences(of: "{{glossary}}", with: glossary.isEmpty ? "(none)" : glossary)
             .replacingOccurrences(of: "{{destination}}", with: destination.isEmpty ? "(unspecified)" : destination)
             .replacingOccurrences(of: "{{transcript}}", with: transcript)
-        if let terminologyBlock, !terminologyBlock.isEmpty {
-            prompt = injectTerminology(terminologyBlock, into: prompt)
+        // Custom templates written before `{{glossary}}` existed still get the glossary.
+        if !templateHasGlossary, !glossary.isEmpty {
+            prompt = injectTerminology(glossary, into: prompt)
         }
         let attachments = TranscriptWriter.parseFrontmatter(transcriptURL)?.attachments ?? []
         if attachmentUnderstanding != .off, !attachments.isEmpty {
@@ -67,6 +87,37 @@ enum SummaryPromptBuilder {
         return Built(prompt: prompt, transcriptChars: transcript.count)
     }
 
+    /// The meeting-relevant slice of the People DB as `{{contacts}}` text, plus the same
+    /// people as `Contact`s for attendee annotation.
+    static func scopedContacts(records: [PersonRecord], attendees: [String], transcript: String,
+                               extras: Extras) -> (text: String, contacts: [Contact]) {
+        let selected = PeoplePromptRenderer.select(
+            records: records,
+            context: MeetingContactContext(
+                attendees: attendees,
+                invitees: extras.invitees.map(\.name),
+                transcript: transcript,
+                ownerName: extras.me,
+                ownerCompany: extras.myCompany))
+        let text = selected.isEmpty
+            ? "(no matching people for this meeting)"
+            : selected.map(PeoplePromptRenderer.line(for:)).joined(separator: "\n")
+        return (text, selected.map { $0.asContact() })
+    }
+
+    /// `Name | RSVP` per invitee, for `{{invitees}}`.
+    static func renderInvitees(_ invitees: [MeetingInvitee]) -> String {
+        let lines = invitees
+            .filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
+            .map { "\($0.name) | \($0.rsvpLabel)" }
+        return lines.isEmpty ? "(no invite list available)" : lines.joined(separator: "\n")
+    }
+
+    private static func orPlaceholder(_ value: String) -> String {
+        let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return v.isEmpty ? "(not set)" : v
+    }
+
     /// Repair an existing note after speaker renames — keeps structure and user edits.
     static func buildRepair(template: String,
                             previousNote: String,
@@ -80,7 +131,8 @@ enum SummaryPromptBuilder {
                             terminologyBlock: String? = nil,
                             visionDigest: String? = nil,
                             attachmentUnderstanding: AttachmentUnderstanding = .captionsOnly,
-                            speakerHints: String? = nil) -> Built {
+                            speakerHints: String? = nil,
+                            extras: Extras = Extras()) -> Built {
         let renameLines = renames.map { old, new in "- \(old) → \(new)" }.sorted().joined(separator: "\n")
         let body = template
             .replacingOccurrences(of: "{{previous_note}}", with: previousNote)
@@ -96,7 +148,8 @@ enum SummaryPromptBuilder {
             terminologyBlock: terminologyBlock,
             visionDigest: visionDigest,
             attachmentUnderstanding: attachmentUnderstanding,
-            speakerHints: speakerHints)
+            speakerHints: speakerHints,
+            extras: extras)
         return built
     }
 
@@ -116,7 +169,8 @@ enum SummaryPromptBuilder {
         var lines = [
             "ATTENDEE LIST (authoritative — confirmed by the user, overrides the transcript's speaker labels):",
             "The Attendees section must list exactly these people: \(attendees.joined(separator: ", ")).",
-            "Do not add anyone else. Keep a row for each of them even if they barely speak; mark one \"(invited — not present)\" only when the transcript clearly shows they were absent.",
+            "If the list holds both a bare first name and a full name for the same person, they are one attendee under the full name.",
+            "Do not add anyone else, except invitees who never speak as \"(invited, not present)\" rows. Keep a row for each listed person even if they barely speak; mark one \"(invited, not present)\" only when the transcript clearly shows they were absent.",
         ]
         if !unlisted.isEmpty {
             lines.append("These transcript speaker labels are misidentifications the user removed: \(unlisted.joined(separator: ", ")). They are NOT attendees — never list them or attribute statements to them by name. Treat those lines as an unidentified speaker (or a listed attendee when the context makes it clear).")

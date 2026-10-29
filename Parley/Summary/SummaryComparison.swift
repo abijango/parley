@@ -229,7 +229,9 @@ final class SummaryComparison: ObservableObject {
             transcriptURL: url,
             attendees: attendees,
             destination: filingDestination,
-            contactsURL: AppSettings.shared.contactsURL
+            contactsURL: AppSettings.shared.contactsURL,
+            extras: SummaryPromptBuilder.Extras(me: AppSettings.shared.ownerName,
+                                                myCompany: AppSettings.shared.ownerCompany)
         ).prompt
     }
 

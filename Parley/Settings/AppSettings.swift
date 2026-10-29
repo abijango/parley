@@ -275,7 +275,19 @@ final class AppSettings: ObservableObject {
         static let attachmentUnderstanding = "parley.attachmentUnderstanding"
         static let attachmentVisionBackend = "parley.attachmentVisionBackend"
         static let deleteAudioAfterFiling = "parley.deleteAudioAfterFiling"
+        static let ownerName = "parley.ownerName"
+        static let ownerCompany = "parley.ownerCompany"
+        static let micIsOwnerOnCalls = "parley.micIsOwnerOnCalls"
     }
+
+    // MARK: You
+    /// The recording owner, for `{{me}}` and for scoping `{{contacts}}`.
+    @AppStorage(Key.ownerName) var ownerName: String = ""
+    /// The owner's company in its canonical spelling, for `{{my_company}}`.
+    @AppStorage(Key.ownerCompany) var ownerCompany: String = ""
+    /// Remote calls only: attribute mic speech to the owner ("Me") and diarize just the
+    /// system track. Room-mode sessions always diarize the single mic stream.
+    @AppStorage(Key.micIsOwnerOnCalls) var micIsOwnerOnCalls: Bool = true
 
     // MARK: Memory
     /// Unload FluidAudio streaming models after this many idle minutes to free RAM.
@@ -500,17 +512,22 @@ final class AppSettings: ObservableObject {
     var legacyContactsURL: URL { vaultURL.appendingPathComponent("Key People.md") }
 
     /// Default prompt that invokes the user's existing skill headlessly.
-    /// `{{file}}`, `{{customer}}`, `{{attendees}}` are substituted at run time.
+    /// Tokens: `{{file}}`, `{{destination}}`, `{{attendees}}`, `{{invitees}}`, `{{me}}`,
+    /// `{{my_company}}`.
     static let defaultClaudePrompt = """
     /process-meeting-transcript {{file}}
     File this note under: {{destination}}
+    Recording owner ("Me" in the transcript): {{me}}, {{my_company}}
+    Invitees and RSVP:
+    {{invitees}}
     Additional attendees: {{attendees}}
     Run non-interactively: use the context above, do not ask for confirmation, write the note into the destination folder above.
     """
 
     /// Shared, self-contained prompt for the Claude meeting summary (raw `claude -p`, no
     /// skill). Tokens substituted at run time: `{{transcript}}`, `{{contacts}}`,
-    /// `{{attendees}}`, `{{destination}}`. Editable in Settings → Summary.
+    /// `{{attendees}}`, `{{invitees}}`, `{{glossary}}`, `{{me}}`, `{{my_company}}`,
+    /// `{{destination}}`. Editable in Settings → Summary.
     @AppStorage(Key.summaryPromptTemplate) var summaryPromptTemplate: String = AppSettings.defaultSummaryPrompt
 
     @AppStorage(Key.summaryRepairPromptTemplate) var summaryRepairPromptTemplate: String = AppSettings.defaultSummaryRepairPrompt
@@ -547,20 +564,45 @@ final class AppSettings: ObservableObject {
     You are a senior analyst writing a thorough, faithful record of a client meeting. Produce a \
     clean Markdown note from the transcript below.
 
-    Speaker mapping: the transcript labels speakers as "Me" (the person recording) or \
-    "Remote"/"Speaker N". Map each to a real attendee using context and the attendee list; never \
-    leave generic labels in the note.
+    CONTEXT
+    Recording owner: {{me}}. "Me" in the transcript is this person.
+    Owner's company (canonical spelling — always spell it exactly like this): {{my_company}}
 
-    Resolve names against these known contacts — use full name, title, and company where a \
-    confident match exists; otherwise keep the name as spoken. Never invent contact details:
+    Known contacts, one per line as `Full name | Title | Company | Aliases`. Aliases are other \
+    spellings or names the same person goes by. Never invent contact details:
     {{contacts}}
 
-    Attendees supplied: {{attendees}}
+    Invitees from the meeting invite, with RSVP (accepted / declined / tentative / no response):
+    {{invitees}}
+
+    Additional attendees supplied: {{attendees}}
     Each attendee may be annotated with their company in parentheses, e.g. `Alice Smith (Vanguard)` \
     -- treat that as authoritative; do not override it from the transcript. When the annotation \
     ends with `, customer` (e.g. `Anna Krylova (IG Group, customer)`), that person is an \
     external client/counterpart; attendees without `, customer` are your own internal team.
+
+    Glossary — canonical spellings, each followed by forms the transcript may have misheard:
+    {{glossary}}
+
     Filing location (context only, do not output): {{destination}}
+
+    STEP 1 — RESOLVE (silently; do not output this step)
+    - Merge duplicates: a bare first name and a full name for the same person on the call \
+    (e.g. "Jason" and "Jason Creane") are ONE attendee under the full name.
+    - Match a person to a contact only on their full name, an alias, or a first name plus a \
+    company the transcript or attendee list confirms. A first name alone never matches a \
+    contact at an unrelated company.
+    - Resolve people who are mentioned but not on the call (e.g. "Lucy", "Khadir") against the \
+    contacts using the same rule, and use their full canonical name when confidently matched.
+    - Correct misheard names, companies, and terms to the glossary and contacts spellings \
+    (aliases included). The owner's company is always spelled as {{my_company}}.
+    - Speaker labels can drift or split one turn across two speakers. When a line's content \
+    clearly belongs to someone else (they answer their own question, refer to themselves by \
+    name, or continue another speaker's sentence), attribute it by content. If it is unclear, \
+    attribute it to the side (the owner's company or the other company), not a guessed person.
+    - Invitees who never speak become rows marked "(invited, not present)", whatever their RSVP. \
+    Declined or no-response invitees are never listed as present.
+    - "Me" and "Speaker N" labels must be mapped to real people; never leave generic labels.
 
     Write these sections in order. Be COMPREHENSIVE and SPECIFIC — capture every concrete detail: \
     named people, companies, clients, products, technologies/platforms, headcounts, monetary \
@@ -570,8 +612,8 @@ final class AppSettings: ObservableObject {
     ## Attendees
     (Markdown table: Name | Role | Company. List ONLY people who actually participated in \
     THIS call — i.e. who spoke or were present. People merely mentioned/referenced but NOT on \
-    the call must NOT appear here; capture them in Key Topics instead. If someone was invited \
-    but absent, you may add a row marked "(invited — not present)". When in doubt about whether \
+    the call must NOT appear here; capture them in Key Topics instead. Invitees who never speak \
+    get a row with "(invited, not present)" after their name. When in doubt about whether \
     someone was present, do not list them as an attendee. For any attendee whose name is NOT \
     already annotated with a company (no parentheses in the supplied attendee list) and is NOT \
     confidently matched in the contacts, if the transcript clearly states their affiliation \
@@ -624,8 +666,19 @@ final class AppSettings: ObservableObject {
     - Use ONLY information explicitly present in the transcript. Do NOT fabricate decisions, \
     owners, dates, figures, or metrics. If a section has nothing explicit, write "None recorded."
     - Output ONLY the Markdown note — no preamble, no code fences, no commentary.
+    - Never comment on the transcript itself: no "the transcript is unclear", "garbled", \
+    "probably a transcription error", "not clearly identifiable in the transcript", or speaker-label \
+    remarks. Resolve what you can silently; put a genuinely unresolved name or term in \
+    Questions & Open Issues as a plain question about the meeting.
+    - Spell every person, company, and product the same way everywhere in the note, using the \
+    contacts and glossary spellings.
     - Do NOT include a Raw Transcript section — Parley appends the raw transcript to the filed \
     note automatically.
+
+    Final self-check before answering (silently): no duplicate attendees; no attendee matched \
+    to a contact on first name alone; {{my_company}} spelled canonically everywhere; mentioned \
+    people resolved to full names where the contacts allow; no generic speaker labels; no \
+    remarks about the transcript.
 
     TRANSCRIPT:
     {{transcript}}

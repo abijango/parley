@@ -24,6 +24,8 @@ struct SettingsView: View {
     @State private var searchText = ""
     @State private var pageMatchCounts: [Page: Int] = [:]
     @State private var editing: LongEditor?
+    /// Glossary editor text; written back to the knowledge DB when the sheet closes.
+    @State private var glossaryDraft = ""
     @FocusState private var searchFocused: Bool
 
     enum Page: String, CaseIterable, Identifiable {
@@ -64,7 +66,7 @@ struct SettingsView: View {
 
     /// Long text settings, edited in a sheet.
     enum LongEditor: String, Identifiable {
-        case summaryPrompt, checkerInstructions, notesPrompt, conferencingApps, scanRoots
+        case summaryPrompt, checkerInstructions, notesPrompt, conferencingApps, scanRoots, glossary
         var id: String { rawValue }
     }
 
@@ -248,7 +250,7 @@ struct SettingsView: View {
         case .summaryPrompt:
             SettingsEditorSheet(
                 title: "Summary prompt",
-                detail: "The instructions the summarizer follows (same for every backend). Tokens: {{transcript}} {{contacts}} {{attendees}} {{destination}}.",
+                detail: "The instructions the summarizer follows (same for every backend). Tokens: {{transcript}} {{contacts}} {{attendees}} {{invitees}} {{glossary}} {{me}} {{my_company}} {{destination}}. A token with no data renders a placeholder; without {{glossary}} the glossary is added before the transcript.",
                 text: $settings.summaryPromptTemplate,
                 resetValue: AppSettings.defaultSummaryPrompt)
         case .checkerInstructions:
@@ -260,9 +262,15 @@ struct SettingsView: View {
         case .notesPrompt:
             SettingsEditorSheet(
                 title: "Meeting notes prompt",
-                detail: "Used by Claude when generating meeting notes from a recording.",
+                detail: "Agent command for generating meeting notes from a recording. Tokens: {{file}} {{destination}} {{attendees}} {{invitees}} {{me}} {{my_company}}.",
                 text: $settings.claudePromptTemplate,
                 resetValue: AppSettings.defaultClaudePrompt)
+        case .glossary:
+            SettingsEditorSheet(
+                title: "Glossary",
+                detail: "Canonical spellings for companies, products, and terms, one per line as `Canonical: misheard, other spelling` — e.g. `LSEG: Elseg, L Seg, LSEC`. Sent to summaries as {{glossary}} and boosted in the offline transcript. Customer-specific corrections made during summary review are kept separately.",
+                text: $glossaryDraft)
+                .onDisappear { TerminologyStore().replaceGlobalGlossary(with: glossaryDraft) }
         case .conferencingApps:
             SettingsEditorSheet(
                 title: "Known conferencing apps",
@@ -330,7 +338,7 @@ struct SettingsView: View {
                         .disabled(!settings.callDetectionEnabled)
                 }
                 SettingRow("Suggest meeting title and attendees",
-                           description: "Reads the meeting window via Accessibility. In-call people are added automatically; invite-list names are not.",
+                           description: "Reads the meeting window via Accessibility. In-call people are added automatically; invite-list names (Teams) are not, but go to summaries as invitees with their RSVP.",
                            keywords: "accessibility metadata") {
                     Toggle("", isOn: $settings.metadataDiscoveryEnabled)
                         .disabled(!settings.callDetectionEnabled)
@@ -471,6 +479,11 @@ struct SettingsView: View {
                 }
             }
             SettingsSection("Speakers") {
+                SettingRow("Your mic is you on calls",
+                           description: "Regular mode only: lines from your microphone are labelled Me and only the call audio is split into speakers. Room mode always splits the single mic into speakers.",
+                           keywords: "me microphone diarization room remote") {
+                    Toggle("", isOn: $settings.micIsOwnerOnCalls)
+                }
                 SettingRow("Speaker separation",
                            description: "How readily two voices are treated as the same person. Too high merges speakers; too low splits one person. ~0.6–0.7 suits most calls.",
                            keywords: "diarization threshold") {
@@ -536,6 +549,9 @@ struct SettingsView: View {
         let candidates = FluidVocabularyBuilder.candidates(
             attendees: recording.meeting.attendees,
             meetingTitle: recording.meeting.meetingTitle,
+            glossary: TerminologyStore()
+                .glossary(forScope: TerminologyStore.customerScope(fromFiling: recording.meeting.destinationPath))
+                .map(\.canonical),
             enabled: true)
         if candidates.isEmpty {
             helpText("No attendees or meeting title yet — nothing would be boosted.")
@@ -594,6 +610,20 @@ struct SettingsView: View {
 
     private var summariesPage: some View {
         VStack(alignment: .leading, spacing: 0) {
+            SettingsSection("You") {
+                SettingRow("Your name",
+                           description: "Who \"Me\" is in transcripts ({{me}}).",
+                           keywords: "owner me name") {
+                    TextField("Full name", text: $settings.ownerName)
+                        .textFieldStyle(.parley).frame(width: 240)
+                }
+                SettingRow("Your company",
+                           description: "Canonical spelling ({{my_company}}). Your colleagues are always sent as contacts.",
+                           keywords: "owner company my_company") {
+                    TextField("Company", text: $settings.ownerCompany)
+                        .textFieldStyle(.parley).frame(width: 240)
+                }
+            }
             SettingsSection("Behaviour") {
                 SettingRow("Pipeline",
                            description: "v1 runs one backend. v2 runs a writer, then a checker that proposes edits for markup review.") {
@@ -790,6 +820,15 @@ struct SettingsView: View {
                         Button("Import") { importRolodexToDB() }.glassButton()
                         Button("Write file") { exportDBToRolodex() }.glassButton()
                     }
+                }
+                SettingRow("Glossary",
+                           description: "Canonical spellings of companies and terms, with the ways they get misheard.",
+                           keywords: "terminology aliases spelling vocabulary") {
+                    Button("Edit…") {
+                        glossaryDraft = TerminologyStore().globalGlossaryText()
+                        editing = .glossary
+                    }
+                    .glassButton()
                 }
             }
             SettingsSection("Customer reconciliation") {

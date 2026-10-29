@@ -77,6 +77,31 @@ struct SessionManifest: Codable, Equatable {
     var transcriptionWindowEndHour: Int? = nil
     /// User chose Transcribe Now. The job ignores the window and a manual hold.
     var offlineForced: Bool? = nil
+    /// `MicInputMode` raw value. Sticky: switching to Room at any point keeps the session
+    /// in Room, because a single mic shared by the room must never be labelled as the
+    /// owner. Nil on manifests written before the field existed.
+    var micInputMode: String? = nil
+    /// People on the meeting's invite list who had not joined, with their RSVP, read from
+    /// the conferencing app's roster (Teams "Others invited"). Nil when none were seen.
+    var invitees: [MeetingInvitee]? = nil
+
+    /// The owner is alone on the mic: a remote call that was never switched to Room.
+    var micIsOwner: Bool { micInputMode == MicInputMode.regular.rawValue }
+}
+
+/// One invite-list entry and its RSVP. `response == nil` means no response was shown.
+struct MeetingInvitee: Codable, Equatable, Sendable {
+    var name: String
+    var response: InviteResponse?
+
+    var rsvpLabel: String {
+        switch response {
+        case .accepted: return "accepted"
+        case .tentative: return "tentative"
+        case .declined: return "declined"
+        case .noResponse, nil: return "no response"
+        }
+    }
 }
 
 /// One person discovered in the meeting roster, with the join timestamp

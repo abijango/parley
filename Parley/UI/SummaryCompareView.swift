@@ -185,7 +185,7 @@ struct SummaryCompareView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.small) {
             HStack {
                 Text("Shared prompt").font(Theme.Typography.controlLabel)
-                Text("`{{transcript}}` `{{contacts}}` `{{attendees}}` `{{destination}}`")
+                Text("`{{transcript}}` `{{contacts}}` `{{attendees}}` `{{invitees}}` `{{glossary}}` `{{me}}` `{{my_company}}` `{{destination}}`")
                     .font(Theme.Typography.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Reset") { settings.summaryPromptTemplate = AppSettings.defaultSummaryPrompt }

@@ -41,7 +41,8 @@ final class SummaryGroundTruthEval: ObservableObject {
             peopleRecords: peopleRecords,
             terminologyBlock: terminology.isEmpty ? nil : terminology,
             visionDigest: nil,
-            attachmentUnderstanding: .off)
+            attachmentUnderstanding: .off,
+            extras: SummaryPromptBuilder.Extras(me: settings.ownerName, myCompany: settings.ownerCompany))
         let gold = fixture.goldSummary
         let backendName = backend.displayName
         let config = SummaryService.RunnerConfig(settings)

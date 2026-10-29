@@ -154,13 +154,12 @@ final class PeopleStoreTests: XCTestCase {
         ))
 
         let block = PeoplePromptRenderer.render(
-            attendeeNames: ["Adrian Roberts", "Stranger"],
-            records: store.all()
+            records: store.all(),
+            context: MeetingContactContext(attendees: ["Adrian Roberts", "Stranger"])
         )
         XCTAssertTrue(block.contains("Adrian Roberts"))
-        XCTAssertTrue(block.contains("Databricks"))
-        XCTAssertTrue(block.contains("AWS"))
-        XCTAssertTrue(block.contains("Stranger"))
+        XCTAssertTrue(block.contains("Director of Regulated Industries | Databricks"))
+        XCTAssertFalse(block.contains("AWS"), "only the current role is sent")
         XCTAssertFalse(block.contains("Unrelated Person"))
     }
 
@@ -212,7 +211,7 @@ final class PeopleStoreTests: XCTestCase {
             name: "Unrelated Person", company: "OtherCo", side: .other,
             title: "CEO", linkedin: nil
         ))
-        let block = PeoplePromptRenderer.render(attendeeNames: [], records: store.all())
+        let block = PeoplePromptRenderer.render(records: store.all(), context: MeetingContactContext())
         XCTAssertEqual(block, "")
         XCTAssertFalse(block.contains("Unrelated Person"))
     }

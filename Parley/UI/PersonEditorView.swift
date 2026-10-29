@@ -35,6 +35,8 @@ struct PersonEditorView: View {
     @State private var draftCompany: String = ""
     @State private var draftSide: Side = .other
     @State private var draftLinkedin: String = ""
+    /// Comma-separated other names / spellings (e.g. "Khadir, Kadir E").
+    @State private var draftAliases: String = ""
     @State private var draftOriginKind: PersonOrigin.Kind = .other
     @State private var draftOriginDate: Date = Date()
     @State private var draftOriginHasDate = false
@@ -68,11 +70,13 @@ struct PersonEditorView: View {
             draftCompany = contact.company ?? ""
             draftSide = contact.side
             draftLinkedin = contact.linkedin ?? ""
+            draftAliases = contact.aliases.joined(separator: ", ")
         } else {
             draftTitle = ""
             draftCompany = ""
             draftSide = .other
             draftLinkedin = ""
+            draftAliases = ""
         }
         if let record = vault.personRecord(for: person.displayName) {
             pastRoles = record.roles.filter { $0.endedAt != nil }
@@ -102,7 +106,23 @@ struct PersonEditorView: View {
         || draftCompany.trimmingCharacters(in: .whitespaces) != (person.contact?.company ?? "")
         || draftSide != (person.contact?.side ?? .other)
         || draftLinkedin.trimmingCharacters(in: .whitespaces) != (person.contact?.linkedin ?? "")
+        || aliasesAreDirty
         || originIsDirty
+    }
+
+    private var aliasesAreDirty: Bool {
+        let draft = Self.parseAliases(draftAliases, excluding: draftName).map { $0.lowercased() }
+        let saved = (person.contact?.aliases ?? []).map { $0.lowercased() }
+        return draft.sorted() != saved.sorted()
+    }
+
+    /// Trimmed, de-duplicated (case-insensitive) aliases, minus the person's own name.
+    static func parseAliases(_ text: String, excluding name: String) -> [String] {
+        let own = name.trimmingCharacters(in: .whitespaces).lowercased()
+        var seen = Set<String>()
+        return text.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.lowercased() != own && seen.insert($0.lowercased()).inserted }
     }
 
     private var originIsDirty: Bool {
@@ -241,6 +261,12 @@ struct PersonEditorView: View {
             editorRow(label: "LinkedIn") {
                 TextField("https://linkedin.com/in/...", text: $draftLinkedin)
                     .textFieldStyle(.parley)
+            }
+
+            editorRow(label: "Aliases") {
+                TextField("Other names or spellings, comma-separated", text: $draftAliases)
+                    .textFieldStyle(.parley)
+                    .help("Nicknames, display names, and common mishearings. Summaries match these to this person.")
             }
 
             originSection
@@ -644,14 +670,25 @@ struct PersonEditorView: View {
                                company: snappedCompany, linkedin: newLinkedin,
                                side: resolvedSide, clearLinkedinIfEmpty: true)
             persistOrigin(forName: newName)
+            persistAliases(forName: newName)
         } else {
             vault.upsertPerson(name: originalName, title: newTitle,
                                company: snappedCompany, linkedin: newLinkedin,
                                side: resolvedSide, clearLinkedinIfEmpty: true)
             persistOrigin(forName: originalName)
+            persistAliases(forName: originalName)
         }
 
         onSave(newName)
+    }
+
+    private func persistAliases(forName name: String) {
+        guard var record = vault.personRecord(for: name) else { return }
+        let aliases = Self.parseAliases(draftAliases, excluding: record.name)
+        guard aliases != record.aliases else { return }
+        record.aliases = aliases
+        record.updatedAt = Date()
+        vault.savePersonRecord(record)
     }
 
     private func persistOrigin(forName name: String) {

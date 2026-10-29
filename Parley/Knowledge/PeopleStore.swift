@@ -63,76 +63,115 @@ struct PersonRecord: Equatable, Identifiable, Codable, Sendable {
     }
 }
 
-/// Attendee-scoped contacts block for summary prompts.
+/// What a meeting tells us about who is relevant, for scoping `{{contacts}}`.
+struct MeetingContactContext: Sendable {
+    var attendees: [String] = []
+    var invitees: [String] = []
+    var transcript: String = ""
+    var ownerName: String = ""
+    var ownerCompany: String = ""
+}
+
+/// Meeting-scoped contacts block for summary prompts.
+///
+/// Sends people at the companies of the meeting's attendees and invitees, the owner's
+/// company, and anyone whose full name or alias is spoken in the transcript — not
+/// the whole DB. A bare first name ("Jason") is never enough on its own: it neither
+/// confirms a contact nor pulls their company in, because a common first name
+/// matches unrelated people (the Monument Hobbies "Jason" on an Intellias call).
 enum PeoplePromptRenderer {
-    static func render(attendeeNames: [String], records: [PersonRecord]) -> String {
-        let trimmed = attendeeNames
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !trimmed.isEmpty else { return "" }
+    static let header = "Full name | Title | Company | Aliases"
 
-        var lines: [String] = []
-        for name in trimmed {
-            guard let record = match(name: name, in: records) else {
-                lines.append(name)
-                continue
-            }
-            lines.append(line(for: record))
-        }
-        return lines.joined(separator: "\n")
+    static func render(records: [PersonRecord], context: MeetingContactContext) -> String {
+        select(records: records, context: context).map(line(for:)).joined(separator: "\n")
     }
 
-    private static func match(name: String, in records: [PersonRecord]) -> PersonRecord? {
-        let key = name.lowercased()
-        return records.first { record in
-            record.name.lowercased() == key
-                || record.aliases.contains { $0.lowercased() == key }
-        }
-    }
+    static func select(records: [PersonRecord], context: MeetingContactContext) -> [PersonRecord] {
+        let named = (context.attendees + context.invitees + [context.ownerName])
+            .map(normalized).filter { !$0.isEmpty }
 
-    private static func line(for record: PersonRecord) -> String {
-        var parts: [String] = ["**\(record.name)**"]
-
-        if let current = record.currentRole {
-            let roleDesc = rolePhrase(current, suffix: "(current)")
-            if !roleDesc.isEmpty { parts.append("— \(roleDesc)") }
-        }
-
-        let past = record.roles.filter { $0.endedAt != nil }
-            .sorted { ($0.endedAt ?? .distantPast) > ($1.endedAt ?? .distantPast) }
-        for role in past {
-            let phrase = rolePhrase(role, suffix: nil)
-            if !phrase.isEmpty {
-                parts.append("Previously \(phrase).")
+        var confirmed: [PersonRecord] = []
+        var tentative: [PersonRecord] = []
+        for name in named {
+            for record in records {
+                let viaAlias = record.aliases.contains { normalized($0) == name }
+                guard normalized(record.name) == name || viaAlias else { continue }
+                if isFullName(name) || viaAlias {
+                    confirmed.append(record)
+                } else {
+                    tentative.append(record)
+                }
             }
         }
 
-        if let origin = record.origin {
-            var originParts: [String] = [origin.kind.label]
-            if let date = origin.date {
-                originParts.append(date.formatted(date: .numeric, time: .omitted))
-            }
-            var known = "Known from: \(originParts.joined(separator: ", "))"
-            let note = origin.note.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !note.isEmpty { known += " — \(note)" }
-            parts.append(known + ".")
-        }
+        var companies = Set(confirmed.compactMap { companyKey($0) })
+        let owner = normalized(context.ownerCompany)
+        if !owner.isEmpty { companies.insert(owner) }
 
-        return parts.joined(separator: " ")
+        let spoken = normalized(context.transcript)
+        var picked: [PersonRecord] = []
+        var seen = Set<String>()
+        func take(_ record: PersonRecord) {
+            if seen.insert(record.id).inserted { picked.append(record) }
+        }
+        confirmed.forEach(take)
+        for record in tentative where companyKey(record).map(companies.contains) == true {
+            take(record)
+        }
+        let rest = records
+            .filter { !seen.contains($0.id) }
+            .sorted {
+                let a = ($0.currentRole?.company ?? "", $0.name), b = ($1.currentRole?.company ?? "", $1.name)
+                return a.0.localizedCaseInsensitiveCompare(b.0) == .orderedSame
+                    ? a.1.localizedCaseInsensitiveCompare(b.1) == .orderedAscending
+                    : a.0.localizedCaseInsensitiveCompare(b.0) == .orderedAscending
+            }
+        for record in rest {
+            if companyKey(record).map(companies.contains) == true || isMentioned(record, in: spoken) {
+                take(record)
+            }
+        }
+        return picked
     }
 
-    private static func rolePhrase(_ role: PersonRole, suffix: String?) -> String {
-        var bits: [String] = []
-        if let title = role.title?.trimmingCharacters(in: .whitespaces), !title.isEmpty {
-            bits.append(title)
+    /// `Full name | Title | Company | Aliases`; blank fields stay as empty columns.
+    static func line(for record: PersonRecord) -> String {
+        let role = record.currentRole
+        let title = role?.title?.trimmingCharacters(in: .whitespaces) ?? ""
+        let company = role?.company?.trimmingCharacters(in: .whitespaces) ?? ""
+        let aliases = record.aliases.joined(separator: ", ")
+        return [record.name, title, company, aliases]
+            .map { $0.isEmpty ? " " : " \($0) " }
+            .joined(separator: "|")
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func isMentioned(_ record: PersonRecord, in spoken: String) -> Bool {
+        guard !spoken.isEmpty else { return false }
+        let full = normalized(record.name)
+        if isFullName(full), containsWord(full, in: spoken) { return true }
+        return record.aliases.contains { alias in
+            let a = normalized(alias)
+            return a.count >= 3 && containsWord(a, in: spoken)
         }
-        if let company = role.company?.trimmingCharacters(in: .whitespaces), !company.isEmpty {
-            bits.append(company)
-        }
-        guard !bits.isEmpty else { return "" }
-        var text = bits.joined(separator: ", ")
-        if let suffix, !suffix.isEmpty { text += " \(suffix)" }
-        return text
+    }
+
+    private static func containsWord(_ needle: String, in haystack: String) -> Bool {
+        let pattern = "\\b" + NSRegularExpression.escapedPattern(for: needle) + "\\b"
+        return haystack.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private static func companyKey(_ record: PersonRecord) -> String? {
+        let key = normalized(record.currentRole?.company ?? "")
+        return key.isEmpty ? nil : key
+    }
+
+    private static func isFullName(_ key: String) -> Bool { key.contains(" ") }
+
+    static func normalized(_ text: String) -> String {
+        text.lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 }
 

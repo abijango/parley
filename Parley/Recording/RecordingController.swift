@@ -788,7 +788,22 @@ final class RecordingController: ObservableObject {
     func setMicInputMode(_ mode: MicInputMode) {
         live.micInputMode = mode
         micCapture?.micInputMode = mode
+        if manifest != nil { manifest?.micInputMode = Self.stickyMicMode(manifest?.micInputMode, mode) }
         AppLog.log("mic input mode → \(mode.rawValue)", category: "audio")
+    }
+
+    /// Room wins for the whole session once it was ever on.
+    nonisolated static func stickyMicMode(_ stored: String?, _ mode: MicInputMode) -> String {
+        stored == MicInputMode.room.rawValue ? MicInputMode.room.rawValue : mode.rawValue
+    }
+
+    /// Invite-list people who have not joined, with their RSVP, from the discovered roster.
+    private func currentInvitees() -> [MeetingInvitee]? {
+        let rows = meeting.roster.invited.compactMap { person -> MeetingInvitee? in
+            guard case .invited(let response) = person.presence else { return nil }
+            return MeetingInvitee(name: person.name.value, response: response)
+        }
+        return rows.isEmpty ? nil : rows
     }
 
     func start(detectionInitiated: Bool = false) async {
@@ -1981,6 +1996,8 @@ final class RecordingController: ObservableObject {
             callBundleID: call?.bundleID, callDisplayName: call?.displayName,
             manualNotes: meeting.manualNotes, attachments: meeting.attachments.isEmpty ? nil : meeting.attachments,
             audioTracks: ["mic.caf", "system.caf"])
+        m.micInputMode = live.micInputMode.rawValue
+        m.invitees = currentInvitees()
         if sessionBatchMode {
             m.fluidAsrProfile = BatchModePolicy.profile(language: settings.liveStreamingLanguage)
             m.batchMode = true
@@ -2004,6 +2021,8 @@ final class RecordingController: ObservableObject {
         }
         m.status = .active
         m.lastHeartbeat = Date()
+        // A legacy manifest has no mode; it may have been Room, so never upgrade it to Regular.
+        if let stored = m.micInputMode { m.micInputMode = Self.stickyMicMode(stored, live.micInputMode) }
         // Resuming makes this a live recording again — clear any offline-queue state so
         // it isn't picked up while recording or double-enqueued (it'll be re-enqueued
         // when this resumed session finally finalizes).
@@ -2028,6 +2047,7 @@ final class RecordingController: ObservableObject {
     /// Refresh the manifest with the latest user-editable metadata + heartbeat
     /// (so a mid-call title/attendee/notes edit survives a crash), or finalize it.
     private func persistManifest(status: SessionManifest.Status) {
+        manifest?.invitees = currentInvitees()
         persistManifest(
             status: status,
             manifest: manifest,
