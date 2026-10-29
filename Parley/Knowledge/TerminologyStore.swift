@@ -44,6 +44,72 @@ struct TerminologyEntry: Equatable, Identifiable, Codable, Sendable {
     }
 }
 
+/// A canonical spelling plus the forms that should be corrected to it, e.g.
+/// `LSEG` ← Elseg, L Seg, LSEC. Stored as one `terminology` row per form; a row whose
+/// `from` equals its `to` records a canonical term with no known mishearings.
+struct GlossaryTerm: Equatable, Sendable {
+    var canonical: String
+    var aliases: [String]
+    var scope: String
+    var notes: [String]
+
+    static func group(_ entries: [TerminologyEntry]) -> [GlossaryTerm] {
+        var order: [String] = []
+        var byKey: [String: GlossaryTerm] = [:]
+        for entry in entries {
+            let canonical = entry.toText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !canonical.isEmpty else { continue }
+            let scope = entry.scope.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = canonical.lowercased() + "\u{1F}" + scope.lowercased()
+            var term = byKey[key] ?? GlossaryTerm(canonical: canonical, aliases: [], scope: scope, notes: [])
+            if byKey[key] == nil { order.append(key) }
+            let from = entry.fromText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !from.isEmpty, from.caseInsensitiveCompare(canonical) != .orderedSame,
+               !term.aliases.contains(where: { $0.caseInsensitiveCompare(from) == .orderedSame }) {
+                term.aliases.append(from)
+            }
+            let note = entry.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !note.isEmpty, !term.notes.contains(note) { term.notes.append(note) }
+            byKey[key] = term
+        }
+        return order.compactMap { byKey[$0] }
+            .sorted { $0.canonical.localizedCaseInsensitiveCompare($1.canonical) == .orderedAscending }
+    }
+
+    /// `Canonical: alias, alias` per line (a bare `Canonical` line is allowed).
+    static func parse(_ text: String) -> [GlossaryTerm] {
+        text.components(separatedBy: .newlines).compactMap { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.hasPrefix("#") else { return nil }
+            let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
+            let canonical = parts[0].trimmingCharacters(in: .whitespaces)
+            guard !canonical.isEmpty else { return nil }
+            let aliases = parts.count > 1
+                ? parts[1].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                : []
+            return GlossaryTerm(canonical: canonical, aliases: aliases, scope: "", notes: [])
+        }
+    }
+
+    var pairs: [(from: String, to: String)] {
+        let forms = aliases.filter { $0.caseInsensitiveCompare(canonical) != .orderedSame }
+        if forms.isEmpty { return [(from: canonical, to: canonical)] }
+        return forms.map { (from: $0, to: canonical) }
+    }
+
+    var editLine: String {
+        aliases.isEmpty ? canonical : "\(canonical): \(aliases.joined(separator: ", "))"
+    }
+
+    var promptLine: String {
+        var line = "- \(canonical)"
+        if !aliases.isEmpty { line += " (also heard as: \(aliases.joined(separator: ", ")))" }
+        if !scope.isEmpty { line += " [only for \(scope)]" }
+        if !notes.isEmpty { line += " — \(notes.joined(separator: "; "))" }
+        return line
+    }
+}
+
 /// CRUD for the `terminology` table.
 final class TerminologyStore: @unchecked Sendable {
     private let db: KnowledgeDatabase
@@ -153,20 +219,39 @@ final class TerminologyStore: @unchecked Sendable {
         }
     }
 
-    /// Bullet list for prompt injection (optionally scoped to a customer).
+    /// Entries grouped by canonical spelling: each canonical term with the misheard or
+    /// alternative forms that should be corrected to it.
+    func glossary(forScope scope: String? = nil) -> [GlossaryTerm] {
+        GlossaryTerm.group(entries(forScope: scope))
+    }
+
+    /// One line per canonical term for `{{glossary}}` / prompt injection.
     func promptBlock(forScope scope: String? = nil) -> String {
-        let rows = entries(forScope: scope)
-        guard !rows.isEmpty else { return "" }
-        return rows.map { entry in
-            var line = "- \"\(entry.fromText)\" → \"\(entry.toText)\""
-            if !entry.scope.isEmpty {
-                line += " [only for \(entry.scope)]"
-            }
-            if !entry.notes.isEmpty {
-                line += " — \(entry.notes)"
-            }
-            return line
-        }.joined(separator: "\n")
+        glossary(forScope: scope).map(\.promptLine).joined(separator: "\n")
+    }
+
+    /// Global (unscoped) glossary as editable text, `Canonical: alias, alias` per line.
+    func globalGlossaryText() -> String {
+        GlossaryTerm.group(all().filter { $0.scope.trimmingCharacters(in: .whitespaces).isEmpty })
+            .map(\.editLine).joined(separator: "\n")
+    }
+
+    /// Replace the global glossary from editor text. Customer-scoped corrections are
+    /// untouched; rows that survive the edit keep their notes and source.
+    func replaceGlobalGlossary(with text: String) {
+        let desired = GlossaryTerm.parse(text).flatMap(\.pairs)
+        let existing = all().filter { $0.scope.trimmingCharacters(in: .whitespaces).isEmpty }
+        func key(_ from: String, _ to: String) -> String { from.lowercased() + "\u{1F}" + to.lowercased() }
+        let desiredKeys = Set(desired.map { key($0.from, $0.to) })
+        let existingKeys = Set(existing.map { key($0.fromText, $0.toText) })
+        for entry in existing where !desiredKeys.contains(key(entry.fromText, entry.toText)) {
+            delete(id: entry.id)
+        }
+        var inserted = Set<String>()
+        for pair in desired where !existingKeys.contains(key(pair.from, pair.to)) {
+            guard inserted.insert(key(pair.from, pair.to)).inserted else { continue }
+            _ = insert(from: pair.from, to: pair.to, source: "glossary")
+        }
     }
 
     /// Derive a customer scope key from a vault filing path.
