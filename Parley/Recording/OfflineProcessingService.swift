@@ -341,8 +341,15 @@ final class OfflineProcessingService: ObservableObject {
                                          sampleEnd: s.sampleEnd, firstLine: s.firstLine,
                                          centroid: centroids[s.id] ?? [])
                 })
+            // The owner is already the "Me" channel, so never guess them for a remote voice.
+            let owner = settings.ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let guessAttendees = eng.labelsMicAsOwner && !owner.isEmpty
+                ? TranscriptWriter.splitAttendees(mergedAttendees)
+                    .filter { $0.caseInsensitiveCompare(owner) != .orderedSame }
+                    .joined(separator: ", ")
+                : mergedAttendees
             SpeakerGuessResolver.applyGuesses(
-                to: &cache, attendees: mergedAttendees, voiceprints: voiceprints,
+                to: &cache, attendees: guessAttendees, voiceprints: voiceprints,
                 identificationThreshold: settings.identificationThreshold)
             cache.write(to: job.sessionDir)
         }
@@ -541,6 +548,12 @@ final class OfflineProcessingService: ObservableObject {
         eng.onSpeakerIdentified = onIdentified
         eng.sessionAttendees = job.attendees
         eng.sessionMeetingTitle = job.title
+        eng.sessionGlossaryTerms = TerminologyStore()
+            .glossary(forScope: TerminologyStore.customerScope(fromFiling: job.filing))
+            .map(\.canonical)
+        // Room sessions, and legacy sessions with no recorded mode, keep full diarization.
+        eng.micIsOwner = settings.micIsOwnerOnCalls
+            && SessionStore.read(job.sessionDir)?.micIsOwner == true
         eng.asrProfile = job.fluidAsrProfile
         eng.mixedAudioURL = archives.mixed
         eng.micArchiveURL = archives.mic

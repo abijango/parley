@@ -8,8 +8,8 @@ struct TranscriptItem: Identifiable, Equatable {
     let url: URL
     var meta: TranscriptMeta
     var isProcessed: Bool
-    /// The transcript still has generic, unnamed speaker labels ("Speaker N" / "Me" /
-    /// "Remote") — i.e. speakers haven't been assigned yet. Drives the History badge.
+    /// The transcript still has generic, unnamed speaker labels ("Speaker N" / "Remote")
+    /// — i.e. speakers haven't been assigned yet. Drives the History badge.
     var hasUnnamedSpeakers: Bool = false
     /// Preferred staged summary for review (current backend if present, else any).
     /// Non-nil ⇒ show the review pane in History. Cleared on commit/discard.
@@ -444,8 +444,10 @@ final class TranscriptStore: ObservableObject {
     }
 
     /// Whether a transcript body still carries generic (unassigned) speaker labels.
+    /// "Me" is the recording owner, not an unknown voice: remote calls label the mic
+    /// channel "Me" on purpose, and the summary maps it to `{{me}}`.
     nonisolated static func hasGenericSpeakerLabels(_ text: String) -> Bool {
-        text.contains("] Speaker ") || text.contains("] Me:") || text.contains("] Remote:")
+        text.contains("] Speaker ") || text.contains("] Remote:")
     }
 
     /// Re-read a transcript file and report whether it still has generic speaker labels.

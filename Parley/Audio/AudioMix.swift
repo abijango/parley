@@ -56,16 +56,23 @@ enum AudioMix {
         var out = [Float](repeating: 0, count: n)
         for i in 0..<m.count { out[i] += m[i] }
         for i in 0..<s.count { out[i] += s[i] }
-        var peak: Float = 0
-        for v in out { peak = max(peak, abs(v)) }
-        if peak > 0.0001 {
-            let gain = min(20, 0.7 / peak)
-            if gain > 1 { for i in 0..<n { out[i] *= gain } }
-        }
-        for i in 0..<n { out[i] = max(-1, min(1, out[i])) }
+        peakNormalize(&out)
         guard let buffer = makeBuffer(out),
               let file = try? AVAudioFile(forWriting: output, settings: mixFileSettings) else { return false }
         do { try file.write(from: buffer); return true } catch { return false }
+    }
+
+    /// Lift quiet audio to ~-3 dBFS peak (gain capped at 20× so near-silence isn't
+    /// amplified into noise), then clamp. The diarizer's speech detection starves on
+    /// quiet input.
+    static func peakNormalize(_ samples: inout [Float]) {
+        var peak: Float = 0
+        for v in samples { peak = max(peak, abs(v)) }
+        if peak > 0.0001 {
+            let gain = min(20, 0.7 / peak)
+            if gain > 1 { for i in samples.indices { samples[i] *= gain } }
+        }
+        for i in samples.indices { samples[i] = max(-1, min(1, samples[i])) }
     }
 
     /// `mixed.caf` on-disk format: Int16 LPCM (half the Float32 size, inaudible for

@@ -249,9 +249,12 @@ enum FluidVocabularyBuilder {
         }
     }
 
-    /// Attendee names + title tokens (when boosting is enabled and terms exist).
-    static func build(attendees: String, meetingTitle: String, enabled: Bool) -> [CustomVocabularyTerm] {
-        candidates(attendees: attendees, meetingTitle: meetingTitle, enabled: enabled)
+    /// Attendee names, glossary canonical terms, and title tokens (when boosting is
+    /// enabled and terms exist). Glossary terms go through the same tiers as names, so a
+    /// short or ordinary single word is held back exactly like a title word.
+    static func build(attendees: String, meetingTitle: String, glossary: [String] = [],
+                      enabled: Bool) -> [CustomVocabularyTerm] {
+        candidates(attendees: attendees, meetingTitle: meetingTitle, glossary: glossary, enabled: enabled)
             .compactMap { candidate in
                 switch candidate.tier {
                 case .fullName:
@@ -269,7 +272,7 @@ enum FluidVocabularyBuilder {
     /// The same derivation as `build`, but keeping the rejects and the reason they
     /// were rejected. Drives the Settings preview.
     static func candidates(
-        attendees: String, meetingTitle: String, enabled: Bool
+        attendees: String, meetingTitle: String, glossary: [String] = [], enabled: Bool
     ) -> [Candidate] {
         guard enabled else { return [] }
         var seen = Set<String>()
@@ -315,6 +318,9 @@ enum FluidVocabularyBuilder {
             for part in name.split(whereSeparator: { $0.isWhitespace }) {
                 consider(String(part), fromTitle: false)
             }
+        }
+        for term in glossary {
+            consider(term, fromTitle: false)
         }
         for word in meetingTitle.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
             consider(String(word), fromTitle: true)

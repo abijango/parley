@@ -53,6 +53,11 @@ final class FluidAudioEngine {
     /// Meeting metadata for custom vocabulary (set before `start()`).
     var sessionAttendees = ""
     var sessionMeetingTitle = ""
+    /// Canonical glossary terms for this meeting's scope, boosted like attendee names.
+    var sessionGlossaryTerms: [String] = []
+    /// Remote call recorded in Regular mode: the offline pass attributes mic speech to
+    /// the owner ("Me") and diarizes only the system track. Never set for Room mode.
+    var micIsOwner = false
     /// ASR stack for this engine instance. Offline jobs set this from the session
     /// snapshot so a later Settings change cannot retarget the re-pass.
     var asrProfile: FluidAsrProfile?
@@ -830,7 +835,9 @@ final class FluidAudioEngine {
         let terms = FluidVocabularyBuilder.build(
             attendees: sessionAttendees,
             meetingTitle: sessionMeetingTitle,
+            glossary: sessionGlossaryTerms,
             enabled: settings.boostAttendeeNames)
+        let splitChannels = micIsOwner
         if FluidVocabularyPolicy.shouldLoad(enabled: settings.boostAttendeeNames, terms: terms),
            let loaded = await FluidVocabularyBuilder.loadContext(terms: terms) {
             vocab = loaded.0
@@ -858,7 +865,12 @@ final class FluidAudioEngine {
             // Plain whole-file diarization with library-default segmentation — the
             // behavior that separated speakers reliably. No forced re-clustering.
             var segs: [Seg]?
-            if let diar = try? await Self.makeDiarizer(clusterThreshold: threshold),
+            var selfTurns: [ChannelAttribution.Interval] = []
+            if splitChannels,
+               let split = await Self.remoteOnlyDiarization(mic: mic, system: sys, threshold: threshold) {
+                segs = split.remote
+                selfTurns = split.selfTurns
+            } else if let diar = try? await Self.makeDiarizer(clusterThreshold: threshold),
                let result = try? diar.performCompleteDiarization(samples, sampleRate: 16_000) {
                 let mapped = result.segments.map {
                     Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
@@ -869,7 +881,7 @@ final class FluidAudioEngine {
             } else {
                 AppLog.log("finalizeDiarization: diarization unavailable (init or run failed)", category: "record")
             }
-            if Task.isCancelled { return OfflinePassResult(segs: segs, tokens: nil) }
+            if Task.isCancelled { return OfflinePassResult(segs: segs, tokens: nil, selfTurns: selfTurns) }
             // Higher-accuracy offline transcript (full-context batch Parakeet).
             let tokens: [TokTiming]?
             if doAsr {
@@ -884,7 +896,7 @@ final class FluidAudioEngine {
             } else {
                 tokens = nil
             }
-            return OfflinePassResult(segs: segs, tokens: tokens)
+            return OfflinePassResult(segs: segs, tokens: tokens, selfTurns: selfTurns)
         }
 
         // Apply the offline transcript first (replaces the streaming units), so the
@@ -908,7 +920,15 @@ final class FluidAudioEngine {
                                    note: "Offline pass: kept live labels · \(n) speaker\(n == 1 ? "" : "s")\(suffix)")
         }
         // Time-ordered so the diarization-first attribution scans turns in order.
-        diarSegments = segs.map { ($0.id, $0.start, $0.end) }.sorted { $0.start < $1.start }
+        if pass.selfTurns.isEmpty {
+            diarSegments = segs.map { ($0.id, $0.start, $0.end) }.sorted { $0.start < $1.start }
+        } else {
+            diarSegments = ChannelAttribution.merge(
+                selfTurns: pass.selfTurns,
+                remote: segs.map { ChannelAttribution.Turn(speakerId: $0.id, start: $0.start, end: $0.end) }
+            ).map { ($0.speakerId, $0.start, $0.end) }
+            resolvedNames[ChannelAttribution.selfSpeakerId] = ChannelAttribution.selfLabel
+        }
         compactDiarSegments()
         speakerAliases = [:]   // live merges referred to the old cluster ids
         invalidateDerivedCache()
@@ -925,10 +945,46 @@ final class FluidAudioEngine {
         await backfillClips()
         let n = Set(segs.map(\.id)).count
         let elapsed = Date().timeIntervalSince(startedAt)
-        let repassNote = repassed ? " · transcript re-passed" : ""
-        AppLog.log("FluidAudio final diarization: \(n) speaker(s)\(repassed ? " + offline ASR re-pass" : "") in \(String(format: "%.1fs", elapsed))", category: "record")
+        let repassNote = (repassed ? " · transcript re-passed" : "")
+            + (pass.selfTurns.isEmpty ? "" : " · your mic labelled \(ChannelAttribution.selfLabel)")
+        AppLog.log("FluidAudio final diarization: \(n) speaker(s)\(repassed ? " + offline ASR re-pass" : "")\(pass.selfTurns.isEmpty ? "" : " + \(pass.selfTurns.count) mic turn(s) as Me") in \(String(format: "%.1fs", elapsed))", category: "record")
         return FinalizeSummary(speakerCount: n, relabeled: true,
                                note: "Offline Speaker Detection complete · \(n) speaker\(n == 1 ? "" : "s")\(repassNote) · \(String(format: "%.1fs", elapsed))")
+    }
+
+    /// Remote call: the owner's turns from mic energy, and diarization of the system
+    /// track alone. Nil — fall back to whole-mix diarization — when either track is
+    /// missing, the system track has too little speech to be a remote call (an
+    /// in-person meeting left in Regular mode), or diarizing it fails.
+    nonisolated private static func remoteOnlyDiarization(
+        mic: URL?, system: URL?, threshold: Float
+    ) async -> (remote: [Seg], selfTurns: [ChannelAttribution.Interval])? {
+        guard let mic, let system,
+              FileManager.default.fileExists(atPath: mic.path),
+              FileManager.default.fileExists(atPath: system.path) else { return nil }
+        let converter = AudioConverter()
+        guard let micEnvelope = (try? converter.resampleAudioFile(mic)).map({ ChannelAttribution.envelope($0) }),
+              var systemSamples = try? converter.resampleAudioFile(system), !systemSamples.isEmpty
+        else { return nil }
+        let systemEnvelope = ChannelAttribution.envelope(systemSamples)
+        guard ChannelAttribution.systemHasSpeech(systemEnvelope) else {
+            AppLog.log("finalize: system track has too little speech for a remote call — diarizing the whole mix", category: "record")
+            return nil
+        }
+        let selfTurns = ChannelAttribution.selfTurns(mic: micEnvelope, system: systemEnvelope)
+        AudioMix.peakNormalize(&systemSamples)
+        guard let diar = try? await makeDiarizer(clusterThreshold: threshold),
+              let result = try? diar.performCompleteDiarization(systemSamples, sampleRate: 16_000),
+              !result.segments.isEmpty else {
+            AppLog.log("finalize: system-track diarization returned nothing — diarizing the whole mix", category: "record")
+            return nil
+        }
+        let remote = result.segments.map {
+            Seg(id: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
+                end: TimeInterval($0.endTimeSeconds), emb: $0.embedding, q: $0.qualityScore)
+        }
+        AppLog.log("finalize: remote-only diar \(speakerBreakdown(remote)) | sims \(clusterSimilarityLog(remote)) | \(selfTurns.count) mic turn(s) as Me", category: "record")
+        return (remote, selfTurns)
     }
 
     func runOfflinePass() async -> OfflinePassSummary {
@@ -938,7 +994,11 @@ final class FluidAudioEngine {
 
     private struct Seg: Sendable { let id: String; let start: TimeInterval; let end: TimeInterval; let emb: [Float]; let q: Float }
     private struct TokTiming: Sendable { let text: String; let start: TimeInterval; let end: TimeInterval }
-    private struct OfflinePassResult: Sendable { let segs: [Seg]?; let tokens: [TokTiming]? }
+    private struct OfflinePassResult: Sendable {
+        let segs: [Seg]?
+        let tokens: [TokTiming]?
+        var selfTurns: [ChannelAttribution.Interval] = []
+    }
 
     /// Batch Parakeet TDT. `AsrManager` has no `configureVocabularyBoosting`;
     /// `VocabularyBoostingSession` is the library's post-pass for this engine.
@@ -1182,12 +1242,16 @@ final class FluidAudioEngine {
 
     // MARK: - Speaker naming (Phase 5)
 
+    /// Diarized speakers to name. The owner's mic channel is already "Me" and has no
+    /// embedding to enrol, so it is never offered for naming.
     func callSpeakerIds() -> [String] {
         var seen = Set<String>()
-        for d in diarSegments { seen.insert(d.speakerId) }
+        for d in diarSegments where d.speakerId != ChannelAttribution.selfSpeakerId { seen.insert(d.speakerId) }
         return seen.sorted()
     }
     func resolvedName(for id: String) -> String? { resolvedNames[id] }
+    /// The final pass split the channels: mic speech is labelled "Me".
+    var labelsMicAsOwner: Bool { diarSegments.contains { $0.speakerId == ChannelAttribution.selfSpeakerId } }
     func gatedSeconds(for id: String) -> TimeInterval { speakerGatedSeconds[id] ?? 0 }
 
     /// Per-speaker centroids built from quality-gated embeddings (same rule as
@@ -1289,7 +1353,7 @@ final class FluidAudioEngine {
     /// you hear matches the line you see.
     func speakerSummaries() -> [CallSpeakerSummary] {
         var byId: [String: [Segment]] = [:]
-        for s in finalTimeline() where s.speakerId != nil {
+        for s in finalTimeline() where s.speakerId != nil && s.speakerId != ChannelAttribution.selfSpeakerId {
             byId[s.speakerId!, default: []].append(s)
         }
         return byId.keys.sorted().map { id in
