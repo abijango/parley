@@ -374,10 +374,10 @@ final class AppSettings: ObservableObject {
     @AppStorage(Key.parakeetVersion) var parakeetVersionRaw: String = FluidParakeetVersion.v3.rawValue
     /// FluidAudio live streaming ASR: chunk-size tier (ms) + language hint. 560 ms
     /// is the lowest-latency multilingual tier; "auto" uses the full-vocab model
-    /// (covers zh/ja). Only affects the in-session live transcript — the final
-    /// transcript is the offline TDT v3 re-pass.
+    /// (covers zh/ja). Defaults to English so Parakeet Unified is the out-of-the-box
+    /// model; any other language falls back to Nemotron + TDT v3.
     @AppStorage(Key.liveStreamingTier) var liveStreamingTierRaw: Int = FluidStreamingTier.ms2240.rawValue
-    @AppStorage(Key.liveStreamingLanguage) var liveStreamingLanguage: String = "auto"
+    @AppStorage(Key.liveStreamingLanguage) var liveStreamingLanguage: String = "en-US"
     /// FluidAudio in-session diarization clustering threshold (lower = more speakers /
     /// more sensitive; higher = merges similar voices). Default 0.6 — the library's
     /// 0.7 over-merges distinct speakers in practice.

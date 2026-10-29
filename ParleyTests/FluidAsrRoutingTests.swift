@@ -10,6 +10,21 @@ private enum FluidAsrRoutingTestSupport {
 
 @MainActor
 final class FluidAsrRoutingTests: XCTestCase {
+    /// The test host is the app itself, so `AppSettings.shared` writes the user's
+    /// real defaults. Restore them, or every test run flips the ASR model choice.
+    private var savedUseUnified = true
+    private var savedLanguage = ""
+
+    override func setUp() async throws {
+        savedUseUnified = AppSettings.shared.useParakeetUnified
+        savedLanguage = AppSettings.shared.liveStreamingLanguage
+    }
+
+    override func tearDown() async throws {
+        AppSettings.shared.useParakeetUnified = savedUseUnified
+        AppSettings.shared.liveStreamingLanguage = savedLanguage
+    }
+
     func testEnglishLanguageDetection() {
         XCTAssertTrue(FluidAsrRouting.isEnglishStreamingLanguage("en-US"))
         XCTAssertTrue(FluidAsrRouting.isEnglishStreamingLanguage("en-GB"))
